@@ -1,6 +1,6 @@
 # Cargo Target Latest-Only GC Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Implement task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Prefer `docs/specs/templates/plan.md` for new plans.
 
 **Goal:** On desktop:dev exit and desktop:build end, prune Cargo target caches so only the latest useful artifacts remain for the active profile.
 

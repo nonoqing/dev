@@ -1,10 +1,10 @@
 # BitFun Core 拆解与运行时迁移计划
 
 本文件只维护 Core 边界债务、迁移顺序和退出条件。稳定架构以
-[产品运行时架构](../architecture/product-architecture.md)为准；Agent Runtime、产品定制和 OpenCode 扩展分别由
-[运行时设计](../architecture/agent-runtime-services-design.md)、
-[产品定制设计](../architecture/product-customization-blueprint.md)和
-[OpenCode 扩展兼容设计](../architecture/extensions/opencode-extension-compatibility.md)负责；OpenCode 交付阶段与
+[产品运行时架构](../../architecture/product-architecture.md)为准；Agent Runtime、产品定制和 OpenCode 扩展分别由
+[运行时设计](../../architecture/agent-runtime-services-design.md)、
+[产品定制设计](../../architecture/product-customization-blueprint.md)和
+[OpenCode 扩展兼容设计](../../architecture/extensions/opencode-extension-compatibility.md)负责；OpenCode 交付阶段与
 退出条件见[扩展兼容计划](opencode-extension-compatibility-plan.md)。已完成事实归档在
 [core-decomposition-completed.md](core-decomposition-completed.md)。
 

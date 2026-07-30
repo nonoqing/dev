@@ -1,6 +1,6 @@
 # Desktop Window Fullscreen Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Implement task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Prefer `docs/specs/templates/plan.md` for new plans.
 
 **Goal:** Add OS-level fullscreen support for the BitFun Desktop main window without changing maximize, panel fullscreen, CLI/TUI rendering, or product runtime logic.
 

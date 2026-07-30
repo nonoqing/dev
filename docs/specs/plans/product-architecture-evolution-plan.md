@@ -1,11 +1,11 @@
 # BitFun 产品架构演进计划
 
 本文把现有架构债务整理为可独立验收的工作流。稳定边界见
-[产品运行时架构](../architecture/product-architecture.md)，专项细节见
-[Core 迁移](core-decomposition-plan.md)、[CLI/TUI](../architecture/cli-product-line-design.md)、
-[HarmonyOS PC 平台规约](../architecture/platform-portability-design.md)和
+[产品运行时架构](../../architecture/product-architecture.md)，专项细节见
+[Core 迁移](core-decomposition-plan.md)、[CLI/TUI](../../architecture/cli-product-line-design.md)、
+[HarmonyOS PC 平台规约](../../architecture/platform-portability-design.md)和
 [OpenCode 兼容](opencode-extension-compatibility-plan.md)；能力 Provider、SDK 和外部宿主双向集成边界见
-[能力装配与宿主集成](../architecture/extensions/capability-runtime-integration-design.md)。专项文档不能用自己的阶段编号扩大本计划范围。
+[能力装配与宿主集成](../../architecture/extensions/capability-runtime-integration-design.md)。专项文档不能用自己的阶段编号扩大本计划范围。
 
 本文所在提交记录本轮实现事实。后续事实变化必须随代码显式更新，只有代码、入口消费和对应验证同时成立的项目才标记为完成；
 不在长期计划中固定易失效的上游提交号。
@@ -81,7 +81,7 @@ Help/dispatch 元数据；终端异常路径仍能恢复。
 ## 5. 工作流三：HarmonyOS PC 专题占位
 
 本计划不设计或排期 HarmonyOS PC 实现。目标、问题、风险、旧设计闭环和禁止替代项统一见
-[HarmonyOS PC 平台规约](../architecture/platform-portability-design.md)；具体工作后续分别立项，现有手机 Remote
+[HarmonyOS PC 平台规约](../../architecture/platform-portability-design.md)；具体工作后续分别立项，现有手机 Remote
 App 保持不变。
 
 ## 6. 工作流四：OpenCode 纵向切片与稳定性收敛

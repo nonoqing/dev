@@ -1,6 +1,6 @@
 # CLI Peer Host Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Implement task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Prefer `docs/specs/templates/plan.md` for new plans.
 
 **Goal:** Make BitFun CLI a full Peer Device Mode host so Desktop A can control CLI B via HostInvoke / DeviceEvent.
 
@@ -12,7 +12,7 @@
 
 ### Task 1: Spec + envelope routing — DONE
 
-- [x] Spec under `docs/superpowers/specs/2026-07-14-cli-peer-host.md`
+- [x] Spec under `docs/specs/2026-07-14-cli-peer-host.md`
 - [x] `account.rs` routes HostInvoke / DeviceEvent; reply target `"rpc"` for HTTP RPC
 
 ### Task 2: Control plane + deny tables — DONE

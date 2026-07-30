@@ -10,7 +10,7 @@
 
 ## Tasks
 
-- [x] Spec: `docs/superpowers/specs/2026-07-21-subscription-auth-as-model-api-design.md`
+- [x] Spec: `docs/specs/2026-07-21-subscription-auth-as-model-api-design.md`
 - [x] Replace `cli_credentials` with `subscription_auth` (store, oauth, providers)
 - [x] Wire `AuthConfig`, client_factory, desktop commands, remote policy
 - [x] Replace Web UI CLI scan section with subscription login panel + i18n

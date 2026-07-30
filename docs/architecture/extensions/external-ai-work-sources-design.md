@@ -595,4 +595,4 @@ Command；明确缺失且未被标记失败的 Command 是稳定删除。产品�
 
 具体 OpenCode 能力范围和近期顺序分别见
 [`opencode-extension-compatibility.md`](opencode-extension-compatibility.md)和
-[`../../plans/opencode-extension-compatibility-plan.md`](../../plans/opencode-extension-compatibility-plan.md)。
+[`../../specs/plans/opencode-extension-compatibility-plan.md`](../../specs/plans/opencode-extension-compatibility-plan.md)。

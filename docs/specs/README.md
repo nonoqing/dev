@@ -1,0 +1,140 @@
+# Specs：需求规格、设计与实施计划
+
+> 范围：BitFun 代码仓内的 Spec / Design / Plan / 收尾记录。  
+> 用途：本目录入口——索引、命名、流程与边界。细则写在各文档与 [`templates/`](templates/)。  
+> 状态：stable（已合并原 `ade-spec` / `features` / `plans` / `superpowers`）  
+> 权威语言：中文（本文件）。英文操作约束见根 `AGENTS` 与 [`docs/development/`](../development/)。  
+> 文档规范：[`docs/development/docs-governance-CN.md`](../development/docs-governance-CN.md)
+
+## 与其它文档夹的分工
+
+| 文档夹 | 角色 | 与 specs 的关系 |
+|---|---|---|
+| `docs/architecture` | 稳定架构边界与设计 | 设计稳定后迁入或链回此处；冲突时以 architecture 为准 |
+| `docs/specs/plans/` | 跨模块、长周期实施计划 | 本目录子树；单需求计划也可写在同篇 Spec 内 |
+| `docs/specs/`（根下单篇） | 进行中需求 + 已稳定单特性设计 | 用索引**状态列**区分，不拆 stable/wip 子目录 |
+| `docs/sdlc-harness` | 目标项目质量治理与证据 | 需要阶段门禁/证据时引用 |
+
+稳定结论须迁入 architecture 或在本索引标为 `stable`/`completed`，避免第二套权威源。
+
+## 命名
+
+- `draft-<topic>.md`：讨论中，可推翻
+- `<YYYY-MM-DD>-<topic>.md`：已确认可实施
+- `completed-<topic>.md`：已交付，存档回溯
+- 跨模块计划：优先 `plans/<topic>-plan.md` 或沿用现有 `*-plan.md` / `*-completed.md`
+- 文件名英文 kebab-case；正文可用中文
+
+## 索引
+
+| Topic | Status | Path | One-liner |
+|---|---|---|---|
+| Session runtime usage report | stable | [`session-runtime-usage-report-design.md`](session-runtime-usage-report-design.md) | `/usage` 与桌面会话用量报告 |
+| Remote workspaces | stable | [`remote-workspaces.md`](remote-workspaces.md) | 远程工作区能力说明 |
+| CLI peer host | completed | [`2026-07-14-cli-peer-host.md`](2026-07-14-cli-peer-host.md) / [`plans/2026-07-14-cli-peer-host-plan.md`](plans/2026-07-14-cli-peer-host-plan.md) | CLI 作为 Peer Device Mode host |
+| CLI login TUI | in-progress | [`2026-07-14-cli-login-tui-design.md`](2026-07-14-cli-login-tui-design.md) / [`plans/2026-07-14-cli-login-tui-plan.md`](plans/2026-07-14-cli-login-tui-plan.md) | CLI ratatui 登录页 |
+| CLI account sync panel | stable | [`2026-07-14-cli-account-sync-panel-design.md`](2026-07-14-cli-account-sync-panel-design.md) | CLI 账号同步面板 |
+| Mobile-web login / device switch | stable | [`2026-07-16-mobile-web-login-device-switch-design.md`](2026-07-16-mobile-web-login-device-switch-design.md) | Mobile-web 账号接续与设备切换 |
+| Relay deploy log / docker cache | stable | [`2026-07-19-relay-deploy-log-and-docker-cache-design.md`](2026-07-19-relay-deploy-log-and-docker-cache-design.md) | Relay 部署日志与 Docker 缓存 |
+| Desktop streaming typewriter | stable | [`2026-07-20-desktop-streaming-typewriter-design.md`](2026-07-20-desktop-streaming-typewriter-design.md) | 桌面流式打字机效果 |
+| Mobile-web pairing / device refresh | stable | [`2026-07-20-mobile-web-account-pairing-and-device-refresh-design.md`](2026-07-20-mobile-web-account-pairing-and-device-refresh-design.md) | Mobile-web 配对与设备刷新 |
+| Subscription auth as model API | in-progress | [`2026-07-21-subscription-auth-as-model-api-design.md`](2026-07-21-subscription-auth-as-model-api-design.md) / [`plans/2026-07-21-subscription-auth-as-model-api.md`](plans/2026-07-21-subscription-auth-as-model-api.md) | 订阅鉴权作为模型 API |
+| Cargo target latest-only GC | in-progress | [`2026-07-22-cargo-target-latest-only-gc-design.md`](2026-07-22-cargo-target-latest-only-gc-design.md) / [`plans/2026-07-22-cargo-target-latest-only-gc.md`](plans/2026-07-22-cargo-target-latest-only-gc.md) | Cargo target 仅保留最新 GC |
+| Mobile-web resume / autoreconnect | stable | [`2026-07-22-mobile-web-resume-card-and-autoreconnect-design.md`](2026-07-22-mobile-web-resume-card-and-autoreconnect-design.md) | Mobile-web 恢复卡片与自动重连 |
+| Relay deploy CN mirrors | stable | [`2026-07-24-relay-deploy-cn-mirrors-design.md`](2026-07-24-relay-deploy-cn-mirrors-design.md) | Relay 部署国内镜像 |
+| FlowChat collapse smoothness | stable | [`2026-07-28-flowchat-collapse-smoothness-design.md`](2026-07-28-flowchat-collapse-smoothness-design.md) | FlowChat 折叠动画流畅性 |
+| Agent hooks | stable | [`agent-hooks.md`](agent-hooks.md) / [`agent-hooks.zh-CN.md`](agent-hooks.zh-CN.md) | Agent Hooks 能力说明 |
+| Product architecture evolution | in-progress | [`plans/product-architecture-evolution-plan.md`](plans/product-architecture-evolution-plan.md) | 产品运行时架构演进总计划 |
+| Core decomposition | completed | [`plans/core-decomposition-plan.md`](plans/core-decomposition-plan.md) / [`plans/core-decomposition-completed.md`](plans/core-decomposition-completed.md) | Core 拆分计划与完成归档 |
+| OpenCode extension compatibility | in-progress | [`plans/opencode-extension-compatibility-plan.md`](plans/opencode-extension-compatibility-plan.md) | OpenCode 扩展兼容交付阶段 |
+| Desktop window fullscreen | in-progress | [`plans/desktop-window-fullscreen-plan.md`](plans/desktop-window-fullscreen-plan.md) | 桌面主窗口系统全屏 |
+| Edit constraint guard | in-progress | [`plans/edit-constraint-guard-plan.md`](plans/edit-constraint-guard-plan.md) | 编辑约束护栏 |
+| Computer use refactor | in-progress | [`plans/computer-use-refactor-plan.md`](plans/computer-use-refactor-plan.md) | Computer Use 重构计划 |
+
+状态含义：`draft` / `in-progress` = 可改；`stable` = 已交付仍约束实现；`completed` = 仅存档。
+
+## 开发指导流程
+
+```text
+0 Intake → 1 调研与边界 → 2 设计 → 3 计划 → 4 实现 → 5 验证 → 6 收尾
+```
+
+低风险小改动可走文末「最小流程」。安全/凭据/网络/数据迁移/发布相关必须走全流程。  
+写新文档时拷贝 [`templates/`](templates/)。
+
+### 阶段 0：需求登记（Intake）
+
+产物：`draft-<topic>.md`（可用 [`templates/feature-spec.md`](templates/feature-spec.md)）。
+
+最小字段：背景、目标、范围（含不做）、涉及面（层与产品面）、风险初判（安全/凭据/网络/迁移/发布/远程/i18n/主题）。
+
+退出：目标与范围可一句话复述，且已点出明显风险面。
+
+### 阶段 1：调研与边界确认
+
+在 draft 中增补调研结论、根因、边界。
+
+必读（按受影响层取最近 `AGENTS.md`）：
+
+- 仓库根 [`AGENTS.md`](../../AGENTS.md)
+- 受影响层最近 `AGENTS.md`
+- 架构敏感：[`docs/architecture/product-architecture.md`](../architecture/product-architecture.md)
+- CLI/TUI：`docs/architecture/cli-product-line-design.md`、`src/apps/cli/AGENTS.md`
+- HarmonyOS PC 目标：`docs/architecture/platform-portability-design.md`
+- SDLC/证据：先 `docs/sdlc-harness/README.md` 再 `design.md`
+
+退出：根因可解释、层归属明确、安全/远程/i18n/主题风险已列出。
+
+### 阶段 2：设计（Design）
+
+产物：升级为 `<YYYY-MM-DD>-<topic>.md`，或补充 [`templates/design.md`](templates/design.md)。
+
+建议含：方案（数据流、命令/响应、端口归属）、状态模型、远程兼容、失败/取消/部分成功、i18n 与主题、安全、测试方法。
+
+退出：方案已确认，且与 `docs/architecture` 无冲突（或已在文中写明经批准的偏离）。
+
+### 阶段 3：实施计划（Plan）
+
+产物：同篇「实施计划」节，或 [`templates/plan.md`](templates/plan.md) / `plans/` 下独立文件。
+
+```markdown
+### Milestone 1：<切片名>
+Risk: <Low/Medium/High>。<一句理由>。
+- [ ] <任务>。Risk: <Low/Medium/High>。
+```
+
+每任务可独立验证、可独立回滚；验证链 [`docs/development/verification.md`](../development/verification.md)。
+
+退出：第三人/子代理可不追问执行。
+
+### 阶段 4：实现（Implementation）
+
+遵守现网根 `AGENTS.md` 与就近模块 `AGENTS.md`。不要把全局准则整段复制进每篇 Spec。
+
+### 阶段 5：验证（Verification）
+
+按 [`docs/development/verification.md`](../development/verification.md)（中文：[`verification-CN.md`](../development/verification-CN.md)）选**最小**本地预检；CI 负责宽套件。
+
+### 阶段 6：收尾（Closeout）
+
+产物：`completed-<topic>.md`（或索引状态改为 `completed`），追加结果、权威文档迁移、遗留。
+
+退出：权威已更新或显式「无需迁移」；本夹不留第二权威源。
+
+## 最小流程（低风险）
+
+不触碰安全/凭据/网络/数据迁移/发布/远程/i18n/主题时：
+
+1. 一句话目标与范围  
+2. 跳过独立设计稿，方案写在任务行  
+3. 实现 → 对应最小验证 → 一句话收尾  
+
+## 对齐规则
+
+- 本夹文档为开发期工作件（`stable` 设计除外仍约束实现，但架构权威在 `architecture/`）。
+- 与更近 `AGENTS.md` 冲突 → 更近为准。
+- 与 `docs/architecture` 冲突 → architecture 为准；偏离须写在 Spec/Design 内。
+
+## 历史合并
+
+原 `docs/ade-spec/`、`docs/features/`、`docs/plans/`、`docs/superpowers/` 已并入本目录（旧路径已删除，勿再引用）。

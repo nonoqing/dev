@@ -7,7 +7,7 @@
 [`plugin-runtime-design.md`](extensions/plugin-runtime-design.md)；跨 GUI/TUI 的产品定制、品牌资源、界面
 布局选择和内置扩展见 [`product-customization-blueprint.md`](product-customization-blueprint.md)；HarmonyOS PC 原生
 CLI/TUI 的目标、问题和风险规约见 [`platform-portability-design.md`](platform-portability-design.md)；跨专题顺序见
-[`../plans/product-architecture-evolution-plan.md`](../plans/product-architecture-evolution-plan.md)。本文只补充
+[`../specs/plans/product-architecture-evolution-plan.md`](../specs/plans/product-architecture-evolution-plan.md)。本文只补充
 CLI 产品入口、配置兼容、TUI 布局消费和 CLI Agent 体验，不重复定义这些文档中的通用契约或内部 ABI。公开
 BitFun Agent SDK 与 Headless CLI 的产品选择、能力一致性和 SDK Host 边界见
 [`agent-sdk-product-architecture.md`](agent-sdk-product-architecture.md)；多个 GUI/TUI/Remote/CLI 实例并存时，交互式 TUI
