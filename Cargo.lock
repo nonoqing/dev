@@ -909,6 +909,7 @@ dependencies = [
  "dirs 6.0.0",
  "dunce",
  "flate2",
+ "fs2",
  "futures-util",
  "hex",
  "libc",
@@ -1272,6 +1273,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "url",
  "which 8.0.5",
 ]
 
@@ -1423,6 +1425,7 @@ dependencies = [
  "flate2",
  "fs2",
  "git2",
+ "globset",
  "ignore",
  "libc",
  "log",

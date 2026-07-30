@@ -28,7 +28,8 @@ use crate::actions::{
     removed_management_command_hint, slash_actions, ActionContext, ActionHandler, ActionSpec,
     ActionState, ResolvedKeymap, SHARED_TUI_EMBEDDED_HANDOFF, SHARED_TUI_HELP_NOTE,
 };
-use crate::agent::runtime_client::CliAgentRuntimeClient;
+use crate::agent::context_reload_client::CliContextReloadClient;
+use crate::agent::runtime_client::{CliAgentRuntimeClient, SessionOperationError};
 use crate::chat_state::ChatState;
 use crate::config::CliConfig;
 use crate::ui::agent_selector::{AgentItem, AgentSelectorAction};
@@ -167,16 +168,53 @@ enum PendingMcpTask {
     },
 }
 
-struct PendingModeChange {
+enum PendingSessionOperationKind {
+    Mode {
+        mode_id: String,
+    },
+    Model {
+        model_id: String,
+        display_name: String,
+    },
+    Rename {
+        session_name: String,
+    },
+    Delete {
+        session_name: String,
+    },
+}
+
+impl PendingSessionOperationKind {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Mode { .. } => "agent mode",
+            Self::Model { .. } => "model",
+            Self::Rename { .. } => "name",
+            Self::Delete { .. } => "deletion",
+        }
+    }
+
+    fn selected_id(&self) -> &str {
+        match self {
+            Self::Mode { mode_id } => mode_id,
+            Self::Model { model_id, .. } => model_id,
+            Self::Rename { session_name } => session_name,
+            Self::Delete { session_name } => session_name,
+        }
+    }
+}
+
+struct PendingSessionOperation {
     session_id: String,
-    mode_id: String,
+    kind: PendingSessionOperationKind,
     started_at: Instant,
     slow_notice_shown: bool,
     exit_warning_shown: bool,
-    handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+    handle: tokio::task::JoinHandle<std::result::Result<(), SessionOperationError>>,
 }
 
-const MODE_CHANGE_SLOW_NOTICE: Duration = Duration::from_secs(15);
+const SESSION_OPERATION_SLOW_NOTICE: Duration = Duration::from_secs(15);
+const SHARED_TUI_CHAT_STATUS: &str = "Shared TUI preview: this view controls sessions, including deleting an idle Session, turns, the current Session name, current Session Agent mode, current Session model, and declarative context via /reload [skills|instructions]; model management remains Embedded, along with local extension, MCP, account-sync, and Agent/Subagent management.";
 
 #[derive(Default)]
 struct NonKeyEventOutcome {
@@ -201,6 +239,7 @@ pub(crate) struct ChatMode {
     agent_type: String,
     workspace: Option<String>,
     agent: Arc<CliAgentRuntimeClient>,
+    context_reload: CliContextReloadClient,
     compatibility: Option<CoreAgentRuntimeCompatibility>,
     /// User-level default resolved from shared config for this TUI run.
     auto_approve_ask_default: bool,
@@ -214,9 +253,11 @@ pub(crate) struct ChatMode {
     pending_mcp_op: Option<PendingMcpOp>,
     /// Running MCP tasks (non-blocking, polled in main loop)
     pending_mcp_tasks: Vec<PendingMcpTask>,
-    /// One durable mode update in flight. The event loop remains responsive
-    /// while the runtime owner writes session metadata.
-    pending_mode_change: Option<PendingModeChange>,
+    /// One Session operation in flight. The event loop remains responsive while
+    /// the Runtime owner updates or deletes Session state.
+    pending_session_operation: Option<PendingSessionOperation>,
+    /// One explicit native slash-menu choice waiting for its parameterized submission.
+    selected_native_command_once: Option<String>,
     external_source_snapshot: Option<ExternalSourceCatalogSnapshot>,
     external_source_conflict_choices: BTreeMap<String, String>,
     external_source_conflict_lineage_current_keys: BTreeMap<String, String>,
@@ -254,6 +295,7 @@ impl ChatMode {
         agent_type: String,
         workspace: Option<String>,
         agent: Arc<CliAgentRuntimeClient>,
+        context_reload: CliContextReloadClient,
         compatibility: Option<CoreAgentRuntimeCompatibility>,
     ) -> Self {
         let keymap = ResolvedKeymap::new(&config.shortcuts);
@@ -263,6 +305,7 @@ impl ChatMode {
             agent_type,
             workspace,
             agent,
+            context_reload,
             compatibility,
             auto_approve_ask_default: false,
             auto_approve_ask_override: None,
@@ -270,7 +313,8 @@ impl ChatMode {
             initial_prompt: None,
             pending_mcp_op: None,
             pending_mcp_tasks: Vec::new(),
-            pending_mode_change: None,
+            pending_session_operation: None,
+            selected_native_command_once: None,
             external_source_snapshot: None,
             external_source_conflict_choices: BTreeMap::new(),
             external_source_conflict_lineage_current_keys: BTreeMap::new(),

@@ -1,3 +1,8 @@
+use crate::local_source_paths::{
+    find_project_root, local_watch_roots, ordered_local_config_directories,
+    project_asset_directories, project_config_directories, user_config_dir,
+    LocalConfigDirectoryKind,
+};
 use bitfun_product_domains::external_sources::{
     EcosystemId, ExternalSourceAssetKind, ExternalSourceContext, ExternalSourceDiagnostic,
     ExternalSourceHealth, ExternalSourceProviderError, ExternalSourceRecord, ExternalSourceScope,
@@ -12,7 +17,7 @@ use bitfun_product_domains::external_subagents::{
     ExternalSubagentProviderSnapshot, ExternalSubagentSourceProvider, ExternalSubagentToolRequest,
     ExternalSubagentToolSelector, SecretText,
 };
-use bitfun_services_core::markdown::FrontMatterMarkdown;
+use bitfun_services_core::{jsonc::strip_jsonc, markdown::FrontMatterMarkdown};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -69,11 +74,10 @@ pub struct OpenCodeSubagentProviderOptions {
 impl OpenCodeSubagentProviderOptions {
     pub fn from_environment() -> Self {
         let home = dirs::home_dir();
-        let user_config_dir = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home.as_ref().map(|home| home.join(".config")))
-            .unwrap_or_else(|| PathBuf::from(".config"))
-            .join("opencode");
+        let user_config_dir = user_config_dir(
+            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+            home.clone(),
+        );
         Self {
             user_config_dir,
             legacy_user_config_dir: home.map(|home| home.join(".opencode")),
@@ -135,7 +139,7 @@ impl OpenCodeSubagentProvider {
         if self.options.project_config_enabled {
             if let Some(workspace_root) = &context.workspace_root {
                 let project_root = self.project_root(workspace_root);
-                for directory in directories_between(&project_root, workspace_root) {
+                for directory in project_config_directories(&project_root, workspace_root) {
                     push_config_files(
                         &mut layers,
                         &directory,
@@ -145,61 +149,73 @@ impl OpenCodeSubagentProvider {
                 }
             }
         }
-        push_agent_files(
-            &mut layers,
+        let project_directories = if self.options.project_config_enabled {
+            context
+                .workspace_root
+                .as_ref()
+                .map(|workspace_root| {
+                    project_asset_directories(&self.project_root(workspace_root), workspace_root)
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for directory in ordered_local_config_directories(
             &self.options.user_config_dir,
-            ExternalSourceScope::UserGlobal,
-            "OpenCode user agents",
-        )?;
-        if self.options.project_config_enabled {
-            if let Some(workspace_root) = &context.workspace_root {
-                let project_root = self.project_root(workspace_root);
-                for directory in directories_between(&project_root, workspace_root) {
-                    let opencode = directory.join(".opencode");
+            self.options.legacy_user_config_dir.as_deref(),
+            self.options.explicit_config_dir.as_deref(),
+            &project_directories,
+        ) {
+            match directory.kind {
+                LocalConfigDirectoryKind::User => push_agent_files(
+                    &mut layers,
+                    &directory.path,
+                    directory.scope,
+                    "OpenCode user agents",
+                )?,
+                LocalConfigDirectoryKind::Project => {
                     push_config_files(
                         &mut layers,
-                        &opencode,
-                        ExternalSourceScope::Project,
+                        &directory.path,
+                        directory.scope,
                         "OpenCode project agent configuration",
                     );
                     push_agent_files(
                         &mut layers,
-                        &opencode,
-                        ExternalSourceScope::Project,
+                        &directory.path,
+                        directory.scope,
                         "OpenCode project agents",
                     )?;
                 }
+                LocalConfigDirectoryKind::Legacy => {
+                    push_config_files(
+                        &mut layers,
+                        &directory.path,
+                        directory.scope,
+                        "OpenCode legacy user configuration",
+                    );
+                    push_agent_files(
+                        &mut layers,
+                        &directory.path,
+                        directory.scope,
+                        "OpenCode legacy user agents",
+                    )?;
+                }
+                LocalConfigDirectoryKind::Explicit => {
+                    push_config_files(
+                        &mut layers,
+                        &directory.path,
+                        directory.scope,
+                        "OpenCode OPENCODE_CONFIG_DIR",
+                    );
+                    push_agent_files(
+                        &mut layers,
+                        &directory.path,
+                        directory.scope,
+                        "OpenCode explicit agents",
+                    )?;
+                }
             }
-        }
-        if let Some(legacy) = &self.options.legacy_user_config_dir {
-            if legacy != &self.options.user_config_dir {
-                push_config_files(
-                    &mut layers,
-                    legacy,
-                    ExternalSourceScope::UserGlobal,
-                    "OpenCode legacy user configuration",
-                );
-                push_agent_files(
-                    &mut layers,
-                    legacy,
-                    ExternalSourceScope::UserGlobal,
-                    "OpenCode legacy user agents",
-                )?;
-            }
-        }
-        if let Some(directory) = &self.options.explicit_config_dir {
-            push_config_files(
-                &mut layers,
-                directory,
-                ExternalSourceScope::WorkspaceLocal,
-                "OpenCode OPENCODE_CONFIG_DIR",
-            );
-            push_agent_files(
-                &mut layers,
-                directory,
-                ExternalSourceScope::WorkspaceLocal,
-                "OpenCode explicit agents",
-            )?;
         }
         Ok(deduplicate_layers_keep_last(layers))
     }
@@ -344,32 +360,24 @@ impl ExternalSubagentSourceProvider for OpenCodeSubagentProvider {
     }
 
     fn watch_roots(&self, context: &ExternalSourceContext) -> Vec<ExternalWatchRoot> {
-        let mut roots = BTreeMap::new();
-        add_directory_watch_roots(&mut roots, &self.options.user_config_dir);
-        if let Some(path) = &self.options.legacy_user_config_dir {
-            add_directory_watch_roots(&mut roots, path);
-        }
-        if let Some(path) = &self.options.explicit_config_file {
-            if let Some(parent) = path.parent() {
-                add_nearest_existing_watch_root(&mut roots, parent);
-            }
-        }
-        if let Some(path) = &self.options.explicit_config_dir {
-            add_directory_watch_roots(&mut roots, path);
-        }
-        if self.options.project_config_enabled {
-            if let Some(workspace_root) = &context.workspace_root {
-                let project_root = self.project_root(workspace_root);
-                for directory in directories_between(&project_root, workspace_root) {
-                    add_watch_root(&mut roots, directory.clone(), false);
-                    add_directory_watch_roots(&mut roots, &directory.join(".opencode"));
-                }
-            }
-        }
-        roots
-            .into_iter()
-            .map(|(path, recursive)| ExternalWatchRoot { path, recursive })
-            .collect()
+        let project_directories = if self.options.project_config_enabled {
+            context
+                .workspace_root
+                .as_ref()
+                .map(|workspace_root| {
+                    project_config_directories(&self.project_root(workspace_root), workspace_root)
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        local_watch_roots(
+            &self.options.user_config_dir,
+            self.options.legacy_user_config_dir.as_deref(),
+            self.options.explicit_config_file.as_deref(),
+            self.options.explicit_config_dir.as_deref(),
+            &project_directories,
+        )
     }
 }
 
@@ -1074,49 +1082,6 @@ fn normalize_path_lexically(path: &Path) -> PathBuf {
     normalized
 }
 
-fn strip_jsonc(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let chars = input.chars().collect::<Vec<_>>();
-    let mut index = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    while index < chars.len() {
-        let current = chars[index];
-        if in_string {
-            output.push(current);
-            if escaped {
-                escaped = false;
-            } else if current == '\\' {
-                escaped = true;
-            } else if current == '"' {
-                in_string = false;
-            }
-            index += 1;
-            continue;
-        }
-        if current == '"' {
-            in_string = true;
-            output.push(current);
-            index += 1;
-        } else if current == '/' && chars.get(index + 1) == Some(&'/') {
-            index += 2;
-            while index < chars.len() && chars[index] != '\n' {
-                index += 1;
-            }
-        } else if current == '/' && chars.get(index + 1) == Some(&'*') {
-            index += 2;
-            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
-                index += 1;
-            }
-            index = (index + 2).min(chars.len());
-        } else {
-            output.push(current);
-            index += 1;
-        }
-    }
-    output
-}
-
 fn digest(parts: impl IntoIterator<Item = impl AsRef<str>>) -> String {
     let mut hasher = Sha256::new();
     for part in parts {
@@ -1131,64 +1096,4 @@ fn environment_truthy(key: &str) -> bool {
     std::env::var(key)
         .ok()
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "true" | "1"))
-}
-
-fn find_project_root(start: &Path) -> PathBuf {
-    let start = if start.is_file() {
-        start.parent().unwrap_or(start)
-    } else {
-        start
-    };
-    start
-        .ancestors()
-        .find(|path| path.join(".git").exists())
-        .unwrap_or(start)
-        .to_path_buf()
-}
-
-fn directories_between(root: &Path, opened: &Path) -> Vec<PathBuf> {
-    let opened = if opened.is_file() {
-        opened.parent().unwrap_or(opened)
-    } else {
-        opened
-    };
-    let mut directories = opened
-        .ancestors()
-        .take_while(|path| path.starts_with(root))
-        .map(Path::to_path_buf)
-        .collect::<Vec<_>>();
-    directories.reverse();
-    directories
-}
-
-fn nearest_existing_path(mut path: PathBuf) -> Option<PathBuf> {
-    loop {
-        if path.exists() {
-            return Some(path);
-        }
-        if !path.pop() {
-            return None;
-        }
-    }
-}
-
-fn add_watch_root(roots: &mut BTreeMap<PathBuf, bool>, path: PathBuf, recursive: bool) {
-    roots
-        .entry(path)
-        .and_modify(|existing| *existing |= recursive)
-        .or_insert(recursive);
-}
-
-fn add_nearest_existing_watch_root(roots: &mut BTreeMap<PathBuf, bool>, path: &Path) {
-    if let Some(path) = nearest_existing_path(path.to_path_buf()) {
-        add_watch_root(roots, path, false);
-    }
-}
-
-fn add_directory_watch_roots(roots: &mut BTreeMap<PathBuf, bool>, directory: &Path) {
-    if directory.exists() {
-        add_watch_root(roots, directory.to_path_buf(), true);
-    } else if let Some(parent) = directory.parent() {
-        add_nearest_existing_watch_root(roots, parent);
-    }
 }

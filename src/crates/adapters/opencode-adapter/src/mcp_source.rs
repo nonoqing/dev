@@ -1,3 +1,8 @@
+use crate::local_source_paths::{
+    find_project_root, local_watch_roots, ordered_local_config_directories,
+    project_asset_directories, project_config_directories, user_config_dir,
+    LocalConfigDirectoryKind,
+};
 use bitfun_product_domains::external_sources::{
     EcosystemId, ExternalMcpDiscoveryInput, ExternalMcpProviderIdentity,
     ExternalMcpProviderSnapshot, ExternalMcpServerDefinition, ExternalMcpSourceProvider,
@@ -7,6 +12,7 @@ use bitfun_product_domains::external_sources::{
     PreparedExternalMcpImportServer, PreparedExternalMcpImportTransport, PreparedExternalMcpServer,
     PreparedExternalMcpTransport, SecretValue, SourceKey, SourceQualifiedMcpServerId,
 };
+use bitfun_services_core::jsonc::strip_jsonc;
 use bitfun_static_hook_support::{read_bounded_text, BoundedTextRead};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -46,19 +52,13 @@ impl OpenCodeMcpProviderOptions {
     pub fn from_environment() -> Self {
         let home = dirs::home_dir();
         let explicit_config_dir = std::env::var_os("OPENCODE_CONFIG_DIR").map(PathBuf::from);
-        let user_config_dir = explicit_config_dir.clone().unwrap_or_else(|| {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| home.as_ref().map(|home| home.join(".config")))
-                .unwrap_or_else(|| PathBuf::from(".config"))
-                .join("opencode")
-        });
+        let user_config_dir = user_config_dir(
+            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+            home.clone(),
+        );
         Self {
             user_config_dir,
-            legacy_user_config_dir: explicit_config_dir
-                .is_none()
-                .then(|| home.map(|home| home.join(".opencode")))
-                .flatten(),
+            legacy_user_config_dir: home.map(|home| home.join(".opencode")),
             explicit_config_file: std::env::var_os("OPENCODE_CONFIG").map(PathBuf::from),
             explicit_config_dir,
             project_config_enabled: !environment_truthy("OPENCODE_DISABLE_PROJECT_CONFIG"),
@@ -114,39 +114,56 @@ impl OpenCodeMcpProvider {
         if self.options.project_config_enabled {
             if let Some(workspace_root) = &context.workspace_root {
                 let project_root = self.project_root(workspace_root);
-                for directory in directories_between(&project_root, workspace_root) {
+                for directory in project_config_directories(&project_root, workspace_root) {
                     push_config_files(
                         &mut layers,
                         &directory,
                         ExternalSourceScope::Project,
                         "OpenCode project configuration",
                     );
-                    push_config_files(
-                        &mut layers,
-                        &directory.join(".opencode"),
-                        ExternalSourceScope::Project,
-                        "OpenCode project configuration",
-                    );
                 }
             }
         }
-        if let Some(legacy) = &self.options.legacy_user_config_dir {
-            if legacy != &self.options.user_config_dir {
-                push_config_files(
+        let project_directories = if self.options.project_config_enabled {
+            context
+                .workspace_root
+                .as_ref()
+                .map(|workspace_root| {
+                    project_asset_directories(&self.project_root(workspace_root), workspace_root)
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for directory in ordered_local_config_directories(
+            &self.options.user_config_dir,
+            self.options.legacy_user_config_dir.as_deref(),
+            self.options.explicit_config_dir.as_deref(),
+            &project_directories,
+        ) {
+            match directory.kind {
+                LocalConfigDirectoryKind::User => {}
+                LocalConfigDirectoryKind::Project => {
+                    push_config_files(
+                        &mut layers,
+                        &directory.path,
+                        directory.scope,
+                        "OpenCode project configuration",
+                    );
+                }
+                LocalConfigDirectoryKind::Legacy => push_config_files(
                     &mut layers,
-                    legacy,
-                    ExternalSourceScope::UserGlobal,
+                    &directory.path,
+                    directory.scope,
                     "OpenCode legacy configuration",
-                );
+                ),
+                LocalConfigDirectoryKind::Explicit => push_config_files(
+                    &mut layers,
+                    &directory.path,
+                    directory.scope,
+                    "OpenCode OPENCODE_CONFIG_DIR",
+                ),
             }
-        }
-        if let Some(directory) = &self.options.explicit_config_dir {
-            push_config_files(
-                &mut layers,
-                directory,
-                ExternalSourceScope::UserGlobal,
-                "OpenCode OPENCODE_CONFIG_DIR",
-            );
         }
         deduplicate_layers_keep_last(layers)
     }
@@ -381,32 +398,24 @@ impl ExternalMcpSourceProvider for OpenCodeMcpProvider {
     }
 
     fn watch_roots(&self, context: &ExternalSourceContext) -> Vec<ExternalWatchRoot> {
-        let mut roots = BTreeMap::new();
-        add_directory_watch_roots(&mut roots, &self.options.user_config_dir);
-        if let Some(legacy) = &self.options.legacy_user_config_dir {
-            add_directory_watch_roots(&mut roots, legacy);
-        }
-        if let Some(path) = &self.options.explicit_config_file {
-            if let Some(parent) = path.parent() {
-                add_nearest_existing_watch_root(&mut roots, parent);
-            }
-        }
-        if let Some(directory) = &self.options.explicit_config_dir {
-            add_directory_watch_roots(&mut roots, directory);
-        }
-        if self.options.project_config_enabled {
-            if let Some(workspace_root) = &context.workspace_root {
-                let project_root = self.project_root(workspace_root);
-                for directory in directories_between(&project_root, workspace_root) {
-                    add_watch_root(&mut roots, directory.clone(), false);
-                    add_directory_watch_roots(&mut roots, &directory.join(".opencode"));
-                }
-            }
-        }
-        roots
-            .into_iter()
-            .map(|(path, recursive)| ExternalWatchRoot { path, recursive })
-            .collect()
+        let project_directories = if self.options.project_config_enabled {
+            context
+                .workspace_root
+                .as_ref()
+                .map(|workspace_root| {
+                    project_config_directories(&self.project_root(workspace_root), workspace_root)
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        local_watch_roots(
+            &self.options.user_config_dir,
+            self.options.legacy_user_config_dir.as_deref(),
+            self.options.explicit_config_file.as_deref(),
+            self.options.explicit_config_dir.as_deref(),
+            &project_directories,
+        )
     }
 }
 
@@ -832,7 +841,7 @@ fn prepare_import_projection(
             url,
             headers,
             oauth_enabled,
-        } if headers.is_empty() && oauth_enabled && import_safe_https_url(&url) => {
+        } if headers.is_empty() && oauth_enabled => {
             PreparedExternalMcpImportTransport::Remote { url }
         }
         _ => {
@@ -1028,17 +1037,6 @@ fn sanitized_https_url(value: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
-fn import_safe_https_url(value: &str) -> bool {
-    url::Url::parse(value).is_ok_and(|url| {
-        url.scheme() == "https"
-            && url.host_str().is_some()
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.query().is_none()
-            && url.fragment().is_none()
-    })
-}
-
 struct ConfigLayer {
     path: PathBuf,
     scope: ExternalSourceScope,
@@ -1057,32 +1055,28 @@ fn parse_config_layer(
     path: &Path,
 ) -> ParsedConfigLayer {
     match read_bounded_text(path, MAX_CONFIG_FILE_BYTES) {
-        Ok(BoundedTextRead::TooLarge) => {
-            return ParsedConfigLayer {
-                servers: BTreeMap::new(),
-                diagnostics: vec![ExternalSourceDiagnostic::error(
-                    "opencode.mcp.config_too_large",
-                    "OpenCode config exceeds the 1 MiB compatibility limit",
-                    None,
-                )
-                .with_asset_kind(ExternalSourceAssetKind::Mcp)],
-                content_version: "too-large".to_string(),
-                fatal: true,
-            };
-        }
-        Ok(BoundedTextRead::InvalidUtf8) => {
-            return ParsedConfigLayer {
-                servers: BTreeMap::new(),
-                diagnostics: vec![ExternalSourceDiagnostic::error(
-                    "opencode.mcp.config_invalid_utf8",
-                    "OpenCode config is not valid UTF-8",
-                    None,
-                )
-                .with_asset_kind(ExternalSourceAssetKind::Mcp)],
-                content_version: "invalid-utf8".to_string(),
-                fatal: true,
-            };
-        }
+        Ok(BoundedTextRead::TooLarge) => ParsedConfigLayer {
+            servers: BTreeMap::new(),
+            diagnostics: vec![ExternalSourceDiagnostic::error(
+                "opencode.mcp.config_too_large",
+                "OpenCode config exceeds the 1 MiB compatibility limit",
+                None,
+            )
+            .with_asset_kind(ExternalSourceAssetKind::Mcp)],
+            content_version: "too-large".to_string(),
+            fatal: true,
+        },
+        Ok(BoundedTextRead::InvalidUtf8) => ParsedConfigLayer {
+            servers: BTreeMap::new(),
+            diagnostics: vec![ExternalSourceDiagnostic::error(
+                "opencode.mcp.config_invalid_utf8",
+                "OpenCode config is not valid UTF-8",
+                None,
+            )
+            .with_asset_kind(ExternalSourceAssetKind::Mcp)],
+            content_version: "invalid-utf8".to_string(),
+            fatal: true,
+        },
         Ok(BoundedTextRead::Content(content)) => {
             let content_version = content_version(revision_key, path, content.as_bytes());
             let value = match serde_json::from_str::<Value>(&strip_jsonc(&content)) {
@@ -1121,26 +1115,24 @@ fn parse_config_layer(
                     };
                 }
             };
-            return ParsedConfigLayer {
+            ParsedConfigLayer {
                 servers,
                 diagnostics: Vec::new(),
                 content_version,
                 fatal: false,
-            };
+            }
         }
-        Err(error) => {
-            return ParsedConfigLayer {
-                servers: BTreeMap::new(),
-                diagnostics: vec![ExternalSourceDiagnostic::error(
-                    "opencode.mcp.config_unreadable",
-                    format!("Failed to read OpenCode MCP config: {error}"),
-                    None,
-                )
-                .with_asset_kind(ExternalSourceAssetKind::Mcp)],
-                content_version: "unreadable".to_string(),
-                fatal: true,
-            };
-        }
+        Err(error) => ParsedConfigLayer {
+            servers: BTreeMap::new(),
+            diagnostics: vec![ExternalSourceDiagnostic::error(
+                "opencode.mcp.config_unreadable",
+                format!("Failed to read OpenCode MCP config: {error}"),
+                None,
+            )
+            .with_asset_kind(ExternalSourceAssetKind::Mcp)],
+            content_version: "unreadable".to_string(),
+            fatal: true,
+        },
     }
 }
 
@@ -1239,100 +1231,10 @@ fn deduplicate_layers_keep_last(layers: Vec<ConfigLayer>) -> Vec<ConfigLayer> {
     layers
 }
 
-fn strip_jsonc(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let chars = input.chars().collect::<Vec<_>>();
-    let mut index = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    while index < chars.len() {
-        let current = chars[index];
-        if in_string {
-            output.push(current);
-            if escaped {
-                escaped = false;
-            } else if current == '\\' {
-                escaped = true;
-            } else if current == '"' {
-                in_string = false;
-            }
-            index += 1;
-            continue;
-        }
-        if current == '"' {
-            in_string = true;
-            output.push(current);
-            index += 1;
-            continue;
-        }
-        if current == '/' && chars.get(index + 1) == Some(&'/') {
-            index += 2;
-            while index < chars.len() && chars[index] != '\n' {
-                index += 1;
-            }
-            output.push('\n');
-            index += usize::from(index < chars.len());
-            continue;
-        }
-        if current == '/' && chars.get(index + 1) == Some(&'*') {
-            index += 2;
-            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
-                if chars[index] == '\n' {
-                    output.push('\n');
-                }
-                index += 1;
-            }
-            index = (index + 2).min(chars.len());
-            continue;
-        }
-        if current == ',' {
-            let mut lookahead = index + 1;
-            while lookahead < chars.len() && chars[lookahead].is_whitespace() {
-                lookahead += 1;
-            }
-            if matches!(chars.get(lookahead), Some('}') | Some(']')) {
-                index += 1;
-                continue;
-            }
-        }
-        output.push(current);
-        index += 1;
-    }
-    output
-}
-
 fn environment_truthy(key: &str) -> bool {
     std::env::var(key)
         .ok()
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "true" | "1"))
-}
-
-fn find_project_root(start: &Path) -> PathBuf {
-    let start = if start.is_file() {
-        start.parent().unwrap_or(start)
-    } else {
-        start
-    };
-    start
-        .ancestors()
-        .find(|path| path.join(".git").exists())
-        .unwrap_or(start)
-        .to_path_buf()
-}
-
-fn directories_between(root: &Path, opened: &Path) -> Vec<PathBuf> {
-    let opened = if opened.is_file() {
-        opened.parent().unwrap_or(opened)
-    } else {
-        opened
-    };
-    let mut directories = opened
-        .ancestors()
-        .take_while(|path| path.starts_with(root))
-        .map(Path::to_path_buf)
-        .collect::<Vec<_>>();
-    directories.reverse();
-    directories
 }
 
 fn normalize_path_lexically(path: &Path) -> PathBuf {
@@ -1348,35 +1250,4 @@ fn normalize_path_lexically(path: &Path) -> PathBuf {
         }
     }
     normalized
-}
-
-fn nearest_existing_path(mut path: PathBuf) -> Option<PathBuf> {
-    loop {
-        if path.exists() {
-            return Some(path);
-        }
-        if !path.pop() {
-            return None;
-        }
-    }
-}
-
-fn add_watch_root(roots: &mut BTreeMap<PathBuf, bool>, path: PathBuf, recursive: bool) {
-    roots
-        .entry(path)
-        .and_modify(|existing| *existing |= recursive)
-        .or_insert(recursive);
-}
-
-fn add_nearest_existing_watch_root(roots: &mut BTreeMap<PathBuf, bool>, path: &Path) {
-    if let Some(path) = nearest_existing_path(path.to_path_buf()) {
-        add_watch_root(roots, path, false);
-    }
-}
-
-fn add_directory_watch_roots(roots: &mut BTreeMap<PathBuf, bool>, directory: &Path) {
-    if let Some(parent) = directory.parent() {
-        add_nearest_existing_watch_root(roots, parent);
-    }
-    add_watch_root(roots, directory.to_path_buf(), true);
 }

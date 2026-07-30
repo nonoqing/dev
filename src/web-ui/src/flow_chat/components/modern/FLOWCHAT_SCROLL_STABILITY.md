@@ -202,7 +202,11 @@ Sticky pin floors are not reduced from a transient target rect. Positive
 effective content growth first enters a short settlement ledger (currently
 300 ms) instead of immediately removing physical bottom range. An unsignaled
 negative height correction cancels matching unsettled growth; a known collapse
-does not. Stable growth then consumes the pin floor in one synchronous Footer
+does not. Growth that reaches the complete remaining pin floor settles
+immediately because the sticky viewport has reached its tail-follow handoff
+boundary; if a collapse transaction is still active, that settlement resumes
+as soon as the transaction finishes. Sub-threshold growth still waits for the
+quiet window. Stable growth consumes the pin floor in one synchronous Footer
 update. Live pin reconciliation may increase a floor immediately, but cannot
 shrink it while Virtuoso item measurements are still moving. Stream end performs
 one final pin measurement when the target is available, transfers all remaining
@@ -314,22 +318,32 @@ manual or otherwise unsignaled intents use the TTL timer. The scroll handler kee
 timer fallback for browsers that delay timers. While the intent is alive, the
 grow branch of `measureHeightChange` protects the collapse reservation, but it
 may still consume measured content growth from the sticky pin reservation.
-Once the intent settles, residual collapse space enters retained-provisional
-settlement even when the sticky pinned item still owns the viewport. This is
-required for first-turn `scrollTop === 0`: provisional full-card estimates must
-not accumulate merely to fill an otherwise short viewport.
-If a collapsing header owns the viewport, the footer is instead reduced
-atomically to the minimum range that can retain the current `scrollTop`, then
-that settled range is promoted to a protected collapse floor before the
-semantic anchor is restored. This prevents a clear-and-reacquire frame without
-retaining the full provisional estimate; later content growth can still drain
-the protected range. Any deferred follow is then replayed.
+Intent settlement follows the current semantic viewport owner. A sticky pinned
+turn always reconciles provisional collapse space back into a freshly measured
+pin reservation, even when the active transaction established a non-zero
+collapse floor. That floor protects the pin only while layout is moving; it
+must not cause the full-card estimate to survive into the next collapse. If the
+pinned target is temporarily unavailable, settlement retries without dropping
+the current range. A following tail instead enters retained-provisional quiet
+settlement, while a collapsing header that owns `preserving-element` reduces
+the footer atomically to the minimum range needed by its captured `scrollTop`.
+A detached protected viewport uses the same geometric settlement against its
+current `scrollTop`, without retaining provisional pixels above that range.
+These owner-specific transactions prevent both clear-and-reacquire frames and
+cumulative provisional whitespace. Any deferred follow is then replayed.
 
 ## C. Follow-Output Mode (continuous tail)
 
 When the viewport is in follow-output mode and the latest turn is still
-streaming, the user's intent is "keep the tail visible". The continuous
-RAF loop re-pins `scrollTop` toward the bottom every frame.
+streaming, the user's intent is "keep the tail visible". Text layout grows in
+discrete line-height steps even when characters are revealed smoothly, so the
+continuous RAF loop eases `scrollTop` toward the bottom with a retargetable
+exponential step. It does not restart native smooth scrolling or snap by a
+whole line on observer notifications.
+
+Content `scrollHeight` growth is not a viewport resize. Physical-bottom
+synchronization is reserved for an actual `clientHeight` change; live content
+growth is owned by the continuous follow loop.
 
 Collapses interact with follow mode in three mutually exclusive ways:
 

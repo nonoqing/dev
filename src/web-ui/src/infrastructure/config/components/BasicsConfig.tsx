@@ -338,7 +338,6 @@ function BasicsLoggingSection() {
   const { t } = useTranslation('settings/basics');
   const [configLevel, setConfigLevel] = useState<BackendLogLevel>('info');
   const [includeSensitiveDiagnostics, setIncludeSensitiveDiagnostics] = useState(true);
-  const [flowChatDiagnostics, setFlowChatDiagnostics] = useState(false);
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeLoggingInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -367,16 +366,14 @@ function BasicsLoggingSection() {
     try {
       setLoading(true);
 
-      const [savedLevel, savedIncludeSensitiveDiagnostics, savedFlowChatDiagnostics, info] = await Promise.all([
+      const [savedLevel, savedIncludeSensitiveDiagnostics, info] = await Promise.all([
         configManager.getConfig<BackendLogLevel>('app.logging.level'),
         configManager.getConfig<boolean>('app.logging.include_sensitive_diagnostics'),
-        configManager.getConfig<boolean>('app.logging.flow_chat_diagnostics'),
         configAPI.getRuntimeLoggingInfo(),
       ]);
 
       setConfigLevel(savedLevel || info.effectiveLevel || 'info');
       setIncludeSensitiveDiagnostics(savedIncludeSensitiveDiagnostics ?? true);
-      setFlowChatDiagnostics(savedFlowChatDiagnostics ?? false);
       setRuntimeInfo(info);
     } catch (error) {
       log.error('Failed to load logging config', error);
@@ -434,27 +431,6 @@ function BasicsLoggingSection() {
       }
     },
     [includeSensitiveDiagnostics, showMessage, t]
-  );
-
-  const handleFlowChatDiagnosticsChange = useCallback(
-    async (checked: boolean) => {
-      const previousValue = flowChatDiagnostics;
-      setFlowChatDiagnostics(checked);
-      setSaving(true);
-
-      try {
-        await configManager.setConfig('app.logging.flow_chat_diagnostics', checked);
-        configManager.clearCache();
-        showMessage('success', t('logging.messages.flowChatDiagnosticsUpdated'));
-      } catch (error) {
-        setFlowChatDiagnostics(previousValue);
-        log.error('Failed to update Flow Chat diagnostics preference', { checked, error });
-        showMessage('error', t('logging.messages.saveFailed'));
-      } finally {
-        setSaving(false);
-      }
-    },
-    [flowChatDiagnostics, showMessage, t]
   );
 
   const handleOpenFolder = useCallback(async () => {
@@ -525,14 +501,12 @@ function BasicsLoggingSection() {
             description={t('logging.level.description')}
             align="center"
           >
-            <div className="bitfun-logging-config__select-wrapper">
-              <Select
-                value={configLevel}
-                onChange={(v) => handleLevelChange(v as string)}
-                options={levelOptions}
-                disabled={saving}
-              />
-            </div>
+            <Select
+              value={configLevel}
+              onChange={(v) => handleLevelChange(v as string)}
+              options={levelOptions}
+              disabled={saving}
+            />
           </ConfigPageRow>
           <ConfigPageRow
             label={t('logging.sensitiveDiagnostics.label')}
@@ -543,19 +517,6 @@ function BasicsLoggingSection() {
               checked={includeSensitiveDiagnostics}
               onChange={(e) => {
                 void handleSensitiveDiagnosticsChange(e.target.checked);
-              }}
-              disabled={saving}
-            />
-          </ConfigPageRow>
-          <ConfigPageRow
-            label={t('logging.flowChatDiagnostics.label')}
-            description={t('logging.flowChatDiagnostics.description')}
-            align="center"
-          >
-            <Switch
-              checked={flowChatDiagnostics}
-              onChange={(e) => {
-                void handleFlowChatDiagnosticsChange(e.target.checked);
               }}
               disabled={saving}
             />
@@ -782,21 +743,19 @@ function BasicsTerminalSection() {
             description={t('terminal.controls.description')}
             align="center"
           >
-            <div className="bitfun-terminal-config__select-wrapper">
-              {availableShells.length > 0 ? (
-                <Select
-                  value={selectedShellValue}
-                  onChange={(v) => handleShellChange(v as string)}
-                  options={shellOptions}
-                  renderOption={renderShellOption}
-                  renderValue={renderShellValue}
-                  placeholder={t('terminal.controls.placeholder')}
-                  disabled={saving}
-                />
-              ) : (
-                <div className="bitfun-terminal-config__no-shells">{t('terminal.controls.noShells')}</div>
-              )}
-            </div>
+            {availableShells.length > 0 ? (
+              <Select
+                value={selectedShellValue}
+                onChange={(v) => handleShellChange(v as string)}
+                options={shellOptions}
+                renderOption={renderShellOption}
+                renderValue={renderShellValue}
+                placeholder={t('terminal.controls.placeholder')}
+                disabled={saving}
+              />
+            ) : (
+              <div className="bitfun-terminal-config__no-shells">{t('terminal.controls.noShells')}</div>
+            )}
           </ConfigPageRow>
 
           <ConfigPageRow
@@ -804,15 +763,13 @@ function BasicsTerminalSection() {
             description={t('terminal.panelPosition.description')}
             align="center"
           >
-            <div className="bitfun-terminal-config__select-wrapper">
-              <Select
-                value={terminalPanelPosition}
-                onChange={(v) => handleTerminalPanelPositionChange(v as TerminalPanelPosition)}
-                options={terminalPanelPositionOptions}
-                placeholder={t('terminal.panelPosition.placeholder')}
-                disabled={saving}
-              />
-            </div>
+            <Select
+              value={terminalPanelPosition}
+              onChange={(v) => handleTerminalPanelPositionChange(v as TerminalPanelPosition)}
+              options={terminalPanelPositionOptions}
+              placeholder={t('terminal.panelPosition.placeholder')}
+              disabled={saving}
+            />
           </ConfigPageRow>
         </ConfigPageSection>
       </div>
@@ -903,14 +860,12 @@ function BasicsWindowBehaviorSection() {
             description={t('windowBehavior.closeButtonDescription')}
             align="center"
           >
-            <div className="bitfun-window-behavior-config__select-wrapper">
-              <Select
-                value={behavior}
-                onChange={(v) => { void handleChange(v as string); }}
-                options={behaviorOptions}
-                disabled={saving}
-              />
-            </div>
+            <Select
+              value={behavior}
+              onChange={(v) => { void handleChange(v as string); }}
+              options={behaviorOptions}
+              disabled={saving}
+            />
           </ConfigPageRow>
         </ConfigPageSection>
       </div>
