@@ -27,6 +27,9 @@ use crate::agentic::image_analysis::{
     build_multimodal_message_with_images, process_image_contexts_for_provider, ImageContextData,
     ImageLimits,
 };
+use crate::agentic::observability::{
+    agent_mode_class, completion_from_error, finish_reason_class, turn_trigger,
+};
 use crate::agentic::round_preempt::RoundInjectionKind;
 use crate::agentic::session::{
     ContextCompressor, SessionManager, TokenAnchor, TokenAnchorInput, UserContextCacheIdentity,
@@ -60,6 +63,13 @@ use bitfun_agent_runtime::output_surface::TOOL_CONTEXT_INLINE_MARKDOWN_IMAGE_DIS
 use bitfun_agent_runtime::remote_file_delivery::TOOL_CONTEXT_REMOTE_FILE_DELIVERY_KEY;
 use bitfun_ai_adapters::ModelExchangeTraceConfig;
 use bitfun_core_types::SessionModelBindingPolicy;
+use bitfun_observability::domains::{
+    attempt_bucket, index_bucket, start_compression, start_round, start_turn_with_relation,
+    CompletionFacts, CompressionFinishFacts, CompressionSource, CompressionStartFacts,
+    CompressionTrigger, FinishReasonClass, RoundFinishFacts, RoundObservation, RoundStartFacts,
+    SafeErrorType, TurnFinishFacts, TurnStartFacts,
+};
+use bitfun_observability::{ObservationContext, Telemetry};
 use log::{debug, error, info, trace, warn};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -68,6 +78,24 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tool_runtime::context::PrimaryModelFacts;
+
+fn compression_trigger_class(trigger: &str) -> CompressionTrigger {
+    match trigger {
+        "auto" | "threshold" => CompressionTrigger::Threshold,
+        "context_overflow" | "context_overflow_recovery" => CompressionTrigger::ContextOverflow,
+        "manual" | "compact" => CompressionTrigger::Manual,
+        "recovery" => CompressionTrigger::Recovery,
+        _ => CompressionTrigger::Other,
+    }
+}
+
+fn compression_source_class(source: &str) -> CompressionSource {
+    match source {
+        "model" => CompressionSource::Model,
+        "local_fallback" => CompressionSource::LocalFallback,
+        _ => CompressionSource::None,
+    }
+}
 
 /// Execution engine configuration
 #[derive(Debug, Clone)]
@@ -436,6 +464,8 @@ struct FinalizeRoundInput<'a> {
     round_group_id: Option<String>,
     round_number: usize,
     agent_type: String,
+    observation_context: Option<ObservationContext>,
+    turn_started_at: std::time::Instant,
     context: &'a ExecutionContext,
     ai_client: Arc<crate::infrastructure::ai::AIClient>,
 }
@@ -458,6 +488,7 @@ pub struct ExecutionEngine {
     session_manager: Arc<SessionManager>,
     context_compressor: Arc<ContextCompressor>,
     config: ExecutionEngineConfig,
+    telemetry: Telemetry,
 }
 
 impl ExecutionEngine {
@@ -484,7 +515,13 @@ impl ExecutionEngine {
             session_manager,
             context_compressor,
             config,
+            telemetry: Telemetry::noop(),
         }
+    }
+
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     fn estimate_request_tokens_internal(
@@ -1635,7 +1672,9 @@ impl ExecutionEngine {
             dialog_turn_id: input.context.dialog_turn_id.clone(),
             turn_index: input.context.turn_index,
             round_number: input.round_number,
+            turn_started_at: input.turn_started_at,
             round_group_id: input.round_group_id,
+            observation_context: input.observation_context,
             workspace: input.context.workspace.clone(),
             model_exchange_trace_dir,
             available_tools: finalize_tool_names,
@@ -2353,6 +2392,72 @@ impl ExecutionEngine {
         primary_supports_image_understanding: bool,
         compression_contract_limit: usize,
         workspace: Option<&WorkspaceBinding>,
+        observation_context: Option<ObservationContext>,
+    ) -> BitFunResult<Option<(usize, Vec<Message>)>> {
+        let start_facts = CompressionStartFacts {
+            trigger: compression_trigger_class(trigger),
+        };
+        let observation = start_compression(&self.telemetry, start_facts, observation_context);
+        let result = self
+            .compress_messages_impl(
+                session_id,
+                dialog_turn_id,
+                trigger,
+                runtime_messages,
+                before_pressure,
+                context_window,
+                ai_client,
+                tool_definitions,
+                system_prompt_message,
+                prepended_prompt_reminders,
+                primary_supports_image_understanding,
+                compression_contract_limit,
+                workspace,
+            )
+            .await;
+        let finish_facts = match &result {
+            Ok(Some((tokens_after, _))) => CompressionFinishFacts {
+                completion: CompletionFacts::completed(),
+                source: None,
+                has_summary: None,
+                tokens_before: Some(before_pressure.total_tokens as u64),
+                tokens_after: Some(*tokens_after as u64),
+            },
+            Ok(None) => CompressionFinishFacts {
+                completion: CompletionFacts::completed(),
+                source: Some(CompressionSource::None),
+                has_summary: Some(false),
+                tokens_before: Some(before_pressure.total_tokens as u64),
+                tokens_after: Some(before_pressure.total_tokens as u64),
+            },
+            Err(error) => CompressionFinishFacts {
+                completion: completion_from_error(error),
+                source: None,
+                has_summary: None,
+                tokens_before: Some(before_pressure.total_tokens as u64),
+                tokens_after: None,
+            },
+        };
+        observation.finish(finish_facts);
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn compress_messages_impl(
+        &self,
+        session_id: &str,
+        dialog_turn_id: &str,
+        trigger: &str,
+        runtime_messages: Vec<Message>,
+        before_pressure: TokenPressureSnapshot,
+        context_window: usize,
+        ai_client: Arc<crate::infrastructure::ai::AIClient>,
+        tool_definitions: &Option<Vec<ToolDefinition>>,
+        system_prompt_message: Message,
+        prepended_prompt_reminders: &PrependedPromptReminders,
+        primary_supports_image_understanding: bool,
+        compression_contract_limit: usize,
+        workspace: Option<&WorkspaceBinding>,
     ) -> BitFunResult<Option<(usize, Vec<Message>)>> {
         let mut session = self
             .session_manager
@@ -2548,6 +2653,7 @@ impl ExecutionEngine {
                         session_id: session_id.to_string(),
                         turn_id: dialog_turn_id.to_string(),
                         compression_id: compression_id.clone(),
+                        trigger: trigger.to_string(),
                         compression_count: session.compression_state.compression_count,
                         tokens_before: before_pressure.total_tokens,
                         tokens_after: compressed_tokens,
@@ -2586,6 +2692,9 @@ impl ExecutionEngine {
                         session_id: session_id.to_string(),
                         turn_id: dialog_turn_id.to_string(),
                         compression_id: compression_id.clone(),
+                        trigger: trigger.to_string(),
+                        duration_ms: elapsed_ms_u64(start_time),
+                        tokens_before: Some(before_pressure.total_tokens),
                         error: e.to_string(),
                     },
                     EventPriority::High,
@@ -2601,6 +2710,54 @@ impl ExecutionEngine {
     /// Always emits compression started/completed/failed events for the provided turn.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn compact_session_context(
+        &self,
+        session_id: String,
+        dialog_turn_id: String,
+        compression_id: String,
+        context: ExecutionContext,
+        messages: Vec<Message>,
+        trigger: &str,
+        cancellation_token: CancellationToken,
+        commit_gate: Arc<ManualCompactionCommitGate>,
+    ) -> BitFunResult<ContextCompactionOutcome> {
+        let start_facts = CompressionStartFacts {
+            trigger: compression_trigger_class(trigger),
+        };
+        let observation = start_compression(&self.telemetry, start_facts, None);
+        let result = self
+            .compact_session_context_impl(
+                session_id,
+                dialog_turn_id,
+                compression_id,
+                context,
+                messages,
+                trigger,
+                cancellation_token,
+                commit_gate,
+            )
+            .await;
+        let finish_facts = match &result {
+            Ok(outcome) => CompressionFinishFacts {
+                completion: CompletionFacts::completed(),
+                source: Some(compression_source_class(&outcome.summary_source)),
+                has_summary: Some(outcome.has_summary),
+                tokens_before: Some(outcome.tokens_before as u64),
+                tokens_after: Some(outcome.tokens_after as u64),
+            },
+            Err(error) => CompressionFinishFacts {
+                completion: completion_from_error(error),
+                source: None,
+                has_summary: None,
+                tokens_before: None,
+                tokens_after: None,
+            },
+        };
+        observation.finish(finish_facts);
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn compact_session_context_impl(
         &self,
         session_id: String,
         dialog_turn_id: String,
@@ -2813,6 +2970,7 @@ impl ExecutionEngine {
                         session_id: session_id.to_string(),
                         turn_id: dialog_turn_id.to_string(),
                         compression_id: compression_id.clone(),
+                        trigger: trigger.to_string(),
                         compression_count,
                         tokens_before: before_pressure.total_tokens,
                         tokens_after,
@@ -2874,6 +3032,7 @@ impl ExecutionEngine {
                         session_id: session_id.to_string(),
                         turn_id: dialog_turn_id.to_string(),
                         compression_id: compression_id.clone(),
+                        trigger: trigger.to_string(),
                         compression_count: session.compression_state.compression_count,
                         tokens_before: before_pressure.total_tokens,
                         tokens_after,
@@ -2904,6 +3063,9 @@ impl ExecutionEngine {
                         session_id: session_id.to_string(),
                         turn_id: dialog_turn_id.to_string(),
                         compression_id: compression_id.clone(),
+                        trigger: trigger.to_string(),
+                        duration_ms: elapsed_ms_u64(start_time),
+                        tokens_before: Some(before_pressure.total_tokens),
                         error: err.to_string(),
                     },
                     EventPriority::High,
@@ -2927,6 +3089,22 @@ impl ExecutionEngine {
         let initial_count = initial_messages.len();
 
         let dialog_turn_id = context.dialog_turn_id.clone();
+        let is_subagent = context.subagent_parent_info.is_some();
+        let is_remote = context
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.is_remote());
+        let turn_observation = start_turn_with_relation(
+            &self.telemetry,
+            TurnStartFacts {
+                mode_class: agent_mode_class(&agent_type),
+                trigger: turn_trigger(is_subagent, is_remote),
+                remote: is_remote,
+                subagent: is_subagent,
+            },
+            context.observation_relation.clone(),
+        );
+        let turn_context = turn_observation.context();
 
         info!("Starting dialog turn: dialog_turn_id={}", dialog_turn_id);
 
@@ -2938,6 +3116,7 @@ impl ExecutionEngine {
                 context,
                 start_time,
                 initial_count,
+                turn_context,
             )
             .await;
 
@@ -2950,6 +3129,34 @@ impl ExecutionEngine {
             dialog_turn_id
         );
 
+        let finish_facts = match &result {
+            Ok(result) => TurnFinishFacts {
+                completion: if result.success {
+                    CompletionFacts::completed()
+                } else {
+                    CompletionFacts::failed(SafeErrorType::Other)
+                },
+                finish_reason: Some(finish_reason_class(result.finish_reason.as_str())),
+                round_count: Some(result.total_rounds as u64),
+                tool_count: Some(result.total_tools as u64),
+                first_result_ms: result.first_result_ms,
+                modified_file_count: result.modified_file_count,
+                added_lines: result.added_lines,
+                deleted_lines: result.deleted_lines,
+            },
+            Err(error) => TurnFinishFacts {
+                completion: completion_from_error(error),
+                finish_reason: Some(FinishReasonClass::Error),
+                round_count: None,
+                tool_count: None,
+                first_result_ms: None,
+                modified_file_count: None,
+                added_lines: None,
+                deleted_lines: None,
+            },
+        };
+        turn_observation.finish(finish_facts);
+
         result
     }
 
@@ -2961,6 +3168,7 @@ impl ExecutionEngine {
         context: ExecutionContext,
         start_time: std::time::Instant,
         initial_count: usize,
+        turn_context: Option<ObservationContext>,
     ) -> BitFunResult<ExecutionResult> {
         let dialog_turn_id = context.dialog_turn_id.clone();
 
@@ -3263,12 +3471,14 @@ impl ExecutionEngine {
         let mut round_index = 0;
         let mut completed_rounds = 0usize;
         let mut total_tools = 0;
+        let mut first_result_ms = None;
         let mut last_partial_recovery_reason: Option<String> = None;
         let mut finalization_reason: Option<&'static str> = None;
         let mut consecutive_compression_failures: u32 = 0;
         const MAX_CONSECUTIVE_COMPRESSION_FAILURES: u32 = 3;
         let mut main_context_overflow_recoveries = 0usize;
         let mut active_round_lifecycle: Option<ModelRoundLifecycle> = None;
+        let mut active_round_observation: Option<RoundObservation> = None;
 
         // Track tool-call patterns for context health, but only use rounds with
         // actual failed tool results for no-progress recovery decisions.
@@ -3501,6 +3711,7 @@ impl ExecutionEngine {
                         primary_supports_image_understanding,
                         context_profile_policy.compression_contract_limit,
                         context.workspace.as_ref(),
+                        turn_context.clone(),
                     )
                     .await
                 {
@@ -3623,6 +3834,16 @@ impl ExecutionEngine {
                 .session_manager
                 .persistent_model_exchange_trace_dir(&context.session_id)
                 .await;
+            if active_round_observation.is_none() {
+                active_round_observation = Some(start_round(
+                    &self.telemetry,
+                    RoundStartFacts {
+                        index_bucket: index_bucket(round_index),
+                        subagent: context.subagent_parent_info.is_some(),
+                    },
+                    turn_context.clone(),
+                ));
+            }
             let round_context = RoundContext {
                 session_id: context.session_id.clone(),
                 subagent_parent_info: context.subagent_parent_info.clone(),
@@ -3630,7 +3851,11 @@ impl ExecutionEngine {
                 dialog_turn_id: context.dialog_turn_id.clone(),
                 turn_index: context.turn_index,
                 round_number: round_index,
+                turn_started_at: start_time,
                 round_group_id: None,
+                observation_context: active_round_observation
+                    .as_ref()
+                    .and_then(|observation| observation.context()),
                 workspace: context.workspace.clone(),
                 model_exchange_trace_dir,
                 available_tools: available_tools.clone(),
@@ -3658,7 +3883,6 @@ impl ExecutionEngine {
                 remote_exec_port: context.remote_exec_port.clone(),
                 recover_partial_on_cancel: context.recover_partial_on_cancel,
             };
-
             // Execute single model round
             debug!(
                 "Starting model round: round_index={}, messages={}",
@@ -3725,6 +3949,7 @@ impl ExecutionEngine {
                             primary_supports_image_understanding,
                             context_profile_policy.compression_contract_limit,
                             context.workspace.as_ref(),
+                            turn_context.clone(),
                         )
                         .await
                     {
@@ -3774,6 +3999,15 @@ impl ExecutionEngine {
                                 "Context-overflow recovery found no compressible context: session_id={}, turn_id={}, round_index={}",
                                 context.session_id, context.dialog_turn_id, round_index
                             );
+                            if let Some(observation) = active_round_observation.take() {
+                                observation.finish(RoundFinishFacts {
+                                    completion: completion_from_error(&err),
+                                    has_tool_calls: false,
+                                    attempt_bucket: attempt_bucket(
+                                        round_lifecycle.attempts_started(),
+                                    ),
+                                });
+                            }
                             return Err(err);
                         }
                         Err(compression_error) => {
@@ -3784,12 +4018,40 @@ impl ExecutionEngine {
                                 round_index,
                                 compression_error
                             );
+                            if let Some(observation) = active_round_observation.take() {
+                                observation.finish(RoundFinishFacts {
+                                    completion: completion_from_error(&err),
+                                    has_tool_calls: false,
+                                    attempt_bucket: attempt_bucket(
+                                        round_lifecycle.attempts_started(),
+                                    ),
+                                });
+                            }
                             return Err(err);
                         }
                     }
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    if let Some(observation) = active_round_observation.take() {
+                        observation.finish(RoundFinishFacts {
+                            completion: completion_from_error(&err),
+                            has_tool_calls: false,
+                            attempt_bucket: attempt_bucket(round_lifecycle.attempts_started()),
+                        });
+                    }
+                    return Err(err);
+                }
             };
+            if first_result_ms.is_none() {
+                first_result_ms = round_result.first_result_ms;
+            }
+            if let Some(observation) = active_round_observation.take() {
+                observation.finish(RoundFinishFacts {
+                    completion: CompletionFacts::completed(),
+                    has_tool_calls: !round_result.tool_calls.is_empty(),
+                    attempt_bucket: attempt_bucket(round_lifecycle.attempts_started()),
+                });
+            }
             active_round_lifecycle = None;
 
             debug!(
@@ -4330,6 +4592,8 @@ impl ExecutionEngine {
                         ai_client: ai_client.clone(),
                         context: &context,
                         agent_type: agent_type.clone(),
+                        observation_context: turn_context.clone(),
+                        turn_started_at: start_time,
                         round_number: completed_rounds,
                         round_group_id: finalize_round_group_id.clone(),
                         execution_context_vars: &execution_context_vars,
@@ -4341,6 +4605,9 @@ impl ExecutionEngine {
                         context_window,
                     })
                     .await?;
+                if first_result_ms.is_none() {
+                    first_result_ms = final_round_result.first_result_ms;
+                }
 
                 let mut accepted = final_round_result.had_assistant_text
                     && !Self::assistant_has_tool_calls(&final_round_result.assistant_message);
@@ -4361,6 +4628,8 @@ impl ExecutionEngine {
                             ai_client: ai_client.clone(),
                             context: &context,
                             agent_type: agent_type.clone(),
+                            observation_context: turn_context.clone(),
+                            turn_started_at: start_time,
                             round_number: completed_rounds,
                             round_group_id: finalize_round_group_id.clone(),
                             execution_context_vars: &execution_context_vars,
@@ -4372,6 +4641,9 @@ impl ExecutionEngine {
                             context_window,
                         })
                         .await?;
+                    if first_result_ms.is_none() {
+                        first_result_ms = retry_result.first_result_ms;
+                    }
                     if !retry_result.had_assistant_text
                         || Self::assistant_has_tool_calls(&retry_result.assistant_message)
                     {
@@ -4434,6 +4706,26 @@ impl ExecutionEngine {
 
         let duration_ms = elapsed_ms_u64(start_time);
 
+        let turn_diff = if let Some(workspace) = context.workspace.as_ref() {
+            if let Some(manager) =
+                crate::service::snapshot::manager::get_snapshot_manager_for_workspace(
+                    workspace.root_path(),
+                )
+            {
+                manager
+                    .get_turn_diff_aggregate(&context.session_id, context.turn_index)
+                    .await
+                    .ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let modified_file_count = turn_diff.map(|aggregate| aggregate.modified_file_count as u64);
+        let added_lines = turn_diff.map(|aggregate| aggregate.lines_added as u64);
+        let deleted_lines = turn_diff.map(|aggregate| aggregate.lines_removed as u64);
+
         info!(
             "Dialog turn loop completed: turn={}, rounds={}, total_tools={}, reason={}",
             context.dialog_turn_id, completed_rounds, total_tools, effective_finish_reason
@@ -4485,6 +4777,10 @@ impl ExecutionEngine {
                         success: Some(success),
                         finish_reason: Some(effective_finish_reason.to_string()),
                         has_final_response: Some(has_final_response),
+                        first_result_ms,
+                        modified_file_count,
+                        added_lines,
+                        deleted_lines,
                     },
                     None,
                 )
@@ -4530,9 +4826,14 @@ impl ExecutionEngine {
                 .cloned()
                 .unwrap_or_else(|| Message::assistant(String::new())),
             total_rounds: completed_rounds,
+            total_tools,
             success,
             new_messages,
             finish_reason,
+            first_result_ms,
+            modified_file_count,
+            added_lines,
+            deleted_lines,
         })
     }
 
@@ -5490,6 +5791,7 @@ mod tests {
             workspace: None,
             context: HashMap::new(),
             subagent_parent_info: None,
+            observation_relation: bitfun_observability::TraceRelation::Root,
             permission_delegation: None,
             permission_runtime_ceiling: None,
             delegation_policy: bitfun_runtime_ports::DelegationPolicy::top_level(),

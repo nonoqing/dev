@@ -7,6 +7,11 @@ use super::state_manager::{tool_task_state_kind, ToolStateManager};
 use super::types::*;
 use crate::agentic::core::{ToolCall, ToolExecutionState, ToolResult as ModelToolResult};
 use crate::agentic::events::types::ToolEventData;
+use crate::agentic::events::AgenticEvent;
+use crate::agentic::observability::{
+    completion_from_error, safe_count_bucket, safe_permission_decision, safe_permission_source,
+    safe_terminal_completion, tool_completion_from_error, tool_identity,
+};
 use crate::agentic::tools::computer_use_host::ComputerUseHostRef;
 use crate::agentic::tools::framework::ToolResult as FrameworkToolResult;
 use crate::agentic::tools::registry::ToolRegistry;
@@ -32,6 +37,13 @@ use bitfun_agent_tools::{
     ResolvedToolInvocation, ToolExecutionAdmissionRejection, ToolExecutionAdmissionRequest,
     ToolExecutionErrorPresentation, GET_TOOL_SPEC_TOOL_NAME, USER_STEERING_INTERRUPTED_MESSAGE,
 };
+use bitfun_observability::domains::{
+    count_bucket, start_permission_confirmation, start_permission_evaluation, start_tool,
+    CompletionFacts, ExitStatusClass, PermissionConfirmationStartFacts, PermissionDecision,
+    PermissionEvaluateStartFacts, PermissionFinishFacts, PermissionSource, SafeErrorType,
+    ToolFailureSource, ToolFinishFacts, ToolSourceClass, ToolStartFacts,
+};
+use bitfun_observability::{ObservationContext, Telemetry};
 use bitfun_runtime_ports::{
     PermissionReply, PermissionRequest, PermissionRequestSource, PermissionRequestSourceKind,
     PermissionResourceCaseSensitivity, RoundInjectionToolPreemption,
@@ -204,6 +216,47 @@ fn elapsed_ms_since(time: SystemTime) -> u64 {
     time.elapsed()
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+fn tool_terminal_timings(
+    state: Option<&ToolExecutionState>,
+) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
+    match state {
+        Some(ToolExecutionState::Completed {
+            queue_wait_ms,
+            preflight_ms,
+            confirmation_wait_ms,
+            execution_ms,
+            ..
+        })
+        | Some(ToolExecutionState::Failed {
+            queue_wait_ms,
+            preflight_ms,
+            confirmation_wait_ms,
+            execution_ms,
+            ..
+        })
+        | Some(ToolExecutionState::Rejected {
+            queue_wait_ms,
+            preflight_ms,
+            confirmation_wait_ms,
+            execution_ms,
+            ..
+        })
+        | Some(ToolExecutionState::Cancelled {
+            queue_wait_ms,
+            preflight_ms,
+            confirmation_wait_ms,
+            execution_ms,
+            ..
+        }) => (
+            *queue_wait_ms,
+            *preflight_ms,
+            *confirmation_wait_ms,
+            *execution_ms,
+        ),
+        _ => (None, None, None, None),
+    }
 }
 
 fn classify_tool_error(error: &BitFunError) -> &'static str {
@@ -460,8 +513,13 @@ fn user_rejection_audit_reason(tool_name: &str, feedback: Option<&str>) -> Strin
 #[derive(Debug)]
 enum PermissionExecutionPlan {
     Allowed,
-    Rejected { reason: String },
-    Awaiting(Vec<PendingPermissionReceiver>),
+    Rejected {
+        reason: String,
+    },
+    Awaiting {
+        receivers: Vec<PendingPermissionReceiver>,
+        auto_approve: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -601,6 +659,7 @@ pub struct ToolPipeline {
     /// Tool task ids a PreToolUse hook approved. The approval waives the
     /// interactive permission prompt only; policy denials still apply.
     hook_preapprovals: Arc<TokioMutex<HashSet<String>>>,
+    telemetry: Telemetry,
 }
 
 impl ToolPipeline {
@@ -617,7 +676,21 @@ impl ToolPipeline {
             permission_request_manager: None,
             permission_plans: Arc::new(TokioMutex::new(HashMap::new())),
             hook_preapprovals: Arc::new(TokioMutex::new(HashSet::new())),
+            telemetry: Telemetry::noop(),
         }
+    }
+
+    /// Return the active Tool span context for an internally launched subagent.
+    /// The lookup key is runtime-only and is not exported as telemetry data.
+    pub(crate) fn observation_context_for_tool(&self, tool_id: &str) -> Option<ObservationContext> {
+        self.state_manager
+            .get_task(tool_id)
+            .and_then(|task| task.context.observation_context.clone())
+    }
+
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     pub fn with_permission_request_manager(
@@ -633,6 +706,67 @@ impl ToolPipeline {
     }
 
     async fn draft_permission_plan(
+        &self,
+        task: ToolTask,
+        tool_name: String,
+        intents: Vec<PermissionIntent>,
+        context: ToolUseContext,
+    ) -> BitFunResult<PermissionPlanDraft> {
+        let start_facts = PermissionEvaluateStartFacts {
+            intent_count_bucket: count_bucket(intents.len()),
+            delegated: task.context.permission_delegation.is_some()
+                || task.context.subagent_parent_info.is_some(),
+        };
+        let observation = start_permission_evaluation(
+            &self.telemetry,
+            start_facts,
+            task.context.observation_context.clone(),
+        );
+        let started_at = Instant::now();
+        let result = self
+            .draft_permission_plan_impl(task, tool_name, intents, context)
+            .await;
+        let finish_facts = match &result {
+            Ok(PermissionPlanDraft::Allowed) => PermissionFinishFacts {
+                completion: CompletionFacts::completed(),
+                decision: PermissionDecision::Allow,
+                source: PermissionSource::Policy,
+            },
+            Ok(PermissionPlanDraft::Rejected { .. }) => PermissionFinishFacts {
+                completion: CompletionFacts::completed(),
+                decision: PermissionDecision::PolicyDeny,
+                source: PermissionSource::Policy,
+            },
+            Ok(PermissionPlanDraft::Requests(_)) => PermissionFinishFacts {
+                completion: CompletionFacts::completed(),
+                decision: PermissionDecision::Ask,
+                source: PermissionSource::Policy,
+            },
+            Err(error) => PermissionFinishFacts {
+                completion: completion_from_error(error),
+                decision: PermissionDecision::Failed,
+                source: PermissionSource::Other,
+            },
+        };
+        observation.finish(finish_facts);
+        if self.telemetry.is_enabled() {
+            let (outcome, error_type) = safe_terminal_completion(finish_facts.completion);
+            self.state_manager
+                .emit_internal_event(AgenticEvent::PermissionEvaluationCompleted {
+                    intent_count_bucket: safe_count_bucket(start_facts.intent_count_bucket),
+                    delegated: start_facts.delegated,
+                    decision: safe_permission_decision(finish_facts.decision),
+                    source: safe_permission_source(finish_facts.source),
+                    outcome,
+                    error_type,
+                    duration_ms: elapsed_ms_u64(started_at),
+                })
+                .await;
+        }
+        result
+    }
+
+    async fn draft_permission_plan_impl(
         &self,
         task: ToolTask,
         tool_name: String,
@@ -1009,7 +1143,10 @@ impl ToolPipeline {
                     })?;
                     self.permission_plans.lock().await.insert(
                         task_id.clone(),
-                        PermissionExecutionPlan::Awaiting(receivers),
+                        PermissionExecutionPlan::Awaiting {
+                            receivers,
+                            auto_approve,
+                        },
                     );
                 }
             }
@@ -1040,12 +1177,13 @@ impl ToolPipeline {
         &self,
         task_id: &str,
         cancellation_token: &CancellationToken,
+        parent: Option<ObservationContext>,
     ) -> BitFunResult<PermissionAuthorization> {
         let Some(plan) = self.permission_plans.lock().await.remove(task_id) else {
             return Ok(PermissionAuthorization::Allowed);
         };
 
-        self.await_permission_execution_plan(plan, cancellation_token)
+        self.await_permission_execution_plan(plan, cancellation_token, parent)
             .await
     }
 
@@ -1053,77 +1191,142 @@ impl ToolPipeline {
         &self,
         plan: PermissionExecutionPlan,
         cancellation_token: &CancellationToken,
+        parent: Option<ObservationContext>,
     ) -> BitFunResult<PermissionAuthorization> {
-        let receivers = match plan {
+        let (receivers, auto_approve) = match plan {
             PermissionExecutionPlan::Allowed => return Ok(PermissionAuthorization::Allowed),
             PermissionExecutionPlan::Rejected { reason } => {
                 return Ok(PermissionAuthorization::PolicyDenied { reason });
             }
-            PermissionExecutionPlan::Awaiting(receivers) => receivers,
+            PermissionExecutionPlan::Awaiting {
+                receivers,
+                auto_approve,
+            } => (receivers, auto_approve),
         };
 
-        let mut receivers = receivers.into_iter();
-        while let Some(pending) = receivers.next() {
-            let request_id = pending.request_id().to_string();
-            let outcome = tokio::select! {
-                outcome = pending.wait() => outcome,
-                _ = cancellation_token.cancelled() => {
-                    let remaining = std::iter::once(request_id.clone())
-                        .chain(receivers.map(|pending| pending.request_id().to_string()));
+        let start_facts = PermissionConfirmationStartFacts {
+            request_count_bucket: count_bucket(receivers.len()),
+            auto_approve,
+        };
+        let observation = start_permission_confirmation(&self.telemetry, start_facts, parent);
+        let started_at = Instant::now();
+        let result: BitFunResult<PermissionAuthorization> = async {
+            let mut receivers = receivers.into_iter();
+            while let Some(pending) = receivers.next() {
+                let request_id = pending.request_id().to_string();
+                let outcome = tokio::select! {
+                    outcome = pending.wait() => outcome,
+                    _ = cancellation_token.cancelled() => {
+                        let remaining = std::iter::once(request_id.clone())
+                            .chain(receivers.map(|pending| pending.request_id().to_string()));
+                        self.cancel_permission_request_ids(
+                            remaining.collect(),
+                            "Tool execution was cancelled".to_string(),
+                        )
+                        .await;
+                        return Err(BitFunError::Cancelled(
+                            "Tool execution was cancelled while awaiting permission".to_string(),
+                        ));
+                    }
+                };
+
+                match outcome {
+                    PermissionWaitOutcome::Replied(
+                        PermissionReply::Once | PermissionReply::Always,
+                    ) => {}
+                    PermissionWaitOutcome::Replied(PermissionReply::Reject { feedback }) => {
+                        self.cancel_permission_request_ids(
+                            receivers
+                                .map(|pending| pending.request_id().to_string())
+                                .collect(),
+                            "Another permission request for this tool was rejected".to_string(),
+                        )
+                        .await;
+                        let feedback = feedback
+                            .map(|feedback| feedback.trim().to_string())
+                            .filter(|feedback| !feedback.is_empty());
+                        return Ok(PermissionAuthorization::UserRejected { feedback });
+                    }
+                    PermissionWaitOutcome::Cancelled { reason } => {
+                        self.cancel_permission_request_ids(
+                            receivers
+                                .map(|pending| pending.request_id().to_string())
+                                .collect(),
+                            "Another permission request for this tool was cancelled".to_string(),
+                        )
+                        .await;
+                        return Err(BitFunError::Cancelled(reason));
+                    }
+                }
+
+                if cancellation_token.is_cancelled() {
                     self.cancel_permission_request_ids(
-                        remaining.collect(),
+                        receivers
+                            .map(|pending| pending.request_id().to_string())
+                            .collect(),
                         "Tool execution was cancelled".to_string(),
                     )
                     .await;
                     return Err(BitFunError::Cancelled(
-                        "Tool execution was cancelled while awaiting permission".to_string(),
+                        "Tool execution was cancelled after permission reply".to_string(),
                     ));
                 }
-            };
-
-            match outcome {
-                PermissionWaitOutcome::Replied(PermissionReply::Once | PermissionReply::Always) => {
-                }
-                PermissionWaitOutcome::Replied(PermissionReply::Reject { feedback }) => {
-                    self.cancel_permission_request_ids(
-                        receivers
-                            .map(|pending| pending.request_id().to_string())
-                            .collect(),
-                        "Another permission request for this tool was rejected".to_string(),
-                    )
-                    .await;
-                    let feedback = feedback
-                        .map(|feedback| feedback.trim().to_string())
-                        .filter(|feedback| !feedback.is_empty());
-                    return Ok(PermissionAuthorization::UserRejected { feedback });
-                }
-                PermissionWaitOutcome::Cancelled { reason } => {
-                    self.cancel_permission_request_ids(
-                        receivers
-                            .map(|pending| pending.request_id().to_string())
-                            .collect(),
-                        "Another permission request for this tool was cancelled".to_string(),
-                    )
-                    .await;
-                    return Err(BitFunError::Cancelled(reason));
-                }
             }
 
-            if cancellation_token.is_cancelled() {
-                self.cancel_permission_request_ids(
-                    receivers
-                        .map(|pending| pending.request_id().to_string())
-                        .collect(),
-                    "Tool execution was cancelled".to_string(),
-                )
-                .await;
-                return Err(BitFunError::Cancelled(
-                    "Tool execution was cancelled after permission reply".to_string(),
-                ));
-            }
+            Ok(PermissionAuthorization::Allowed)
         }
-
-        Ok(PermissionAuthorization::Allowed)
+        .await;
+        let finish_facts = match &result {
+            Ok(PermissionAuthorization::Allowed) => PermissionFinishFacts {
+                completion: CompletionFacts::completed(),
+                decision: PermissionDecision::Allow,
+                source: if auto_approve {
+                    PermissionSource::AutoApprove
+                } else {
+                    PermissionSource::User
+                },
+            },
+            Ok(PermissionAuthorization::UserRejected { .. }) => PermissionFinishFacts {
+                completion: CompletionFacts::completed(),
+                decision: PermissionDecision::UserReject,
+                source: PermissionSource::User,
+            },
+            Ok(PermissionAuthorization::PolicyDenied { .. }) => PermissionFinishFacts {
+                completion: CompletionFacts::completed(),
+                decision: PermissionDecision::PolicyDeny,
+                source: PermissionSource::Policy,
+            },
+            Err(BitFunError::Cancelled(_)) => PermissionFinishFacts {
+                completion: CompletionFacts::cancelled(),
+                decision: PermissionDecision::Cancelled,
+                source: if auto_approve {
+                    PermissionSource::AutoApprove
+                } else {
+                    PermissionSource::User
+                },
+            },
+            Err(error) => PermissionFinishFacts {
+                completion: completion_from_error(error),
+                decision: PermissionDecision::Failed,
+                source: PermissionSource::Other,
+            },
+        };
+        observation.finish(finish_facts);
+        if self.telemetry.is_enabled() {
+            let (outcome, error_type) = safe_terminal_completion(finish_facts.completion);
+            self.state_manager
+                .emit_internal_event(AgenticEvent::PermissionConfirmationCompleted {
+                    request_count_bucket: safe_count_bucket(start_facts.request_count_bucket),
+                    auto_approve: start_facts.auto_approve,
+                    decision: safe_permission_decision(finish_facts.decision),
+                    source: safe_permission_source(finish_facts.source),
+                    outcome,
+                    error_type,
+                    duration_ms: elapsed_ms_u64(started_at),
+                })
+                .await;
+        }
+        result
     }
 
     async fn cancel_permission_request_ids(&self, request_ids: Vec<String>, reason: String) {
@@ -1153,7 +1356,7 @@ impl ToolPipeline {
             let Some(plan) = self.permission_plans.lock().await.remove(task_id) else {
                 continue;
             };
-            if let PermissionExecutionPlan::Awaiting(receivers) = plan {
+            if let PermissionExecutionPlan::Awaiting { receivers, .. } = plan {
                 self.cancel_permission_request_ids(
                     receivers
                         .into_iter()
@@ -1187,18 +1390,24 @@ impl ToolPipeline {
             PermissionPlanDraft::Rejected { reason } => {
                 PermissionExecutionPlan::Rejected { reason }
             }
-            PermissionPlanDraft::Requests(requests) => PermissionExecutionPlan::Awaiting(
-                self.register_permission_requests(
-                    requests,
-                    &task.context.dialog_turn_id,
-                    task.options.auto_approve_ask,
-                )
-                .await?,
-            ),
+            PermissionPlanDraft::Requests(requests) => PermissionExecutionPlan::Awaiting {
+                receivers: self
+                    .register_permission_requests(
+                        requests,
+                        &task.context.dialog_turn_id,
+                        task.options.auto_approve_ask,
+                    )
+                    .await?,
+                auto_approve: task.options.auto_approve_ask,
+            },
         };
 
-        self.await_permission_execution_plan(plan, cancellation_token)
-            .await
+        self.await_permission_execution_plan(
+            plan,
+            cancellation_token,
+            task.context.observation_context.clone(),
+        )
+        .await
     }
 
     fn pending_round_injection_tool_preemption(
@@ -1372,6 +1581,18 @@ impl ToolPipeline {
                 .collect()
         };
         let concurrency_safe_count = concurrency_flags.iter().filter(|&&flag| flag).count();
+        let telemetry_identities = {
+            let registry = self.tool_registry.read().await;
+            resolved_tool_calls
+                .iter()
+                .map(|(_, invocation, _)| {
+                    let provider_kind = registry
+                        .get_dynamic_tool_info(&invocation.effective_tool_name)
+                        .and_then(|info| info.provider_kind);
+                    tool_identity(&invocation.effective_tool_name, provider_kind.as_deref())
+                })
+                .collect::<Vec<_>>()
+        };
 
         // Create tasks for all tool calls
         let mut task_ids = Vec::with_capacity(resolved_tool_calls.len());
@@ -1386,6 +1607,17 @@ impl ToolPipeline {
                 options.clone(),
             );
             task.tool_call_order = tool_call_order as u32;
+            task.telemetry_parallel = options.allow_parallel
+                && concurrency_flags
+                    .get(tool_call_order)
+                    .copied()
+                    .unwrap_or(false);
+            if let Some((_, source_class, tool_kind)) =
+                telemetry_identities.get(tool_call_order).copied()
+            {
+                task.telemetry_source_class = source_class;
+                task.telemetry_kind = tool_kind;
+            }
             let tool_id = self.state_manager.create_task(task).await;
             task_ids.push(tool_id);
         }
@@ -1545,15 +1777,99 @@ impl ToolPipeline {
 
     /// Execute single tool
     async fn execute_single_tool(&self, tool_id: String) -> BitFunResult<ToolExecutionResult> {
+        let Some(task) = self.state_manager.get_task(&tool_id) else {
+            return self.execute_single_tool_impl(tool_id, None).await;
+        };
+        let tool_class = match task.telemetry_source_class {
+            ToolSourceClass::BuiltIn | ToolSourceClass::Skill => {
+                bitfun_observability::domains::ToolClass::BuiltIn
+            }
+            _ => bitfun_observability::domains::ToolClass::Custom,
+        };
+        let observation = start_tool(
+            &self.telemetry,
+            ToolStartFacts {
+                tool_class,
+                source_class: task.telemetry_source_class,
+                tool_kind: task.telemetry_kind,
+                parallel: task.telemetry_parallel,
+                remote: task
+                    .context
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.is_remote()),
+                background: task.telemetry_background,
+            },
+            task.context.observation_context.clone(),
+        );
+        let tool_context = observation.context();
+        self.state_manager
+            .set_observation_context(&tool_id, tool_context.clone());
+        let result = self
+            .execute_single_tool_impl(tool_id.clone(), tool_context)
+            .await;
+        let state = self.state_manager.get_task(&tool_id).map(|task| task.state);
+        let (queue_ms, preflight_ms, confirmation_ms, execution_ms) =
+            tool_terminal_timings(state.as_ref());
+        let completion = match (&result, state.as_ref()) {
+            (Err(error), _) => tool_completion_from_error(error),
+            (_, Some(ToolExecutionState::Rejected { .. })) => {
+                CompletionFacts::rejected(SafeErrorType::PermissionDenied)
+            }
+            (_, Some(ToolExecutionState::Cancelled { .. })) => CompletionFacts::cancelled(),
+            (_, Some(ToolExecutionState::Failed { .. })) => {
+                CompletionFacts::failed(SafeErrorType::Other)
+            }
+            _ => CompletionFacts::completed(),
+        };
+        let failure_source = match (&result, state.as_ref()) {
+            (
+                Err(BitFunError::Validation(_) | BitFunError::Tool(_) | BitFunError::NotFound(_)),
+                _,
+            ) => Some(ToolFailureSource::Validation),
+            (Err(BitFunError::Timeout(_)), _) => Some(ToolFailureSource::Timeout),
+            (Err(BitFunError::Cancelled(_)), _) => Some(ToolFailureSource::Cancellation),
+            (_, Some(ToolExecutionState::Rejected { .. })) => Some(ToolFailureSource::Permission),
+            (_, Some(ToolExecutionState::Cancelled { .. })) => {
+                Some(ToolFailureSource::Cancellation)
+            }
+            (Err(_), _) | (_, Some(ToolExecutionState::Failed { .. })) => {
+                Some(ToolFailureSource::Execution)
+            }
+            _ => None,
+        };
+        let exit_status_class = match state.as_ref() {
+            Some(ToolExecutionState::Completed { .. }) => Some(ExitStatusClass::Success),
+            Some(ToolExecutionState::Failed { .. }) => Some(ExitStatusClass::Unknown),
+            _ => None,
+        };
+        observation.finish(ToolFinishFacts {
+            completion,
+            queue_ms,
+            preflight_ms,
+            confirmation_ms,
+            execution_ms,
+            failure_source,
+            exit_status_class,
+        });
+        result
+    }
+
+    async fn execute_single_tool_impl(
+        &self,
+        tool_id: String,
+        observation_context: Option<ObservationContext>,
+    ) -> BitFunResult<ToolExecutionResult> {
         let start_time = Instant::now();
 
         debug!("Starting tool execution: tool_id={}", tool_id);
 
         // Get task
-        let task = self
+        let mut task = self
             .state_manager
             .get_task(&tool_id)
             .ok_or_else(|| BitFunError::NotFound(format!("Tool task not found: {}", tool_id)))?;
+        task.context.observation_context = observation_context;
 
         let wire_tool_name = task.tool_call.tool_name.clone();
         let tool_name = task.invocation.effective_tool_name.clone();
@@ -1764,8 +2080,12 @@ impl ToolPipeline {
 
         let has_prepared_plan = self.permission_plans.lock().await.contains_key(&tool_id);
         let permission_authorization = if has_prepared_plan {
-            self.await_prepared_permission_plan(&tool_id, &cancellation_token)
-                .await
+            self.await_prepared_permission_plan(
+                &tool_id,
+                &cancellation_token,
+                task.context.observation_context.clone(),
+            )
+            .await
         } else {
             let permission_intents = tool.permission_intents(&tool_args, &tool_context)?;
             self.authorize_permission_intents(
@@ -2788,6 +3108,7 @@ mod tests {
             round_id: "round_1".to_string(),
             attempt_id: None,
             attempt_index: None,
+            observation_context: None,
             agent_type: "agent".to_string(),
             workspace: None,
             primary_model_facts: tool_runtime::context::PrimaryModelFacts::default(),

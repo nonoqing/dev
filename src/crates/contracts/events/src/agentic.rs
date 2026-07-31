@@ -46,6 +46,88 @@ pub enum DeepReviewQueueReason {
     TemporaryOverload,
 }
 
+/// Privacy-safe terminal facts used by the internal observability projector.
+/// These enums intentionally cannot carry business identifiers or raw text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafeOperationOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+    Timeout,
+    Rejected,
+    Degraded,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafeOperationErrorType {
+    Cancelled,
+    Timeout,
+    Authentication,
+    RateLimited,
+    NetworkUnavailable,
+    NetworkProtocol,
+    InvalidRequest,
+    ContextOverflow,
+    ToolValidation,
+    PermissionDenied,
+    Persistence,
+    Provider,
+    Internal,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafeSessionOperation {
+    Create,
+    Resume,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafeSessionClass {
+    Standard,
+    Subagent,
+    Internal,
+    Transient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafeCountBucket {
+    Zero,
+    One,
+    Two,
+    ThreePlus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafePermissionDecision {
+    Allow,
+    Ask,
+    PolicyDeny,
+    UserReject,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafePermissionSource {
+    Policy,
+    StoredGrant,
+    Hook,
+    AutoApprove,
+    User,
+    Delegated,
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeepReviewQueueState {
     pub tool_id: String,
@@ -112,6 +194,41 @@ pub enum AgenticEvent {
 
     SessionDeleted {
         session_id: String,
+    },
+
+    /// Internal terminal event. It has no session identifier by design.
+    SessionOperationCompleted {
+        operation: SafeSessionOperation,
+        session_class: SafeSessionClass,
+        remote: bool,
+        outcome: SafeOperationOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_type: Option<SafeOperationErrorType>,
+        duration_ms: u64,
+    },
+
+    /// Internal terminal event. It has no request, tool, or session identifier.
+    PermissionEvaluationCompleted {
+        intent_count_bucket: SafeCountBucket,
+        delegated: bool,
+        decision: SafePermissionDecision,
+        source: SafePermissionSource,
+        outcome: SafeOperationOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_type: Option<SafeOperationErrorType>,
+        duration_ms: u64,
+    },
+
+    /// Internal terminal event. It has no request, tool, or session identifier.
+    PermissionConfirmationCompleted {
+        request_count_bucket: SafeCountBucket,
+        auto_approve: bool,
+        decision: SafePermissionDecision,
+        source: SafePermissionSource,
+        outcome: SafeOperationOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_type: Option<SafeOperationErrorType>,
+        duration_ms: u64,
     },
 
     SessionTitleGenerated {
@@ -181,6 +298,15 @@ pub enum AgenticEvent {
         /// Whether the turn produced a user-visible final response.
         #[serde(skip_serializing_if = "Option::is_none")]
         has_final_response: Option<bool>,
+        /// Turn start to first non-empty user-visible assistant text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_result_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modified_file_count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        added_lines: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deleted_lines: Option<u64>,
     },
 
     DialogTurnCancelled {
@@ -213,6 +339,8 @@ pub enum AgenticEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cached_tokens: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_tokens: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         token_details: Option<serde_json::Value>,
     },
 
@@ -229,6 +357,8 @@ pub enum AgenticEvent {
         session_id: String,
         turn_id: String,
         compression_id: String,
+        #[serde(default)]
+        trigger: String,
         compression_count: usize,
         tokens_before: usize,
         tokens_after: usize,
@@ -244,6 +374,11 @@ pub enum AgenticEvent {
         session_id: String,
         turn_id: String,
         compression_id: String,
+        #[serde(default)]
+        trigger: String,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_before: Option<usize>,
         error: String,
     },
 
@@ -408,6 +543,44 @@ pub struct ModelRoundAttemptToolDiagnostic {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolTelemetrySourceClass {
+    BuiltIn,
+    Mcp,
+    Skill,
+    Plugin,
+    External,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolTelemetryKind {
+    Filesystem,
+    Search,
+    Shell,
+    Git,
+    Browser,
+    ComputerUse,
+    Protocol,
+    Task,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolTelemetryIdentity {
+    pub source_class: ToolTelemetrySourceClass,
+    pub kind: ToolTelemetryKind,
+    #[serde(default)]
+    pub parallel: bool,
+    #[serde(default)]
+    pub remote: bool,
+    #[serde(default)]
+    pub background: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolEventIdentity {
     pub tool_id: String,
     /// Provider-facing name. Deferred calls remain `CallDeferredTool`.
@@ -415,6 +588,9 @@ pub struct ToolEventIdentity {
     /// Runtime target when it differs from the provider-facing name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_tool_name: Option<String>,
+    /// Bounded, content-free identity used only by telemetry projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<ToolTelemetryIdentity>,
 }
 
 impl ToolEventIdentity {
@@ -423,6 +599,7 @@ impl ToolEventIdentity {
             tool_id: tool_id.into(),
             tool_name: tool_name.into(),
             effective_tool_name: None,
+            telemetry: None,
         }
     }
 
@@ -437,7 +614,13 @@ impl ToolEventIdentity {
             tool_id: tool_id.into(),
             effective_tool_name: (tool_name != effective_tool_name).then_some(effective_tool_name),
             tool_name,
+            telemetry: None,
         }
+    }
+
+    pub fn with_telemetry(mut self, telemetry: ToolTelemetryIdentity) -> Self {
+        self.telemetry = Some(telemetry);
+        self
     }
 
     pub fn effective_name(&self) -> &str {
@@ -632,6 +815,9 @@ impl AgenticEvent {
             | Self::DeepReviewQueueStateChanged { session_id, .. }
             | Self::SessionModelAutoMigrated { session_id, .. } => Some(session_id),
             Self::SystemError { session_id, .. } => session_id.as_deref(),
+            Self::SessionOperationCompleted { .. }
+            | Self::PermissionEvaluationCompleted { .. }
+            | Self::PermissionConfirmationCompleted { .. } => None,
         }
     }
 
@@ -685,7 +871,10 @@ impl AgenticEvent {
             | Self::ContextCompressionStarted { .. }
             | Self::ThreadGoalUpdated { .. }
             | Self::UserSteeringInjected { .. }
-            | Self::ContextCompressionCompleted { .. } => AgenticEventPriority::Normal,
+            | Self::ContextCompressionCompleted { .. }
+            | Self::SessionOperationCompleted { .. }
+            | Self::PermissionEvaluationCompleted { .. }
+            | Self::PermissionConfirmationCompleted { .. } => AgenticEventPriority::Normal,
 
             Self::ToolEvent { tool_event, .. } => tool_event.default_priority(),
 
@@ -840,12 +1029,14 @@ mod tests {
             max_context_tokens: Some(100),
             is_subagent: false,
             cached_tokens: Some(3),
+            reasoning_tokens: Some(2),
             token_details: Some(serde_json::json!({ "cachedSource": "provider" })),
         };
 
         let json = serde_json::to_value(&event).expect("serialize event");
 
         assert_eq!(json["cached_tokens"], 3);
+        assert_eq!(json["reasoning_tokens"], 2);
         assert_eq!(json["token_details"]["cachedSource"], "provider");
     }
 

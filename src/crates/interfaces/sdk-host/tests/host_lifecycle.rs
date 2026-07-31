@@ -328,6 +328,10 @@ impl AgentDialogTurnPort for FakeOwner {
                         success: Some(true),
                         finish_reason: Some("stop".to_string()),
                         has_final_response: Some(true),
+                        first_result_ms: None,
+                        modified_file_count: None,
+                        added_lines: None,
+                        deleted_lines: None,
                     },
                     None,
                 )
@@ -1882,6 +1886,10 @@ async fn queued_query_is_accepted_and_tracked_by_its_exact_turn() {
                 success: Some(true),
                 finish_reason: Some("stop".to_string()),
                 has_final_response: Some(true),
+                first_result_ms: None,
+                modified_file_count: None,
+                added_lines: None,
+                deleted_lines: None,
             },
             None,
         )
@@ -1904,6 +1912,10 @@ async fn queued_query_is_accepted_and_tracked_by_its_exact_turn() {
                 success: Some(true),
                 finish_reason: Some("stop".to_string()),
                 has_final_response: Some(true),
+                first_result_ms: None,
+                modified_file_count: None,
+                added_lines: None,
+                deleted_lines: None,
             },
             None,
         )

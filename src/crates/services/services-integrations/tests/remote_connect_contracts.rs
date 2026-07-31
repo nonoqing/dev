@@ -2418,6 +2418,10 @@ fn remote_connect_tracker_keeps_finished_turn_snapshot_until_persistence_finaliz
         success: Some(true),
         finish_reason: Some("stop".to_string()),
         has_final_response: Some(true),
+        first_result_ms: None,
+        modified_file_count: None,
+        added_lines: None,
+        deleted_lines: None,
     });
 
     assert_eq!(tracker.session_state(), "idle");
@@ -2566,6 +2570,10 @@ fn remote_connect_poll_helpers_preserve_delta_and_completion_policy() {
         success: Some(true),
         finish_reason: Some("stop".to_string()),
         has_final_response: Some(true),
+        first_result_ms: None,
+        modified_file_count: None,
+        added_lines: None,
+        deleted_lines: None,
     });
 
     let waiting_for_persistence = serde_json::to_value(remote_persisted_poll_response(

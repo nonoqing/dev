@@ -534,6 +534,10 @@ mod tests {
             success: Some(true),
             finish_reason: None,
             has_final_response: Some(true),
+            first_result_ms: None,
+            modified_file_count: None,
+            added_lines: None,
+            deleted_lines: None,
         };
 
         assert!(prompt_event_matches_turn(&current, "turn-current"));

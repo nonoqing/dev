@@ -1429,6 +1429,7 @@ mod tests {
                 max_context_tokens: Some(128_000),
                 is_subagent,
                 cached_tokens: Some(10_000),
+                reasoning_tokens: None,
                 token_details: None,
             };
 
@@ -1518,6 +1519,7 @@ mod tests {
             session_id: "session".to_string(),
             turn_id: "turn".to_string(),
             compression_id: "compression".to_string(),
+            trigger: "manual".to_string(),
             compression_count: 2,
             tokens_before: 80_000,
             tokens_after: 20_000,
@@ -1561,6 +1563,9 @@ mod tests {
             session_id: "session".to_string(),
             turn_id: "turn".to_string(),
             compression_id: "compression".to_string(),
+            trigger: "manual".to_string(),
+            duration_ms: 42,
+            tokens_before: Some(80_000),
             error: "summary request failed".to_string(),
         };
 

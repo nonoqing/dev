@@ -14,6 +14,9 @@ use crate::agentic::memories::{
     parse_bitfun_memory_citation, parse_bitfun_memory_citation_payloads,
     strip_bitfun_memory_citations,
 };
+use crate::agentic::observability::{
+    completion_from_error, inference_classes, retryable_error, status_class,
+};
 use crate::agentic::permission_policy::resolve_effective_permission_policy;
 use crate::agentic::tools::computer_use_host::ComputerUseHostRef;
 use crate::agentic::tools::pipeline::{
@@ -40,6 +43,12 @@ use bitfun_ai_adapters::{
     ModelExchangeRequestTraceHandle, ModelExchangeResponseTrace, ModelExchangeTraceConfig,
 };
 use bitfun_core_types::errors::{AiProviderError, ErrorCategory};
+use bitfun_observability::domains::{
+    attempt_bucket, index_bucket, start_inference, start_inference_attempt, start_round,
+    CompletionFacts, InferenceAttemptFinishFacts, InferenceAttemptStartFacts, InferenceFinishFacts,
+    InferenceStartFacts, RoundFinishFacts, RoundStartFacts, SafeErrorType, StatusClass,
+};
+use bitfun_observability::Telemetry;
 use bitfun_runtime_ports::PermissionRule;
 use log::{debug, error, warn};
 use std::sync::Arc;
@@ -52,6 +61,7 @@ pub struct RoundExecutor {
     tool_pipeline: Option<Arc<ToolPipeline>>,
     event_queue: Arc<EventQueue>,
     cancellation_tokens: DialogTurnCancellationTokenStore,
+    telemetry: Telemetry,
 }
 
 /// Mutable lifecycle shared by all provider attempts that belong to one
@@ -88,7 +98,7 @@ impl ModelRoundLifecycle {
         self.attempts_started
     }
 
-    fn attempts_started(&self) -> u32 {
+    pub(super) fn attempts_started(&self) -> u32 {
         self.attempts_started
     }
 }
@@ -262,7 +272,13 @@ impl RoundExecutor {
             tool_pipeline: Some(tool_pipeline),
             event_queue,
             cancellation_tokens: DialogTurnCancellationTokenStore::new(),
+            telemetry: bitfun_observability::Telemetry::noop(),
         }
+    }
+
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     pub fn computer_use_host(&self) -> Option<ComputerUseHostRef> {
@@ -275,21 +291,45 @@ impl RoundExecutor {
     pub async fn execute_round(
         &self,
         ai_client: Arc<AIClient>,
-        context: RoundContext,
+        mut context: RoundContext,
         ai_messages: Vec<AIMessage>,
         tool_definitions: Option<Vec<ToolDefinition>>,
         context_window: Option<usize>,
     ) -> BitFunResult<RoundResult> {
         let mut lifecycle = ModelRoundLifecycle::new();
-        self.execute_round_with_lifecycle(
-            ai_client,
-            context,
-            ai_messages,
-            tool_definitions,
-            context_window,
-            &mut lifecycle,
-        )
-        .await
+        let observation = start_round(
+            &self.telemetry,
+            RoundStartFacts {
+                index_bucket: index_bucket(context.round_number),
+                subagent: context.subagent_parent_info.is_some(),
+            },
+            context.observation_context.clone(),
+        );
+        context.observation_context = observation.context();
+        let result = self
+            .execute_round_with_lifecycle(
+                ai_client,
+                context,
+                ai_messages,
+                tool_definitions,
+                context_window,
+                &mut lifecycle,
+            )
+            .await;
+        let finish = match &result {
+            Ok(result) => RoundFinishFacts {
+                completion: CompletionFacts::completed(),
+                has_tool_calls: !result.tool_calls.is_empty(),
+                attempt_bucket: attempt_bucket(lifecycle.attempts_started()),
+            },
+            Err(error) => RoundFinishFacts {
+                completion: completion_from_error(error),
+                has_tool_calls: false,
+                attempt_bucket: attempt_bucket(lifecycle.attempts_started()),
+            },
+        };
+        observation.finish(finish);
+        result
     }
 
     pub(super) async fn execute_round_with_lifecycle(
@@ -341,9 +381,28 @@ impl RoundExecutor {
                 Err(_) => Default::default(),
             };
         let allow_normal_tool_json_repair = global_config.ai.allow_tool_json_repair;
+        let (provider_class, model_class, protocol_class) =
+            inference_classes(&ai_client.config.format, &context.effective_model_name);
+        let inference_observation = start_inference(
+            &self.telemetry,
+            InferenceStartFacts {
+                provider_class,
+                model_class,
+                protocol_class,
+            },
+            context.observation_context.clone(),
+        );
+        let inference_context = inference_observation.context();
         let max_attempts = Self::MAX_STREAM_ATTEMPTS;
-        let mut local_attempt_index = 0usize;
-        let (stream_result, send_to_stream_ms, stream_processing_ms, final_trace_handle) = loop {
+        let inference_result: BitFunResult<_> = async {
+            let mut local_attempt_index = 0usize;
+            let (
+                stream_result,
+                send_to_stream_ms,
+                stream_processing_ms,
+                final_trace_handle,
+                request_turn_offset_ms,
+            ) = loop {
             let attempt_number = lifecycle.begin_attempt();
             let attempt_id = format!("{round_id}:attempt:{attempt_number}");
             // Check cancellation before opening a model stream. This catches
@@ -357,6 +416,19 @@ impl RoundExecutor {
             }
 
             let request_started_at = Instant::now();
+            let request_turn_offset_ms = elapsed_ms_u64(context.turn_started_at);
+            let mut attempt_observation = Some(start_inference_attempt(
+                &self.telemetry,
+                InferenceAttemptStartFacts {
+                    attempt_bucket: attempt_bucket(attempt_number),
+                },
+                inference_context.clone(),
+            ));
+            let mut finish_attempt = |facts: InferenceAttemptFinishFacts| {
+                if let Some(observation) = attempt_observation.take() {
+                    observation.finish(facts);
+                }
+            };
             debug!(
                 "Sending request: model={}, messages={}, tools={}, round_attempt={}, local_retry={}/{}",
                 context.effective_model_name,
@@ -377,6 +449,12 @@ impl RoundExecutor {
             );
             let send_result = tokio::select! {
                 _ = cancel_token.cancelled() => {
+                    finish_attempt(InferenceAttemptFinishFacts {
+                        completion: CompletionFacts::cancelled(),
+                        status_class: None,
+                        retryable: Some(false),
+                        ttft_ms: None,
+                    });
                     return Err(BitFunError::Cancelled("Execution cancelled".to_string()));
                 }
                 result = send_future => result,
@@ -406,6 +484,14 @@ impl RoundExecutor {
                         && Self::is_transient_network_error(&err_msg)
                         && local_attempt_index < max_attempts - 1
                     {
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(
+                                SafeErrorType::NetworkUnavailable,
+                            ),
+                            status_class: Some(StatusClass::Network),
+                            retryable: Some(true),
+                            ttft_ms: None,
+                        });
                         self.record_retry_diagnostic(
                             &context,
                             &round_id,
@@ -434,6 +520,14 @@ impl RoundExecutor {
                     }
                     if !is_structured_context_overflow && Self::is_transient_network_error(&err_msg)
                     {
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(
+                                SafeErrorType::NetworkUnavailable,
+                            ),
+                            status_class: Some(StatusClass::Network),
+                            retryable: Some(false),
+                            ttft_ms: None,
+                        });
                         return Err(BitFunError::AIClient(format!(
                             "Stream retry budget exhausted after {} attempts: {}",
                             max_attempts, err_msg
@@ -467,6 +561,12 @@ impl RoundExecutor {
                         error.error_category(),
                         error
                     );
+                    finish_attempt(InferenceAttemptFinishFacts {
+                        completion: completion_from_error(&error),
+                        status_class: Some(status_class(Some(&error))),
+                        retryable: Some(retryable_error(&error)),
+                        ttft_ms: None,
+                    });
                     return Err(error);
                 }
             };
@@ -488,6 +588,12 @@ impl RoundExecutor {
                     "Cancel token detected after AI stream opened, stopping execution: session_id={}",
                     context.session_id
                 );
+                finish_attempt(InferenceAttemptFinishFacts {
+                    completion: CompletionFacts::cancelled(),
+                    status_class: None,
+                    retryable: Some(false),
+                    ttft_ms: None,
+                });
                 return Err(BitFunError::Cancelled("Execution cancelled".to_string()));
             }
 
@@ -566,6 +672,16 @@ impl RoundExecutor {
                                     .count(),
                                 err_msg
                             );
+                            finish_attempt(InferenceAttemptFinishFacts {
+                                completion: CompletionFacts::failed(
+                                    SafeErrorType::NetworkUnavailable,
+                                ),
+                                status_class: Some(StatusClass::Network),
+                                retryable: Some(true),
+                                ttft_ms: result
+                                    .first_visible_output_ms
+                                    .or(result.first_chunk_ms),
+                            });
                             Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
                             local_attempt_index += 1;
                             continue;
@@ -594,11 +710,20 @@ impl RoundExecutor {
                             recovered
                                 .tool_calls
                                 .retain(|tool_call| tool_call.is_valid());
+                            finish_attempt(InferenceAttemptFinishFacts {
+                                completion: CompletionFacts::degraded(SafeErrorType::Provider),
+                                status_class: Some(StatusClass::Success),
+                                retryable: Some(false),
+                                ttft_ms: recovered
+                                    .first_visible_output_ms
+                                    .or(recovered.first_chunk_ms),
+                            });
                             break (
                                 recovered,
                                 send_to_stream_ms,
                                 stream_processing_ms,
                                 trace_handle,
+                                request_turn_offset_ms,
                             );
                         }
 
@@ -619,6 +744,12 @@ impl RoundExecutor {
                             ),
                         )
                         .await;
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(SafeErrorType::Provider),
+                            status_class: Some(StatusClass::Network),
+                            retryable: Some(false),
+                            ttft_ms: result.first_visible_output_ms.or(result.first_chunk_ms),
+                        });
                         return Err(BitFunError::AIClient(format!(
                             "Stream retry budget exhausted after {} attempts: {}",
                             max_attempts, err_msg
@@ -667,6 +798,14 @@ impl RoundExecutor {
                             result.tool_calls.len(),
                             partial_recovery_reason
                         );
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(
+                                SafeErrorType::NetworkUnavailable,
+                            ),
+                            status_class: Some(StatusClass::Network),
+                            retryable: Some(true),
+                            ttft_ms: result.first_visible_output_ms.or(result.first_chunk_ms),
+                        });
                         Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
                         local_attempt_index += 1;
                         continue;
@@ -706,6 +845,16 @@ impl RoundExecutor {
                                 delay_ms,
                                 result.tool_calls.len()
                             );
+                            finish_attempt(InferenceAttemptFinishFacts {
+                                completion: CompletionFacts::failed(
+                                    SafeErrorType::ToolValidation,
+                                ),
+                                status_class: Some(StatusClass::Success),
+                                retryable: Some(true),
+                                ttft_ms: result
+                                    .first_visible_output_ms
+                                    .or(result.first_chunk_ms),
+                            });
                             Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
                             local_attempt_index += 1;
                             continue;
@@ -728,6 +877,12 @@ impl RoundExecutor {
                             ),
                         )
                         .await;
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(SafeErrorType::ToolValidation),
+                            status_class: Some(StatusClass::Success),
+                            retryable: Some(false),
+                            ttft_ms: result.first_visible_output_ms.or(result.first_chunk_ms),
+                        });
                         return Err(BitFunError::AIClient(format!(
                             "Stream retry budget exhausted after {} attempts: {}",
                             max_attempts, err_msg
@@ -764,6 +919,12 @@ impl RoundExecutor {
                             max_attempts,
                             delay_ms
                         );
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(SafeErrorType::Provider),
+                            status_class: Some(StatusClass::Success),
+                            retryable: Some(true),
+                            ttft_ms: result.first_visible_output_ms.or(result.first_chunk_ms),
+                        });
                         Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
                         local_attempt_index += 1;
                         continue;
@@ -784,16 +945,30 @@ impl RoundExecutor {
                         );
                     }
 
+                    finish_attempt(InferenceAttemptFinishFacts {
+                        completion: if is_partial_recovery {
+                            CompletionFacts::degraded(SafeErrorType::Provider)
+                        } else {
+                            CompletionFacts::completed()
+                        },
+                        status_class: Some(StatusClass::Success),
+                        retryable: Some(false),
+                        ttft_ms: result.first_visible_output_ms.or(result.first_chunk_ms),
+                    });
                     break (
                         result,
                         send_to_stream_ms,
                         stream_processing_ms,
                         trace_handle,
+                        request_turn_offset_ms,
                     );
                 }
                 Err(stream_err) => {
                     let err_msg = stream_err.error.to_string();
                     let stream_error_category = stream_err.error.error_category();
+                    let attempt_completion = completion_from_error(&stream_err.error);
+                    let attempt_status_class = status_class(Some(&stream_err.error));
+                    let attempt_retryable = retryable_error(&stream_err.error);
                     let can_retry = !stream_err.has_effective_output
                         && stream_error_category != ErrorCategory::ContextOverflow
                         && local_attempt_index < max_attempts - 1
@@ -827,6 +1002,12 @@ impl RoundExecutor {
                             delay_ms,
                             err_msg
                         );
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: attempt_completion,
+                            status_class: Some(attempt_status_class),
+                            retryable: Some(true),
+                            ttft_ms: None,
+                        });
                         Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
                         local_attempt_index += 1;
                         continue;
@@ -834,6 +1015,14 @@ impl RoundExecutor {
                     if stream_error_category != ErrorCategory::ContextOverflow
                         && Self::is_transient_network_error(&err_msg)
                     {
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(
+                                SafeErrorType::NetworkUnavailable,
+                            ),
+                            status_class: Some(StatusClass::Network),
+                            retryable: Some(false),
+                            ttft_ms: None,
+                        });
                         return Err(BitFunError::AIClient(format!(
                             "Stream retry budget exhausted after {} attempts: {}",
                             max_attempts, err_msg
@@ -849,10 +1038,74 @@ impl RoundExecutor {
                                 AiProviderError::classified(err_msg, ErrorCategory::ContextOverflow)
                             }
                         };
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(
+                                SafeErrorType::ContextOverflow,
+                            ),
+                            status_class: Some(attempt_status_class),
+                            retryable: Some(attempt_retryable),
+                            ttft_ms: None,
+                        });
                         return Err(BitFunError::RecoverableContextOverflow(provider_error));
                     }
+                    finish_attempt(InferenceAttemptFinishFacts {
+                        completion: attempt_completion,
+                        status_class: Some(attempt_status_class),
+                        retryable: Some(attempt_retryable),
+                        ttft_ms: None,
+                    });
                     return Err(stream_err.error);
                 }
+            }
+            };
+            Ok((
+                stream_result,
+                send_to_stream_ms,
+                stream_processing_ms,
+                final_trace_handle,
+                request_turn_offset_ms,
+            ))
+        }
+        .await;
+        let (
+            stream_result,
+            send_to_stream_ms,
+            stream_processing_ms,
+            final_trace_handle,
+            request_turn_offset_ms,
+        ) = match inference_result {
+            Ok(result) => {
+                let usage = result.0.usage.as_ref();
+                inference_observation.finish(InferenceFinishFacts {
+                    completion: CompletionFacts::completed(),
+                    attempt_bucket: attempt_bucket(lifecycle.attempts_started()),
+                    status_class: Some(StatusClass::Success),
+                    retryable: Some(false),
+                    ttft_ms: result.0.first_visible_output_ms.or(result.0.first_chunk_ms),
+                    input_tokens: usage.map(|usage| usage.prompt_token_count as u64),
+                    output_tokens: usage.map(|usage| usage.candidates_token_count as u64),
+                    reasoning_tokens: usage
+                        .and_then(|usage| usage.reasoning_token_count)
+                        .map(u64::from),
+                    cache_read_tokens: usage
+                        .and_then(|usage| usage.cached_content_token_count)
+                        .map(u64::from),
+                });
+                result
+            }
+            Err(error) => {
+                inference_observation.finish(InferenceFinishFacts {
+                    completion: completion_from_error(&error),
+                    attempt_bucket: attempt_bucket(lifecycle.attempts_started()),
+                    status_class: Some(status_class(Some(&error))),
+                    retryable: Some(retryable_error(&error)),
+                    ttft_ms: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    reasoning_tokens: None,
+                    cache_read_tokens: None,
+                });
+                return Err(error);
             }
         };
 
@@ -995,6 +1248,9 @@ impl RoundExecutor {
                 partial_recovery_reason: stream_result.partial_recovery_reason.clone(),
                 had_assistant_text: Self::has_user_visible_assistant_text(&stream_result.full_text),
                 had_thinking_content: !stream_result.full_thinking.is_empty(),
+                first_result_ms: stream_result
+                    .first_visible_output_ms
+                    .map(|duration| request_turn_offset_ms.saturating_add(duration)),
             });
         }
 
@@ -1033,6 +1289,7 @@ impl RoundExecutor {
                     lifecycle.attempts_started()
                 )),
                 attempt_index: Some(lifecycle.attempts_started()),
+                observation_context: context.observation_context.clone(),
                 agent_type: context.agent_type.clone(),
                 workspace: context.workspace.clone(),
                 primary_model_facts: context.primary_model_facts.clone(),
@@ -1250,6 +1507,9 @@ impl RoundExecutor {
             partial_recovery_reason: stream_result.partial_recovery_reason.clone(),
             had_assistant_text: Self::has_user_visible_assistant_text(&stream_result.full_text),
             had_thinking_content: !stream_result.full_thinking.is_empty(),
+            first_result_ms: stream_result
+                .first_visible_output_ms
+                .map(|duration| request_turn_offset_ms.saturating_add(duration)),
         })
     }
 
@@ -1326,6 +1586,7 @@ impl RoundExecutor {
                 max_context_tokens: context_window,
                 is_subagent,
                 cached_tokens: usage.cached_content_token_count.map(|v| v as usize),
+                reasoning_tokens: usage.reasoning_token_count.map(|v| v as usize),
                 token_details: token_details_from_usage(usage),
             },
             EventPriority::Normal,
@@ -1654,7 +1915,7 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
     fn test_round_executor() -> RoundExecutor {
@@ -1664,6 +1925,7 @@ mod tests {
             tool_pipeline: None,
             event_queue,
             cancellation_tokens: DialogTurnCancellationTokenStore::new(),
+            telemetry: bitfun_observability::Telemetry::noop(),
         }
     }
 
@@ -1724,7 +1986,9 @@ mod tests {
             dialog_turn_id: "turn-1".to_string(),
             turn_index: 0,
             round_number: 0,
+            turn_started_at: Instant::now(),
             round_group_id: None,
+            observation_context: None,
             workspace: None,
             model_exchange_trace_dir: None,
             available_tools: Vec::new(),
@@ -1870,7 +2134,7 @@ mod tests {
             prompt_token_count: 100,
             candidates_token_count: 20,
             total_token_count: 120,
-            reasoning_token_count: None,
+            reasoning_token_count: Some(7),
             cached_content_token_count: Some(30),
             cache_creation_token_count: None,
         };
@@ -1893,6 +2157,7 @@ mod tests {
                 max_context_tokens: Some(128_000),
                 is_subagent: false,
                 cached_tokens: Some(30),
+                reasoning_tokens: Some(7),
                 ..
             } if session_id == "session-1"
                 && turn_id == "turn-1"

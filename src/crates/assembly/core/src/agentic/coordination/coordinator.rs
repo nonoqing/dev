@@ -35,6 +35,9 @@ use crate::agentic::goal_mode::{
 };
 use crate::agentic::image_analysis::ImageContextData;
 use crate::agentic::memories::{start_memory_startup_task, MemoryStartupRequest};
+use crate::agentic::observability::{
+    completion_from_error, safe_session_class, safe_session_operation, safe_terminal_completion,
+};
 use crate::agentic::permission_policy::resolve_effective_permission_policy;
 use crate::agentic::round_preempt::DialogRoundInjectionSource;
 use crate::agentic::session::revert::{
@@ -92,6 +95,10 @@ use bitfun_agent_runtime::remote_file_delivery::{
 use bitfun_agent_runtime::sdk::PermissionReply;
 use bitfun_agent_runtime::user_questions::USER_INPUT_AVAILABLE_CONTEXT_KEY;
 use bitfun_events::{ToolEventData, ToolEventIdentity};
+use bitfun_observability::domains::{
+    start_session, SessionClass, SessionFinishFacts, SessionOperation, SessionStartFacts,
+};
+use bitfun_observability::{Telemetry, TraceRelation};
 use bitfun_product_domains::external_sources::EcosystemId;
 use bitfun_runtime_ports::{
     agent_workspace_references_from_metadata, AgentMessageWorkspaceReferencesRequest,
@@ -111,6 +118,7 @@ use bitfun_services_core::workspace_text::{
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -670,6 +678,7 @@ pub(crate) struct HiddenSubagentExecutionRequest {
     user_input_text: String,
     created_by: Option<String>,
     subagent_parent_info: Option<SubagentParentInfo>,
+    observation_relation: TraceRelation,
     context: HashMap<String, String>,
     permission_runtime_ceiling: Option<PermissionRuntimeCeiling>,
     delegation_policy: DelegationPolicy,
@@ -1072,6 +1081,7 @@ pub struct ConversationCoordinator {
     tool_pipeline: Arc<ToolPipeline>,
     event_queue: Arc<EventQueue>,
     event_router: Arc<EventRouter>,
+    telemetry: Telemetry,
     subagent_concurrency_limiter: Arc<RwLock<Option<SubagentConcurrencyLimiter>>>,
     subagent_profile_concurrency_limiters: Arc<RwLock<HashMap<usize, SubagentConcurrencyLimiter>>>,
     /// Registry for dynamically adjusting subagent timeouts.
@@ -2062,6 +2072,7 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
             tool_pipeline,
             event_queue,
             event_router,
+            telemetry: Telemetry::noop(),
             subagent_concurrency_limiter: Arc::new(RwLock::new(None)),
             subagent_profile_concurrency_limiters: Arc::new(RwLock::new(HashMap::new())),
             subagent_timeout_registry: Arc::new(RwLock::new(HashMap::new())),
@@ -2077,6 +2088,59 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
             terminal_port: OnceLock::new(),
             remote_exec_port: OnceLock::new(),
         }
+    }
+
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    async fn observe_session_operation<T, F>(
+        &self,
+        start_facts: SessionStartFacts,
+        operation: F,
+    ) -> BitFunResult<T>
+    where
+        F: Future<Output = BitFunResult<T>>,
+    {
+        let observation = start_session(&self.telemetry, start_facts, None);
+        let started_at = std::time::Instant::now();
+        let result = operation.await;
+        let finish_facts = SessionFinishFacts {
+            completion: match &result {
+                Ok(_) => bitfun_observability::domains::CompletionFacts::completed(),
+                Err(error) => completion_from_error(error),
+            },
+        };
+        observation.finish(finish_facts);
+        self.emit_session_operation_completed(
+            start_facts,
+            finish_facts,
+            crate::util::elapsed_ms_u64(started_at),
+        )
+        .await;
+        result
+    }
+
+    async fn emit_session_operation_completed(
+        &self,
+        start_facts: SessionStartFacts,
+        finish_facts: SessionFinishFacts,
+        duration_ms: u64,
+    ) {
+        if !self.telemetry.is_enabled() {
+            return;
+        }
+        let (outcome, error_type) = safe_terminal_completion(finish_facts.completion);
+        self.emit_event(AgenticEvent::SessionOperationCompleted {
+            operation: safe_session_operation(start_facts.operation),
+            session_class: safe_session_class(start_facts.session_class),
+            remote: start_facts.remote,
+            outcome,
+            error_type,
+            duration_ms,
+        })
+        .await;
     }
 
     fn ensure_runtime_ownership(
@@ -2405,6 +2469,54 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
     }
 
     async fn create_session_with_workspace_and_creator_internal(
+        &self,
+        session_id: Option<String>,
+        session_name: String,
+        agent_type: String,
+        config: SessionConfig,
+        workspace_path: String,
+        created_by: Option<String>,
+        transient: bool,
+    ) -> BitFunResult<Session> {
+        let start_facts = SessionStartFacts {
+            operation: SessionOperation::Create,
+            session_class: if transient {
+                SessionClass::Transient
+            } else {
+                SessionClass::Standard
+            },
+            remote: config.remote_connection_id.is_some() || config.remote_ssh_host.is_some(),
+        };
+        let observation = start_session(&self.telemetry, start_facts, None);
+        let started_at = std::time::Instant::now();
+        let result = self
+            .create_session_with_workspace_and_creator_impl(
+                session_id,
+                session_name,
+                agent_type,
+                config,
+                workspace_path,
+                created_by,
+                transient,
+            )
+            .await;
+        let finish_facts = SessionFinishFacts {
+            completion: match &result {
+                Ok(_) => bitfun_observability::domains::CompletionFacts::completed(),
+                Err(error) => completion_from_error(error),
+            },
+        };
+        observation.finish(finish_facts);
+        self.emit_session_operation_completed(
+            start_facts,
+            finish_facts,
+            crate::util::elapsed_ms_u64(started_at),
+        )
+        .await;
+        result
+    }
+
+    async fn create_session_with_workspace_and_creator_impl(
         &self,
         session_id: Option<String>,
         session_name: String,
@@ -3933,6 +4045,10 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
                             success: Some(true),
                             finish_reason: Some("complete".to_string()),
                             has_final_response: Some(false),
+                            first_result_ms: None,
+                            modified_file_count: None,
+                            added_lines: None,
+                            deleted_lines: None,
                         })
                         .await;
                 }
@@ -4868,6 +4984,10 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
                     success: Some(true),
                     finish_reason: Some("complete".to_string()),
                     has_final_response: Some(true),
+                    first_result_ms: None,
+                    modified_file_count: None,
+                    added_lines: None,
+                    deleted_lines: None,
                 },
                 Some(EventPriority::Normal),
             )
@@ -4902,6 +5022,7 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
             workspace: manual_workspace,
             context: HashMap::new(),
             subagent_parent_info: None,
+            observation_relation: TraceRelation::Root,
             permission_delegation: None,
             permission_runtime_ceiling: None,
             delegation_policy: DelegationPolicy::top_level(),
@@ -5735,6 +5856,7 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
             workspace: session_workspace,
             context: context_vars,
             subagent_parent_info: persisted_subagent_context.subagent_parent_info,
+            observation_relation: TraceRelation::Root,
             permission_delegation: persisted_subagent_context.permission_delegation,
             permission_runtime_ceiling: None,
             delegation_policy: DelegationPolicy::top_level(),
@@ -6401,6 +6523,43 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
         workspace_path: &Path,
         session_id: &str,
     ) -> BitFunResult<()> {
+        let session = self.session_manager.get_session(session_id);
+        let start_facts = SessionStartFacts {
+            operation: SessionOperation::Delete,
+            session_class: match session.as_ref().map(|session| session.kind) {
+                Some(SessionKind::Subagent) => SessionClass::Subagent,
+                Some(SessionKind::EphemeralChild) => SessionClass::Internal,
+                _ => SessionClass::Standard,
+            },
+            remote: session.as_ref().is_some_and(|session| {
+                session.config.remote_connection_id.is_some()
+                    || session.config.remote_ssh_host.is_some()
+            }),
+        };
+        let observation = start_session(&self.telemetry, start_facts, None);
+        let started_at = std::time::Instant::now();
+        let result = self.delete_session_impl(workspace_path, session_id).await;
+        let finish_facts = SessionFinishFacts {
+            completion: match &result {
+                Ok(()) => bitfun_observability::domains::CompletionFacts::completed(),
+                Err(error) => completion_from_error(error),
+            },
+        };
+        observation.finish(finish_facts);
+        self.emit_session_operation_completed(
+            start_facts,
+            finish_facts,
+            crate::util::elapsed_ms_u64(started_at),
+        )
+        .await;
+        result
+    }
+
+    async fn delete_session_impl(
+        &self,
+        workspace_path: &Path,
+        session_id: &str,
+    ) -> BitFunResult<()> {
         let session_storage_path = self
             .session_manager
             .resolve_storage_path_for_workspace_path(workspace_path)
@@ -6580,12 +6739,22 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
         workspace_path: &Path,
         session_id: &str,
     ) -> BitFunResult<Session> {
-        self.ensure_runtime_ownership(workspace_path, None, None)?;
-        let session = self
-            .session_manager
-            .restore_session(workspace_path, session_id)
-            .await?;
-        self.reconcile_restored_session(session_id, session).await
+        self.observe_session_operation(
+            SessionStartFacts {
+                operation: SessionOperation::Resume,
+                session_class: SessionClass::Standard,
+                remote: false,
+            },
+            async {
+                self.ensure_runtime_ownership(workspace_path, None, None)?;
+                let session = self
+                    .session_manager
+                    .restore_session(workspace_path, session_id)
+                    .await?;
+                self.reconcile_restored_session(session_id, session).await
+            },
+        )
+        .await
     }
 
     pub(crate) fn local_revert_workspace(&self, session_id: &str) -> BitFunResult<PathBuf> {
@@ -7059,11 +7228,21 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
         session_storage_path: &Path,
         session_id: &str,
     ) -> BitFunResult<Session> {
-        let session = self
-            .session_manager
-            .restore_session_from_storage_path(session_storage_path, session_id)
-            .await?;
-        self.reconcile_restored_session(session_id, session).await
+        self.observe_session_operation(
+            SessionStartFacts {
+                operation: SessionOperation::Resume,
+                session_class: SessionClass::Standard,
+                remote: false,
+            },
+            async {
+                let session = self
+                    .session_manager
+                    .restore_session_from_storage_path(session_storage_path, session_id)
+                    .await?;
+                self.reconcile_restored_session(session_id, session).await
+            },
+        )
+        .await
     }
 
     pub async fn restore_internal_session_from_storage_path(
@@ -7071,11 +7250,21 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
         session_storage_path: &Path,
         session_id: &str,
     ) -> BitFunResult<Session> {
-        let session = self
-            .session_manager
-            .restore_internal_session_from_storage_path(session_storage_path, session_id)
-            .await?;
-        self.reconcile_restored_session(session_id, session).await
+        self.observe_session_operation(
+            SessionStartFacts {
+                operation: SessionOperation::Resume,
+                session_class: SessionClass::Internal,
+                remote: false,
+            },
+            async {
+                let session = self
+                    .session_manager
+                    .restore_internal_session_from_storage_path(session_storage_path, session_id)
+                    .await?;
+                self.reconcile_restored_session(session_id, session).await
+            },
+        )
+        .await
     }
 
     pub async fn restore_session_for_workspace(
@@ -7083,16 +7272,27 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
         request: SessionStoragePathRequest,
         session_id: &str,
     ) -> BitFunResult<Session> {
-        self.ensure_runtime_ownership(
-            &request.workspace_path,
-            request.remote_connection_id.as_deref(),
-            request.remote_ssh_host.as_deref(),
-        )?;
-        let session = self
-            .session_manager
-            .restore_session_for_workspace(request, session_id)
-            .await?;
-        self.reconcile_restored_session(session_id, session).await
+        let remote = request.remote_connection_id.is_some() || request.remote_ssh_host.is_some();
+        self.observe_session_operation(
+            SessionStartFacts {
+                operation: SessionOperation::Resume,
+                session_class: SessionClass::Standard,
+                remote,
+            },
+            async {
+                self.ensure_runtime_ownership(
+                    &request.workspace_path,
+                    request.remote_connection_id.as_deref(),
+                    request.remote_ssh_host.as_deref(),
+                )?;
+                let session = self
+                    .session_manager
+                    .restore_session_for_workspace(request, session_id)
+                    .await?;
+                self.reconcile_restored_session(session_id, session).await
+            },
+        )
+        .await
     }
 
     pub async fn restore_internal_session_for_workspace(
@@ -7100,16 +7300,27 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
         request: SessionStoragePathRequest,
         session_id: &str,
     ) -> BitFunResult<Session> {
-        self.ensure_runtime_ownership(
-            &request.workspace_path,
-            request.remote_connection_id.as_deref(),
-            request.remote_ssh_host.as_deref(),
-        )?;
-        let session = self
-            .session_manager
-            .restore_internal_session_for_workspace(request, session_id)
-            .await?;
-        self.reconcile_restored_session(session_id, session).await
+        let remote = request.remote_connection_id.is_some() || request.remote_ssh_host.is_some();
+        self.observe_session_operation(
+            SessionStartFacts {
+                operation: SessionOperation::Resume,
+                session_class: SessionClass::Internal,
+                remote,
+            },
+            async {
+                self.ensure_runtime_ownership(
+                    &request.workspace_path,
+                    request.remote_connection_id.as_deref(),
+                    request.remote_ssh_host.as_deref(),
+                )?;
+                let session = self
+                    .session_manager
+                    .restore_internal_session_for_workspace(request, session_id)
+                    .await?;
+                self.reconcile_restored_session(session_id, session).await
+            },
+        )
+        .await
     }
 
     pub async fn restore_internal_session(
@@ -7117,12 +7328,22 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
         workspace_path: &Path,
         session_id: &str,
     ) -> BitFunResult<Session> {
-        self.ensure_runtime_ownership(workspace_path, None, None)?;
-        let session = self
-            .session_manager
-            .restore_internal_session(workspace_path, session_id)
-            .await?;
-        self.reconcile_restored_session(session_id, session).await
+        self.observe_session_operation(
+            SessionStartFacts {
+                operation: SessionOperation::Resume,
+                session_class: SessionClass::Internal,
+                remote: false,
+            },
+            async {
+                self.ensure_runtime_ownership(workspace_path, None, None)?;
+                let session = self
+                    .session_manager
+                    .restore_internal_session(workspace_path, session_id)
+                    .await?;
+                self.reconcile_restored_session(session_id, session).await
+            },
+        )
+        .await
     }
 
     /// Restore session and return the persisted turns read during restore.
@@ -7713,6 +7934,7 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
             user_input_text,
             created_by,
             subagent_parent_info,
+            observation_relation,
             context,
             permission_runtime_ceiling,
             delegation_policy,
@@ -8192,6 +8414,7 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
             workspace: subagent_workspace,
             context,
             subagent_parent_info: subagent_parent_info.clone(),
+            observation_relation,
             permission_delegation: subagent_parent_info
                 .as_ref()
                 .map(|parent| parent.permission_delegation_context(&agent_type)),
@@ -9416,6 +9639,7 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
                         user_input_text: task_description,
                         created_by: session.created_by.clone(),
                         subagent_parent_info: Some(request.subagent_parent_info),
+                        observation_relation: TraceRelation::Root,
                         context: request.context,
                         permission_runtime_ceiling: Some(request.permission_runtime_ceiling),
                         delegation_policy: request.delegation_policy,
@@ -9509,6 +9733,7 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
                     user_input_text: task_description,
                     created_by,
                     subagent_parent_info: Some(request.subagent_parent_info),
+                    observation_relation: TraceRelation::Root,
                     context: request.context,
                     permission_runtime_ceiling: Some(request.permission_runtime_ceiling),
                     delegation_policy: request.delegation_policy,
@@ -9596,6 +9821,7 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
                     user_input_text: task_description,
                     created_by,
                     subagent_parent_info: Some(request.subagent_parent_info),
+                    observation_relation: TraceRelation::Root,
                     context: request.context,
                     permission_runtime_ceiling: Some(request.permission_runtime_ceiling),
                     delegation_policy: request.delegation_policy,
@@ -9934,7 +10160,15 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
         cancel_token: Option<&CancellationToken>,
         timeout_seconds: Option<u64>,
     ) -> BitFunResult<SubagentResult> {
-        let request = self.prepare_subagent_execution_request(request).await?;
+        let mut request = self.prepare_subagent_execution_request(request).await?;
+        if let Some(parent) = request.subagent_parent_info.as_ref() {
+            if let Some(context) = self
+                .tool_pipeline
+                .observation_context_for_tool(&parent.tool_call_id)
+            {
+                request.observation_relation = TraceRelation::Parent(context);
+            }
+        }
         let Some(scheduler) = get_global_scheduler() else {
             return self
                 .execute_prepared_hidden_subagent(request, cancel_token, timeout_seconds)
@@ -10007,6 +10241,7 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
             user_input_text: task_description,
             created_by: request.created_by,
             subagent_parent_info: None,
+            observation_relation: TraceRelation::Root,
             context: request.context,
             permission_runtime_ceiling: None,
             delegation_policy: request.delegation_policy,
@@ -10046,6 +10281,14 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
         let mut request = self
             .prepare_hidden_subagent_execution_request(request)
             .await?;
+        if let Some(parent) = request.subagent_parent_info.as_ref() {
+            if let Some(context) = self
+                .tool_pipeline
+                .observation_context_for_tool(&parent.tool_call_id)
+            {
+                request.observation_relation = TraceRelation::Link(context);
+            }
+        }
         if tool_cancellation_token
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
@@ -11760,6 +12003,7 @@ impl ConversationCoordinator {
             round_id,
             attempt_id: None,
             attempt_index: None,
+            observation_context: None,
             agent_type: session.agent_type,
             workspace,
             primary_model_facts: PrimaryModelFacts::default(),
@@ -11919,6 +12163,10 @@ impl ConversationCoordinator {
                             "tool_error".to_string()
                         }),
                         has_final_response: Some(false),
+                        first_result_ms: None,
+                        modified_file_count: None,
+                        added_lines: None,
+                        deleted_lines: None,
                     },
                     Some(EventPriority::Normal),
                 )
