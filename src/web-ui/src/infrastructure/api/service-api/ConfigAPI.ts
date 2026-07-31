@@ -8,6 +8,8 @@ import type {
   GlobalSkillSettings,
   ModeSkillInfo,
   RuntimeLoggingInfo,
+  TelemetryLevel,
+  TelemetryState,
   SkillInfo,
   SkillLevel,
   SkillMarketDownloadResult,
@@ -68,6 +70,26 @@ export interface DownloadSkillMarketParams {
 
 
 export class ConfigAPI {
+  async getTelemetryState(): Promise<TelemetryState> {
+    try {
+      return await api.invoke<TelemetryState>('get_telemetry_state', {
+        request: {},
+      });
+    } catch (error) {
+      throw createTauriCommandError('get_telemetry_state', error);
+    }
+  }
+
+  async setTelemetryLevel(level: TelemetryLevel): Promise<TelemetryState> {
+    try {
+      return await api.invoke<TelemetryState>('set_telemetry_level', {
+        request: { level },
+      });
+    } catch (error) {
+      throw createTauriCommandError('set_telemetry_level', error, { level });
+    }
+  }
+
    
   async getConfig(path?: string, options?: { skipRetryOnNotFound?: boolean }): Promise<any> {
     try {

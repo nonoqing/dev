@@ -100,6 +100,23 @@
       "saved": "防止睡眠設定已儲存"
     }
   },
+  "telemetry": {
+    "title": "使用資料",
+    "hint": "控制匿名產品遙測",
+    "levelLabel": "遙測級別",
+    "levelDescription": "基礎級別傳送聚合指標和抽樣結構化事件；診斷級別還會傳送抽樣執行鏈路。使用者提示詞、模型請求與回應、檔案路徑、使用者名稱和裝置名稱一律不會包含在內。",
+    "levels": {
+      "off": "關閉",
+      "basic": "基礎",
+      "diagnostic": "診斷"
+    },
+    "messages": {
+      "loadFailed": "無法讀取遙測設定",
+      "saveFailed": "無法儲存遙測設定",
+      "saved": "遙測設定已儲存",
+      "unavailable": "偏好已儲存。目前版本未啟用遙測，因此不會傳送資料。"
+    }
+  },
   "logging": {
     "sections": {
       "logging": "日誌",

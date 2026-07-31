@@ -61,7 +61,7 @@ export interface MemoriesConfig {
 export interface AppConfig {
   language: string;
   auto_update: boolean;
-  telemetry: boolean;
+  telemetry: TelemetryUserConfigV1;
   startup_behavior: string;
   confirm_on_exit: boolean;
   restore_windows: boolean;
@@ -74,6 +74,42 @@ export interface AppConfig {
   ai_experience: AIExperienceConfig;
   user_tool_groups?: UserToolGroupsConfig;
   user_skill_groups?: UserSkillGroupsConfig;
+}
+
+export type TelemetryLevel = 'off' | 'basic' | 'diagnostic';
+
+export interface TelemetryUserConfigV1 {
+  version: 1;
+  level: TelemetryLevel;
+}
+
+export type TelemetryHealthState =
+  | 'closed'
+  | 'starting'
+  | 'healthy'
+  | 'degraded'
+  | 'backlogged'
+  | 'shutting_down';
+
+export interface TelemetryHealthSnapshot {
+  state: TelemetryHealthState;
+  userLevel: TelemetryLevel;
+  effectiveLevel: TelemetryLevel;
+  generation: number;
+  queuedRecords: number;
+  queuedBytes: number;
+  inFlightBatches: number;
+  retryAttempts: number;
+  locallyDropped: number;
+  ambiguous: number;
+  acknowledged: number;
+  serverRejected: number;
+  lastSuccessUnixMs?: number | null;
+}
+
+export interface TelemetryState {
+  level: TelemetryLevel;
+  health: TelemetryHealthSnapshot;
 }
 
 export interface UserToolGroupsConfig {

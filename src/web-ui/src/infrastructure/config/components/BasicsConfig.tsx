@@ -35,6 +35,7 @@ import type {
   TerminalConfig as TerminalSettings,
   TerminalPanelPosition,
 } from '../types';
+import { TelemetryConfigSection } from './TelemetryConfigSection';
 import './BasicsConfig.scss';
 
 const log = createLogger('BasicsConfig');
@@ -994,6 +995,7 @@ const BasicsConfig: React.FC = () => {
         <BasicsLaunchAtLoginSection />
         <BasicsPreventSleepSection />
         <BasicsAutoUpdateSection />
+        <TelemetryConfigSection />
         <BasicsWindowBehaviorSection />
         <BasicsLoggingSection />
         <BasicsTerminalSection />

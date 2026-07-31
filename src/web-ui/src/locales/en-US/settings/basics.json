@@ -114,6 +114,23 @@
       "saved": "Prevent-sleep setting saved"
     }
   },
+  "telemetry": {
+    "title": "Usage Data",
+    "hint": "Control anonymous product telemetry",
+    "levelLabel": "Telemetry level",
+    "levelDescription": "Basic sends aggregate metrics and sampled structured events. Diagnostic also sends sampled execution traces. Prompts, model payloads, file paths, user names, and device names are never included.",
+    "levels": {
+      "off": "Off",
+      "basic": "Basic",
+      "diagnostic": "Diagnostic"
+    },
+    "messages": {
+      "loadFailed": "Failed to read telemetry settings",
+      "saveFailed": "Failed to save telemetry settings",
+      "saved": "Telemetry setting saved",
+      "unavailable": "Preference saved. Telemetry is unavailable in this build, so no data is being sent."
+    }
+  },
   "logging": {
     "sections": {
       "logging": "Logging",

@@ -114,6 +114,23 @@
       "saved": "阻止睡眠设置已保存"
     }
   },
+  "telemetry": {
+    "title": "使用数据",
+    "hint": "控制匿名产品遥测",
+    "levelLabel": "遥测级别",
+    "levelDescription": "基础级别发送聚合指标和抽样结构化事件；诊断级别还会发送抽样执行链路。用户提示词、模型请求与响应、文件路径、用户名和设备名始终不会包含在内。",
+    "levels": {
+      "off": "关闭",
+      "basic": "基础",
+      "diagnostic": "诊断"
+    },
+    "messages": {
+      "loadFailed": "无法读取遥测设置",
+      "saveFailed": "无法保存遥测设置",
+      "saved": "遥测设置已保存",
+      "unavailable": "偏好已保存。当前构建未启用遥测，因此不会发送数据。"
+    }
+  },
   "logging": {
     "sections": {
       "logging": "日志",
