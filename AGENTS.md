@@ -42,7 +42,7 @@ Summary only; full rules in [`docs/development/docs-governance.md`](docs/develop
 | STD-02/03 | Coding & language stacks | Style beyond local AGENTS | Nearest module `AGENTS.md` |
 | STD-04 | Frontend & interaction | UI, state, adapter, i18n, theme | i18n/theme: [`docs/architecture/i18n.md`](docs/architecture/i18n.md), ops guide [`docs/development/i18n.md`](docs/development/i18n.md), [`docs/architecture/theme-token-optimization.md`](docs/architecture/theme-token-optimization.md); UI/state/adapter: nearest surface `AGENTS.md` (e.g. [`src/web-ui/AGENTS.md`](src/web-ui/AGENTS.md)) |
 | STD-05 | API & data contracts | DTO, events, Tauri command, persistence, error **shape** | DTO/events/contracts: [`src/crates/contracts/AGENTS.md`](src/crates/contracts/AGENTS.md) and child-module `AGENTS.md`; Tauri/host/remote: [`docs/development/host-platform-and-remote.md`](docs/development/host-platform-and-remote.md) |
-| STD-06 | DFX | Retry, cancel, partial success, heterogeneous inputs, failure **UX**, logging, security | Logging: [`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md), [`src/crates/LOGGING.md`](src/crates/LOGGING.md); remote: [`host-platform-and-remote.md`](docs/development/host-platform-and-remote.md); Agent loop: [`agent-loop-behavior.md`](docs/development/agent-loop-behavior.md); security: [`SECURITY.md`](SECURITY.md) |
+| STD-06 | DFX | Retry, cancel, partial success, heterogeneous inputs, failure **UX**, logging, security | Logging: [`docs/development/logging.md`](docs/development/logging.md), [`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md), [`src/crates/LOGGING.md`](src/crates/LOGGING.md); remote: [`host-platform-and-remote.md`](docs/development/host-platform-and-remote.md); Agent loop: [`agent-loop-behavior.md`](docs/development/agent-loop-behavior.md); security: [`SECURITY.md`](SECURITY.md) |
 | STD-07 | Docs & templates | Spec / design / plan; where docs live | [`docs/development/docs-governance.md`](docs/development/docs-governance.md); [`docs/specs/README.md`](docs/specs/README.md) |
 | STD-08 | Testing & verification | Which check to run after a change | [`docs/development/verification.md`](docs/development/verification.md) |
 | STD-09 | Git & delivery | Branch, PR, contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) ([中文](CONTRIBUTING_CN.md)); do not duplicate command or verification encyclopedias in CONTRIBUTING |
@@ -74,7 +74,7 @@ Condition-triggered rules. Open only when the task matches; details stay in the 
 
 | Topic | Open when | Authority |
 |---|---|---|
-| Logging | Adding or changing log output / observability text | [`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md); [`src/crates/LOGGING.md`](src/crates/LOGGING.md) |
+| Logging | Adding or changing log output / observability text | Repository-wide policy: [`docs/development/logging.md`](docs/development/logging.md); frontend API: [`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md); Rust API: [`src/crates/LOGGING.md`](src/crates/LOGGING.md) |
 | Tauri / platform / remote | Desktop commands, UI↔host boundaries, remote workspace support | [`docs/development/host-platform-and-remote.md`](docs/development/host-platform-and-remote.md); [`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md) |
 | Agent loop | Agent loop, repeated tool calls, anti-loop safeguards | [`docs/development/agent-loop-behavior.md`](docs/development/agent-loop-behavior.md); nearest `src/crates/execution/*/AGENTS.md` |
 

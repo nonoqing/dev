@@ -41,7 +41,7 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 | STD-02/03 | 编码与语言栈 | 超出模块 AGENTS 的风格或语言细则 | 就近模块 `AGENTS.md` |
 | STD-04 | 前端与交互 | UI、状态、adapter、i18n、主题 | i18n/主题：[`docs/architecture/i18n.md`](docs/architecture/i18n.md)、操作说明 [`docs/development/i18n.md`](docs/development/i18n.md)、[`docs/architecture/theme-token-optimization.md`](docs/architecture/theme-token-optimization.md)；UI/状态/adapter：就近产品面 `AGENTS.md`（如 [`src/web-ui/AGENTS.md`](src/web-ui/AGENTS.md)） |
 | STD-05 | API 与数据契约 | DTO、事件、Tauri command、持久化、错误结构 | DTO/事件/契约：[`src/crates/contracts/AGENTS.md`](src/crates/contracts/AGENTS.md) 及子模块；Tauri/宿主/远程：[`docs/development/host-platform-and-remote-CN.md`](docs/development/host-platform-and-remote-CN.md) |
-| STD-06 | DFX | 重试、取消、部分成功、异构输入、失败体验、日志、安全 | 日志：[`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md)、[`src/crates/LOGGING.md`](src/crates/LOGGING.md)；远程：[`host-platform-and-remote-CN.md`](docs/development/host-platform-and-remote-CN.md)；Agent loop：[`agent-loop-behavior-CN.md`](docs/development/agent-loop-behavior-CN.md)；安全：[`SECURITY.md`](SECURITY.md) |
+| STD-06 | DFX | 重试、取消、部分成功、异构输入、失败体验、日志、安全 | 日志：[`docs/development/logging.md`](docs/development/logging.md)、[`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md)、[`src/crates/LOGGING.md`](src/crates/LOGGING.md)；远程：[`host-platform-and-remote-CN.md`](docs/development/host-platform-and-remote-CN.md)；Agent loop：[`agent-loop-behavior-CN.md`](docs/development/agent-loop-behavior-CN.md)；安全：[`SECURITY.md`](SECURITY.md) |
 | STD-07 | 文档与模板 | Spec / 设计 / 计划；文档如何存放 | [`docs/development/docs-governance-CN.md`](docs/development/docs-governance-CN.md)；[`docs/specs/README.md`](docs/specs/README.md) |
 | STD-08 | 测试与验证 | 改完应跑哪些检查 | [`docs/development/verification-CN.md`](docs/development/verification-CN.md) |
 | STD-09 | Git 与交付 | 分支、PR、贡献流程 | [`CONTRIBUTING_CN.md`](CONTRIBUTING_CN.md)（[English](CONTRIBUTING.md)）；CONTRIBUTING 不再另维护一整套命令/验证清单 |
@@ -73,7 +73,7 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 
 | 专题 | 何时打开 | 权威文档 |
 |---|---|---|
-| 日志 | 新增或修改日志、可观测相关文案 | [`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md)；[`src/crates/LOGGING.md`](src/crates/LOGGING.md) |
+| 日志 | 新增或修改日志、可观测相关文案 | 仓库级规则：[`docs/development/logging.md`](docs/development/logging.md)；前端 API：[`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md)；Rust API：[`src/crates/LOGGING.md`](src/crates/LOGGING.md) |
 | Tauri / 平台 / 远程 | 桌面 command、UI 与宿主边界、远程工作区 | [`docs/development/host-platform-and-remote-CN.md`](docs/development/host-platform-and-remote-CN.md)；[`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md) |
 | Agent loop | Agent 主循环、重复工具调用、防死循环策略 | [`docs/development/agent-loop-behavior-CN.md`](docs/development/agent-loop-behavior-CN.md)；`src/crates/execution/` 下就近 `AGENTS.md` |
 
