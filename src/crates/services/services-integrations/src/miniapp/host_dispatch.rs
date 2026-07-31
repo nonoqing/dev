@@ -534,7 +534,7 @@ async fn dispatch_net(
             }
         }
     }
-    let original_host = parsed.host_str().unwrap_or_default().to_string();
+    let original_url = parsed.clone();
     let body = params
         .get("body")
         .and_then(|v| v.as_str())
@@ -555,7 +555,7 @@ async fn dispatch_net(
                 MiniAppHostDispatchError::service(format!("net.fetch client: {error}"))
             })?;
         let mut request = client.request(method.clone(), current_url.clone());
-        let crossed_origin = host != original_host;
+        let crossed_origin = !same_network_origin(&original_url, &current_url);
         for (name, value) in &request_headers {
             if crossed_origin
                 && matches!(
@@ -633,6 +633,10 @@ async fn dispatch_net(
     }
 
     Err(deny("net.fetch redirect handling failed"))
+}
+
+fn same_network_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
+    left.origin() == right.origin()
 }
 
 async fn validate_network_target(
@@ -837,6 +841,18 @@ mod tests {
             &["198.18.0.108".to_string()],
             address
         ));
+    }
+
+    #[test]
+    fn net_fetch_credentials_require_an_exact_origin() {
+        let original = reqwest::Url::parse("https://api.example.com/data").unwrap();
+        let same_origin = reqwest::Url::parse("https://api.example.com:443/next").unwrap();
+        let downgraded = reqwest::Url::parse("http://api.example.com/next").unwrap();
+        let other_port = reqwest::Url::parse("https://api.example.com:444/next").unwrap();
+
+        assert!(same_network_origin(&original, &same_origin));
+        assert!(!same_network_origin(&original, &downgraded));
+        assert!(!same_network_origin(&original, &other_port));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
