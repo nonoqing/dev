@@ -163,6 +163,8 @@ pub(crate) enum FlowItem {
 #[derive(Debug, Clone)]
 pub(crate) struct ChatMessage {
     pub id: String,
+    /// Stable persisted DialogTurn identity used for history operations.
+    pub turn_id: Option<String>,
     pub role: MessageRole,
     pub timestamp: SystemTime,
     pub flow_items: Vec<FlowItem>,
@@ -272,6 +274,7 @@ impl ChatMessage {
                 .id
                 .clone()
                 .unwrap_or_else(|| format!("transcript-message-{index}")),
+            turn_id: msg.turn_id.clone(),
             role,
             timestamp: UNIX_EPOCH
                 .checked_add(Duration::from_millis(msg.timestamp_ms.unwrap_or_default()))
@@ -283,6 +286,13 @@ impl ChatMessage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionForkPoint {
+    pub turn_id: String,
+    pub prompt: String,
+    pub timestamp: SystemTime,
+}
+
 // ============ Chat Metadata ============
 
 /// Statistics for the current chat session
@@ -291,7 +301,21 @@ pub(crate) struct ChatMetadata {
     pub message_count: usize,
     pub tool_calls: usize,
     pub total_rounds: usize,
+}
+
+/// Facts from the latest primary-model request observed by this TUI.
+///
+/// This is intentionally not a cumulative session-usage aggregate. The
+/// authoritative cumulative report remains owned by the runtime `/usage` path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelTokenUsageSnapshot {
+    pub model_config_id: String,
+    pub effective_model_name: String,
+    pub input_tokens: usize,
+    pub output_tokens: Option<usize>,
     pub total_tokens: usize,
+    pub max_context_tokens: Option<usize>,
+    pub cached_tokens: Option<usize>,
 }
 
 // ============ ChatState ============
@@ -328,6 +352,8 @@ pub(crate) struct ChatState {
     pub messages: Vec<ChatMessage>,
     /// Session statistics
     pub metadata: ChatMetadata,
+    /// Latest primary-model request observed by this TUI, if any.
+    pub last_primary_model_usage: Option<ModelTokenUsageSnapshot>,
 
     // -- Streaming state (transient, not persisted) --
     /// Current turn ID being processed
@@ -386,6 +412,7 @@ impl ChatState {
             auto_approve_ask: false,
             messages: Vec::new(),
             metadata: ChatMetadata::default(),
+            last_primary_model_usage: None,
             current_turn_id: None,
             current_flow_items: Vec::new(),
             tool_index: HashMap::new(),
@@ -441,6 +468,32 @@ impl ChatState {
 
     pub(crate) fn has_conversation_history(&self) -> bool {
         self.metadata.message_count > 0
+    }
+
+    /// User prompts eligible for `/fork`, newest first like OpenCode's fork dialog.
+    pub(crate) fn session_fork_points(&self) -> Vec<SessionForkPoint> {
+        self.messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == MessageRole::User)
+            .filter_map(|message| {
+                let turn_id = message.turn_id.clone()?;
+                let prompt = message
+                    .flow_items
+                    .iter()
+                    .filter_map(|item| match item {
+                        FlowItem::Text { content, .. } => Some(content.as_str()),
+                        FlowItem::Thinking { .. } | FlowItem::Tool { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (!prompt.is_empty()).then_some(SessionForkPoint {
+                    turn_id,
+                    prompt,
+                    timestamp: message.timestamp,
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn set_worktree_control_available(&mut self, available: bool) {
@@ -703,6 +756,7 @@ impl ChatState {
         // Add user message
         self.messages.push(ChatMessage {
             id: uuid::Uuid::new_v4().to_string(),
+            turn_id: Some(turn_id.to_string()),
             role: MessageRole::User,
             timestamp: SystemTime::now(),
             flow_items: vec![FlowItem::Text {
@@ -717,6 +771,7 @@ impl ChatState {
         // Add empty assistant message (will be filled by streaming)
         self.messages.push(ChatMessage {
             id: uuid::Uuid::new_v4().to_string(),
+            turn_id: Some(turn_id.to_string()),
             role: MessageRole::Assistant,
             timestamp: SystemTime::now(),
             flow_items: Vec::new(),
@@ -1146,15 +1201,16 @@ impl ChatState {
         self.question_prompt = None;
     }
 
-    /// Handle token usage update
-    pub(crate) fn handle_token_usage(&mut self, total_tokens: usize) {
-        self.metadata.total_tokens = total_tokens;
+    /// Record the latest primary-model request observed by this TUI.
+    pub(crate) fn handle_primary_model_usage(&mut self, usage: ModelTokenUsageSnapshot) {
+        self.last_primary_model_usage = Some(usage);
     }
 
-    /// Add a system message (for commands like /help, /clear, etc.)
+    /// Add a system message for commands that intentionally enter the transcript.
     pub(crate) fn add_system_message(&mut self, content: String) {
         self.messages.push(ChatMessage {
             id: uuid::Uuid::new_v4().to_string(),
+            turn_id: None,
             role: MessageRole::System,
             timestamp: SystemTime::now(),
             flow_items: vec![FlowItem::Text {
@@ -1170,6 +1226,7 @@ impl ChatState {
     pub(crate) fn add_assistant_message(&mut self, content: String) {
         self.messages.push(ChatMessage {
             id: uuid::Uuid::new_v4().to_string(),
+            turn_id: None,
             role: MessageRole::Assistant,
             timestamp: SystemTime::now(),
             flow_items: vec![FlowItem::Text {
@@ -1179,11 +1236,6 @@ impl ChatState {
             is_streaming: false,
             version: 0,
         });
-    }
-
-    /// Clear all messages (for /clear command)
-    pub(crate) fn clear_messages(&mut self) {
-        self.messages.clear();
     }
 
     /// Get the current turn ID (if processing)
@@ -1375,7 +1427,7 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatState, FlowItem, ToolDisplayStatus};
+    use super::{ChatState, FlowItem, ModelTokenUsageSnapshot, ToolDisplayStatus};
     use bitfun_agent_runtime::sdk::{
         PermissionDelegationContext, PermissionRequest, PermissionRequestSource,
         PermissionRequestSourceKind, SessionTranscript, TranscriptContent, TranscriptMessage,
@@ -1447,6 +1499,31 @@ mod tests {
 
         state.metadata.message_count = 1;
         assert!(state.has_conversation_history());
+    }
+
+    #[test]
+    fn latest_primary_model_usage_keeps_round_facts_without_claiming_a_session_total() {
+        let mut state = ChatState::new(
+            "session-1".to_string(),
+            "Session".to_string(),
+            "agentic".to_string(),
+            Some("/tmp/project".to_string()),
+        );
+        let usage = ModelTokenUsageSnapshot {
+            model_config_id: "model-config-1".to_string(),
+            effective_model_name: "example-model".to_string(),
+            input_tokens: 80_000,
+            output_tokens: Some(2_000),
+            total_tokens: 82_000,
+            max_context_tokens: Some(128_000),
+            cached_tokens: Some(10_000),
+        };
+
+        state.handle_primary_model_usage(usage.clone());
+
+        assert_eq!(state.last_primary_model_usage.as_ref(), Some(&usage));
+        assert_eq!(state.metadata.message_count, 0);
+        assert_eq!(state.metadata.tool_calls, 0);
     }
 
     #[test]
@@ -1713,6 +1790,51 @@ mod tests {
             },
             &wire_input
         );
+    }
+
+    #[test]
+    fn session_fork_points_keep_stable_turn_ids_and_newest_prompt_first() {
+        let transcript = SessionTranscript {
+            session_id: "session-1".to_string(),
+            messages: vec![
+                TranscriptMessage {
+                    id: Some("user-1".to_string()),
+                    role: "user".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    timestamp_ms: Some(1_000),
+                    content: TranscriptContent::Text("First prompt".to_string()),
+                },
+                TranscriptMessage {
+                    id: Some("assistant-1".to_string()),
+                    role: "assistant".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    timestamp_ms: Some(1_100),
+                    content: TranscriptContent::Text("First answer".to_string()),
+                },
+                TranscriptMessage {
+                    id: Some("user-2".to_string()),
+                    role: "user".to_string(),
+                    turn_id: Some("turn-2".to_string()),
+                    timestamp_ms: Some(2_000),
+                    content: TranscriptContent::Text("Second\nprompt".to_string()),
+                },
+            ],
+        };
+        let state = ChatState::from_session_transcript(
+            "session-1".to_string(),
+            "Session".to_string(),
+            "agentic".to_string(),
+            None,
+            &transcript,
+        );
+
+        let points = state.session_fork_points();
+
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].turn_id, "turn-2");
+        assert_eq!(points[0].prompt, "Second\nprompt");
+        assert_eq!(points[1].turn_id, "turn-1");
+        assert_eq!(points[1].prompt, "First prompt");
     }
 
     #[test]

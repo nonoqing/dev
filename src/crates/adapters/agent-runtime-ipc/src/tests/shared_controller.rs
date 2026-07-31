@@ -2,15 +2,15 @@ use crate::{
     read_frame, write_frame, InitializeRequest, LocalIpcStream, RuntimeInstanceIdentity,
     RuntimeIpcClient, RuntimeIpcClientError, RuntimeIpcError, RuntimeIpcErrorCode, RuntimeIpcEvent,
     RuntimeIpcFrame, RuntimeIpcOperation, RuntimeIpcOperationResult, RuntimeIpcRequestHandler,
-    RuntimeIpcServer, RuntimeIpcServerConfig, RuntimeSessionRenameRequest,
-    RuntimeSessionRestoreRequest, PROTOCOL_VERSION,
+    RuntimeIpcServer, RuntimeIpcServerConfig, RuntimeSessionForkRequest,
+    RuntimeSessionRenameRequest, RuntimeSessionRestoreRequest, PROTOCOL_VERSION,
 };
 use async_trait::async_trait;
 use bitfun_events::{AgenticEvent, AgenticEventEnvelope, AgenticEventPriority};
 use bitfun_runtime_ports::{
-    AgentDialogTurnRequest, AgentSessionCreateRequest, AgentSessionCreateResult,
-    AgentSessionModeUpdateRequest, AgentSessionModelUpdateRequest, AgentSessionSummary,
-    AgentSubmissionSource, DialogSubmissionPolicy, SessionTranscript,
+    AgentDialogTurnRequest, AgentSessionCompactionRequest, AgentSessionCreateRequest,
+    AgentSessionCreateResult, AgentSessionModeUpdateRequest, AgentSessionModelUpdateRequest,
+    AgentSessionSummary, AgentSubmissionSource, DialogSubmissionPolicy, SessionTranscript,
 };
 use serde_json::Map;
 use std::path::Path;
@@ -203,6 +203,15 @@ impl RuntimeIpcRequestHandler for FakeHandler {
         }
         match operation {
             RuntimeIpcOperation::RestoreSession { request } => Ok(restored(&request.session_id)),
+            RuntimeIpcOperation::ForkSession { .. } => {
+                Ok(RuntimeIpcOperationResult::SessionForked {
+                    session: summary("session-fork"),
+                    transcript: SessionTranscript {
+                        session_id: "session-fork".to_string(),
+                        messages: Vec::new(),
+                    },
+                })
+            }
             RuntimeIpcOperation::SubmitTurn { request } => {
                 if let Some(delay) = self.submit_delay {
                     tokio::time::sleep(delay).await;
@@ -210,6 +219,12 @@ impl RuntimeIpcRequestHandler for FakeHandler {
                 Ok(RuntimeIpcOperationResult::TurnAccepted {
                     session_id: request.session_id,
                     turn_id: request.turn_id.expect("test turn id"),
+                })
+            }
+            RuntimeIpcOperation::CompactSession { request } => {
+                Ok(RuntimeIpcOperationResult::TurnAccepted {
+                    session_id: request.session_id,
+                    turn_id: request.turn_id,
                 })
             }
             RuntimeIpcOperation::CancelTurn { request } => {
@@ -513,6 +528,15 @@ fn submit_operation(workspace: &Path, session_id: &str, turn_id: &str) -> Runtim
     }
 }
 
+fn compact_operation(session_id: &str, turn_id: &str) -> RuntimeIpcOperation {
+    RuntimeIpcOperation::CompactSession {
+        request: AgentSessionCompactionRequest {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+        },
+    }
+}
+
 fn update_mode_operation(session_id: &str, mode_id: &str) -> RuntimeIpcOperation {
     RuntimeIpcOperation::UpdateSessionMode {
         request: AgentSessionModeUpdateRequest {
@@ -536,6 +560,15 @@ fn rename_operation(session_id: &str, session_name: &str) -> RuntimeIpcOperation
         request: RuntimeSessionRenameRequest {
             session_id: session_id.to_string(),
             session_name: session_name.to_string(),
+        },
+    }
+}
+
+fn fork_operation(session_id: &str, before_turn_id: Option<&str>) -> RuntimeIpcOperation {
+    RuntimeIpcOperation::ForkSession {
+        request: RuntimeSessionForkRequest {
+            session_id: session_id.to_string(),
+            before_turn_id: before_turn_id.map(str::to_string),
         },
     }
 }
@@ -695,6 +728,53 @@ async fn session_switching_is_exclusive_and_disconnect_releases_control() {
 }
 
 #[tokio::test]
+async fn successful_fork_atomically_transfers_control_and_releases_the_source() {
+    let server = TestServer::start(server_config(), Arc::new(FakeHandler::default())).await;
+    let mut forker = server.connect("fork-controller").await;
+    let mut observer = server.connect("source-controller").await;
+
+    expect_response(
+        &mut forker,
+        2,
+        restore_operation(server.workspace.path(), "session-a"),
+    )
+    .await;
+    assert!(matches!(
+        request(&mut forker, 3, fork_operation("session-a", Some("turn-2"))).await,
+        RuntimeIpcFrame::Response {
+            result: RuntimeIpcOperationResult::SessionForked { session, .. },
+            ..
+        } if session.session_id == "session-fork"
+    ));
+
+    expect_response(
+        &mut observer,
+        2,
+        restore_operation(server.workspace.path(), "session-a"),
+    )
+    .await;
+    expect_error(
+        &mut forker,
+        4,
+        update_mode_operation("session-a", "ask"),
+        RuntimeIpcErrorCode::SessionMismatch,
+    )
+    .await;
+    expect_response(&mut forker, 5, update_mode_operation("session-fork", "ask")).await;
+    expect_error(
+        &mut observer,
+        3,
+        restore_operation(server.workspace.path(), "session-fork"),
+        RuntimeIpcErrorCode::SessionInUse,
+    )
+    .await;
+
+    drop(forker);
+    drop(observer);
+    server.finish().await;
+}
+
+#[tokio::test]
 async fn one_connection_rejects_a_second_turn_until_the_first_finishes() {
     let handler = Arc::new(FakeHandler::default());
     let server = TestServer::start(server_config(), handler.clone()).await;
@@ -725,6 +805,13 @@ async fn one_connection_rejects_a_second_turn_until_the_first_finishes() {
         RuntimeIpcErrorCode::SessionInUse,
     )
     .await;
+    expect_error(
+        &mut client,
+        6,
+        fork_operation("session-a", None),
+        RuntimeIpcErrorCode::SessionInUse,
+    )
+    .await;
 
     drop(client);
     wait_for_calls(&handler, |calls| {
@@ -740,7 +827,59 @@ async fn one_connection_rejects_a_second_turn_until_the_first_finishes() {
                         && request.turn_id.as_deref() == Some("turn-a")
             )
         });
-        submitted == 1 && cancelled_first
+        let forked = calls
+            .iter()
+            .any(|call| matches!(call, RuntimeIpcOperation::ForkSession { .. }));
+        submitted == 1 && !forked && cancelled_first
+    })
+    .await;
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn manual_compaction_owns_the_supplied_turn_until_disconnect_cancels_it() {
+    let handler = Arc::new(FakeHandler::default());
+    let server = TestServer::start(server_config(), handler.clone()).await;
+    let mut client = server.connect("compact-controller").await;
+    expect_response(
+        &mut client,
+        2,
+        restore_operation(server.workspace.path(), "session-a"),
+    )
+    .await;
+    expect_response(
+        &mut client,
+        3,
+        compact_operation("session-a", "turn-compact-a"),
+    )
+    .await;
+    expect_error(
+        &mut client,
+        4,
+        compact_operation("session-a", "turn-compact-b"),
+        RuntimeIpcErrorCode::SessionInUse,
+    )
+    .await;
+
+    drop(client);
+    wait_for_calls(&handler, |calls| {
+        let compacted = calls.iter().any(|call| {
+            matches!(
+                call,
+                RuntimeIpcOperation::CompactSession { request }
+                    if request.session_id == "session-a"
+                        && request.turn_id == "turn-compact-a"
+            )
+        });
+        let cancelled = calls.iter().any(|call| {
+            matches!(
+                call,
+                RuntimeIpcOperation::CancelTurn { request }
+                    if request.session_id == "session-a"
+                        && request.turn_id.as_deref() == Some("turn-compact-a")
+            )
+        });
+        compacted && cancelled
     })
     .await;
     server.finish().await;

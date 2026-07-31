@@ -546,7 +546,7 @@ async fn dispatch_net(
         let host = current_url
             .host_str()
             .ok_or_else(|| MiniAppHostDispatchError::parse("URL has no host"))?;
-        let pinned_address = resolve_public_address(&current_url).await?;
+        let pinned_address = resolve_public_address(&current_url, &allow).await?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .resolve(host, pinned_address)
@@ -654,7 +654,10 @@ async fn validate_network_target(
     Ok(())
 }
 
-async fn resolve_public_address(url: &reqwest::Url) -> MiniAppHostDispatchResult<SocketAddr> {
+async fn resolve_public_address(
+    url: &reqwest::Url,
+    allow: &[String],
+) -> MiniAppHostDispatchResult<SocketAddr> {
     let host = url
         .host_str()
         .ok_or_else(|| MiniAppHostDispatchError::parse("URL has no host"))?;
@@ -670,7 +673,9 @@ async fn resolve_public_address(url: &reqwest::Url) -> MiniAppHostDispatchResult
     let mut resolved_any = false;
     for address in addresses.by_ref() {
         resolved_any = true;
-        if is_private_network_address(address.ip()) {
+        if is_private_network_address(address.ip())
+            && !tun_fake_ip_exception_allowed(url, allow, address.ip())
+        {
             return Err(deny(format!(
                 "Network target resolves to a private or local address: {}",
                 address.ip()
@@ -706,6 +711,28 @@ fn is_private_ipv4(address: Ipv4Addr) -> bool {
         || (a == 192 && b == 0)
         || (a == 198 && (b == 18 || b == 19))
         || a >= 240
+}
+
+fn tun_fake_ip_exception_allowed(url: &reqwest::Url, allow: &[String], address: IpAddr) -> bool {
+    if url.scheme() != "https" {
+        return false;
+    }
+    let IpAddr::V4(address) = address else {
+        return false;
+    };
+    let [a, b, _, _] = address.octets();
+    if a != 198 || !matches!(b, 18 | 19) {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.parse::<IpAddr>().is_ok() {
+        return false;
+    }
+    allow.iter().any(|allowed| {
+        allowed != "*" && host_allowed_by_allowlist(std::slice::from_ref(allowed), host)
+    })
 }
 
 fn is_private_ipv6(address: Ipv6Addr) -> bool {
@@ -767,6 +794,48 @@ mod tests {
         assert!(!is_private_network_address("1.1.1.1".parse().unwrap()));
         assert!(!is_private_network_address(
             "2606:4700:4700::1111".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn ssrf_filter_keeps_tun_proxy_fake_ip_range_private_by_default() {
+        assert!(is_private_network_address("198.18.0.108".parse().unwrap()));
+        assert!(is_private_network_address(
+            "198.19.255.254".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn tun_fake_ip_exception_requires_https_and_an_explicit_domain() {
+        let address = "198.18.0.108".parse().unwrap();
+        let https = reqwest::Url::parse("https://api.example.com/data").unwrap();
+        let http = reqwest::Url::parse("http://api.example.com/data").unwrap();
+        let ip_literal = reqwest::Url::parse("https://198.18.0.108/data").unwrap();
+
+        assert!(tun_fake_ip_exception_allowed(
+            &https,
+            &["example.com".to_string()],
+            address
+        ));
+        assert!(!tun_fake_ip_exception_allowed(
+            &https,
+            &["*".to_string()],
+            address
+        ));
+        assert!(!tun_fake_ip_exception_allowed(
+            &https,
+            &["other.example".to_string()],
+            address
+        ));
+        assert!(!tun_fake_ip_exception_allowed(
+            &http,
+            &["example.com".to_string()],
+            address
+        ));
+        assert!(!tun_fake_ip_exception_allowed(
+            &ip_literal,
+            &["198.18.0.108".to_string()],
+            address
         ));
     }
 

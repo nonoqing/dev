@@ -20,7 +20,7 @@ use tokio::sync::broadcast::error::TryRecvError;
 use bitfun_agent_runtime::sdk::{
     AgentLocalCommandTurnRecordRequest, AgentSessionUsageRequest, SessionUsageReport,
 };
-use bitfun_events::AgenticEvent;
+use bitfun_events::{AgenticEvent, ToolEventData, ToolEventIdentity};
 use resize::ResizeRedrawState;
 
 use crate::actions::{
@@ -30,12 +30,13 @@ use crate::actions::{
 };
 use crate::agent::context_reload_client::CliContextReloadClient;
 use crate::agent::runtime_client::{CliAgentRuntimeClient, SessionOperationError};
-use crate::chat_state::ChatState;
+use crate::chat_state::{ChatState, ModelTokenUsageSnapshot};
 use crate::config::CliConfig;
 use crate::ui::agent_selector::{AgentItem, AgentSelectorAction};
-use crate::ui::chat::{ChatView, MouseGestureOutcome};
+use crate::ui::chat::{session_status_text, ChatView, MouseGestureOutcome};
 use crate::ui::command_menu::{ExternalCommandProjection, NativeCommandCollisionProjection};
 use crate::ui::command_palette::PaletteAction;
+use crate::ui::fork_selector::{ForkAction, ForkTarget};
 use crate::ui::login_form::LoginFormAction;
 use crate::ui::mcp_add_dialog::McpAddAction;
 use crate::ui::mcp_selector::{McpItem, McpItemAction};
@@ -136,6 +137,8 @@ pub(crate) enum ChatExitReason {
     Quit,
     /// Switch to a different session
     SwitchSession(String),
+    /// Fork the current session at the selected OpenCode-compatible boundary.
+    ForkSession(crate::ui::fork_selector::ForkTarget),
     /// Create a new session
     NewSession,
 }

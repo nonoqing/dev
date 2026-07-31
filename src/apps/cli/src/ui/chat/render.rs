@@ -97,6 +97,7 @@ impl ChatView {
         self.render_model_selector(frame, chunks[1]);
         self.render_agent_selector(frame, chunks[1]);
         self.render_session_selector(frame, chunks[1]);
+        self.render_fork_selector(frame, chunks[1]);
         self.render_skill_selector(frame, chunks[1]);
         self.render_subagent_selector(frame, chunks[1]);
         self.render_mcp_selector(frame, chunks[1]);
@@ -812,7 +813,9 @@ impl ChatView {
             // Show thinking spinner when processing
             self.spinner.tick();
             let loading_text = format!(" {} Thinking...", self.spinner.current());
-            let stats_text = format!("Tokens: {} ", chat_state.metadata.total_tokens);
+            let stats_text = context_status_text(chat_state.last_primary_model_usage.as_ref())
+                .map(|status| format!("{status} "))
+                .unwrap_or_default();
 
             let padding_len =
                 (area.width as usize).saturating_sub(loading_text.len() + stats_text.len());
@@ -832,12 +835,7 @@ impl ChatView {
             let status_text = if let Some(status) = &self.status {
                 format!(" {}", status)
             } else {
-                format!(
-                    " Messages: {} | Tool calls: {} | Tokens: {}",
-                    chat_state.metadata.message_count,
-                    chat_state.metadata.tool_calls,
-                    chat_state.metadata.total_tokens,
-                )
+                format!(" {}", default_chat_status_text(chat_state))
             };
 
             let paragraph = Paragraph::new(status_text)
@@ -888,6 +886,10 @@ impl ChatView {
 
     fn render_session_selector(&mut self, frame: &mut Frame, area: Rect) {
         self.session_selector.render(frame, area, &self.theme);
+    }
+
+    fn render_fork_selector(&mut self, frame: &mut Frame, area: Rect) {
+        self.fork_selector.render(frame, area, &self.theme);
     }
 
     fn render_skill_selector(&mut self, frame: &mut Frame, area: Rect) {
@@ -1008,12 +1010,7 @@ impl ChatView {
         let status_text = if let Some(status_text) = status {
             format!(" {}", status_text)
         } else {
-            format!(
-                " Messages: {} | Tool calls: {} | Tokens: {}",
-                chat_state.metadata.message_count,
-                chat_state.metadata.tool_calls,
-                chat_state.metadata.total_tokens,
-            )
+            format!(" {}", default_chat_status_text(chat_state))
         };
 
         let width = available_width as usize;

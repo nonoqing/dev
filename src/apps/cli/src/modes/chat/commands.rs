@@ -41,7 +41,11 @@ fn pending_session_operation_blocks_runtime_action(
         && pending_for_current_session
         && matches!(
             handler,
-            ActionHandler::Sessions | ActionHandler::RenameSession | ActionHandler::Init
+            ActionHandler::Sessions
+                | ActionHandler::ForkSession
+                | ActionHandler::RenameSession
+                | ActionHandler::CompactSession
+                | ActionHandler::Init
         )
 }
 
@@ -76,6 +80,22 @@ fn native_command_reconfirmation_is_required(
 
 fn builtin_arguments_route(route: CommandRoute, handler: ActionHandler) -> bool {
     route == CommandRoute::Builtin && handler == ActionHandler::RenameSession
+}
+
+fn builtin_arguments_error(
+    route: CommandRoute,
+    handler: ActionHandler,
+    arguments: &str,
+) -> Option<&'static str> {
+    if route != CommandRoute::Builtin || arguments.trim().is_empty() {
+        return None;
+    }
+
+    match handler {
+        ActionHandler::CompactSession => Some("Usage: /compact"),
+        ActionHandler::ForkSession => Some("Usage: /fork"),
+        _ => None,
+    }
 }
 
 fn selected_command_prefill(handler: ActionHandler) -> Option<&'static str> {
@@ -129,7 +149,12 @@ fn clear_selected_native_command_prefill(
 fn session_command_help_note() -> String {
     let rename = action_for_alias("/rename", ActionContext::Chat)
         .expect("current session rename action must remain registered");
-    format!("Session Commands\n  {}", rename.description)
+    let fork = action_for_alias("/fork", ActionContext::Chat)
+        .expect("current session fork action must remain registered");
+    format!(
+        "Session Commands\n  {}\n  {}",
+        fork.description, rename.description
+    )
 }
 
 impl ChatMode {
@@ -343,6 +368,12 @@ impl ChatMode {
         if self.agent.is_shared() {
             if let Some(action) = builtin_action {
                 let state = self.action_state(chat_state.is_processing, false);
+                if let Some(usage) =
+                    builtin_arguments_error(CommandRoute::Builtin, action.handler, arguments)
+                {
+                    chat_view.set_status(Some(usage.to_string()));
+                    return Ok(None);
+                }
                 if builtin_arguments_route(CommandRoute::Builtin, action.handler) {
                     if !action.available(state) {
                         chat_view.set_status(Some(action.unavailable_message(state)));
@@ -411,6 +442,12 @@ impl ChatMode {
                 builtin_reconfirmation_required,
             )
         };
+        if let Some(action) = builtin_action {
+            if let Some(usage) = builtin_arguments_error(route, action.handler, arguments) {
+                chat_view.set_status(Some(usage.to_string()));
+                return Ok(None);
+            }
+        }
         if let Some(action) = builtin_action {
             if builtin_arguments_route(route, action.handler) {
                 let state = self.action_state(chat_state.is_processing, false);
@@ -850,17 +887,6 @@ impl ChatMode {
                 }
                 chat_view.show_info_popup(help);
             }
-            ActionHandler::ClearConversation => {
-                if chat_state.is_processing {
-                    self.cancel_active_turn(chat_view, rt_handle);
-                    if self.agent.is_shared() {
-                        return Ok(None);
-                    }
-                }
-                chat_state.clear_messages();
-                chat_view.clear_screen();
-                chat_view.set_status(Some("Conversation cleared".to_string()));
-            }
             ActionHandler::OpenAgentSelector => {
                 self.show_agent_selector(chat_view, chat_state, rt_handle);
             }
@@ -887,6 +913,9 @@ impl ChatMode {
             }
             ActionHandler::Sessions => {
                 self.show_session_selector(chat_view, chat_state, rt_handle);
+            }
+            ActionHandler::ForkSession => {
+                self.show_fork_selector(chat_view, chat_state);
             }
             ActionHandler::RenameSession => {
                 return self.start_session_rename("", chat_view, chat_state, rt_handle);
@@ -929,16 +958,11 @@ impl ChatMode {
                         .to_string(),
                 ),
             },
-            ActionHandler::History => {
-                chat_state.add_system_message(format!(
-                    "Current session statistics:\n\
-                     • Messages: {}\n\
-                     • Tool calls: {}\n\
-                     • Tokens: {}",
-                    chat_state.metadata.message_count,
-                    chat_state.metadata.tool_calls,
-                    chat_state.metadata.total_tokens
-                ));
+            ActionHandler::Status => {
+                chat_view.show_info_popup(session_status_text(chat_state, self.agent.is_shared()));
+            }
+            ActionHandler::CompactSession => {
+                self.start_session_compaction(chat_view, chat_state, rt_handle);
             }
             ActionHandler::Usage => self.show_usage_report(chat_view, chat_state, rt_handle),
             ActionHandler::ToggleAutoApprove => {}
@@ -1027,6 +1051,23 @@ impl ChatMode {
             ActionHandler::ScrollDown => chat_view.scroll_down(10),
         }
         Ok(None)
+    }
+
+    fn start_session_compaction(
+        &self,
+        chat_view: &mut ChatView,
+        chat_state: &ChatState,
+        rt_handle: &tokio::runtime::Handle,
+    ) {
+        let agent = self.agent.clone();
+        let session_id = chat_state.core_session_id.clone();
+        chat_view.set_status(Some("Compacting context...".to_string()));
+        let result = tokio::task::block_in_place(|| {
+            rt_handle.block_on(async move { agent.start_session_compaction(&session_id).await })
+        });
+        if let Err(error) = result {
+            chat_view.set_status(Some(format!("Could not compact context: {error}")));
+        }
     }
 
     fn start_session_rename(

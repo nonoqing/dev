@@ -12,28 +12,6 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 type FollowOutputController = ReturnType<typeof useFlowChatFollowOutput>;
 
-describe('computeContinuousFollowStep', () => {
-  it('spreads a line-height-sized tail growth across multiple frames', () => {
-    const firstStep = computeContinuousFollowStep(24, 1000 / 60);
-
-    expect(firstStep).toBeGreaterThan(0);
-    expect(firstStep).toBeLessThan(24);
-  });
-
-  it('retargets proportionally while capping large catch-up jumps', () => {
-    const smallStep = computeContinuousFollowStep(24, 1000 / 60);
-    const largeStep = computeContinuousFollowStep(240, 1000 / 60);
-
-    expect(largeStep).toBeGreaterThan(smallStep);
-    expect(largeStep).toBeLessThanOrEqual(32);
-  });
-
-  it('snaps only the final subpixel remainder', () => {
-    expect(computeContinuousFollowStep(0.4, 1000 / 60)).toBe(0.4);
-    expect(computeContinuousFollowStep(Number.NaN, 1000 / 60)).toBe(0);
-  });
-});
-
 function setScrollerMetrics(
   scroller: HTMLElement,
   metrics: { scrollHeight: number; clientHeight: number; scrollTop: number },
@@ -50,11 +28,15 @@ function Harness({
   onController,
   performAutoFollowScroll,
   performLatestTurnStickyPin = vi.fn(),
+  canAnimateTailFollow,
+  getAutoFollowTargetScrollTop,
 }: {
   scroller: HTMLElement;
   onController: (controller: FollowOutputController) => void;
   performAutoFollowScroll: () => void;
   performLatestTurnStickyPin?: () => void;
+  canAnimateTailFollow?: () => boolean;
+  getAutoFollowTargetScrollTop?: (scroller: HTMLElement) => number;
 }) {
   const scrollerRef = React.useRef<HTMLElement | null>(scroller);
   scrollerRef.current = scroller;
@@ -68,6 +50,8 @@ function Harness({
     performUserFollowScroll: vi.fn(),
     performAutoFollowScroll,
     performLatestTurnStickyPin,
+    canAnimateTailFollow,
+    getAutoFollowTargetScrollTop,
   });
 
   onController(controller);
@@ -97,6 +81,162 @@ describe('useFlowChatFollowOutput', () => {
     });
     container.remove();
     vi.unstubAllGlobals();
+  });
+
+  it('eases a small tail gap without using a second full-scroll action', () => {
+    expect(computeContinuousFollowStep(24, 1000 / 60)).toBeGreaterThan(0);
+    expect(computeContinuousFollowStep(24, 1000 / 60)).toBeLessThan(24);
+    expect(computeContinuousFollowStep(240, 1000 / 60)).toBeLessThanOrEqual(32);
+    expect(computeContinuousFollowStep(Number.NaN, 1000 / 60)).toBe(0);
+
+    const queuedFrames: FrameRequestCallback[] = [];
+    let nextFrameId = 0;
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      queuedFrames.push(callback);
+      nextFrameId += 1;
+      return nextFrameId;
+    }));
+
+    const scroller = document.createElement('div');
+    setScrollerMetrics(scroller, {
+      scrollHeight: 1500,
+      clientHeight: 500,
+      scrollTop: 1000,
+    });
+    const performAutoFollowScroll = vi.fn(() => {
+      scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight;
+    });
+
+    act(() => {
+      root.render(
+        <Harness
+          scroller={scroller}
+          onController={nextController => {
+            controller = nextController;
+          }}
+          performAutoFollowScroll={performAutoFollowScroll}
+        />,
+      );
+    });
+
+    act(() => {
+      controller?.enterFollowOutput('auto-follow');
+    });
+    expect(performAutoFollowScroll).toHaveBeenCalledTimes(1);
+
+    setScrollerMetrics(scroller, {
+      scrollHeight: 1524,
+      clientHeight: 500,
+      scrollTop: 1000,
+    });
+    const firstFollowFrame = queuedFrames.shift();
+    expect(firstFollowFrame).toBeDefined();
+
+    act(() => {
+      firstFollowFrame?.(1000 / 60);
+    });
+
+    act(() => {
+      controller?.scheduleFollowToLatest('observer-growth');
+    });
+
+    expect(performAutoFollowScroll).toHaveBeenCalledTimes(1);
+    expect(scroller.scrollTop).toBeGreaterThan(1000);
+    expect(scroller.scrollTop).toBeLessThan(1024);
+  });
+
+  it('does not animate until the tail coordinator owns the viewport', () => {
+    const queuedFrames: FrameRequestCallback[] = [];
+    let nextFrameId = 0;
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      queuedFrames.push(callback);
+      nextFrameId += 1;
+      return nextFrameId;
+    }));
+
+    const scroller = document.createElement('div');
+    setScrollerMetrics(scroller, {
+      scrollHeight: 1500,
+      clientHeight: 500,
+      scrollTop: 1000,
+    });
+    const performAutoFollowScroll = vi.fn(() => {
+      scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight;
+    });
+
+    act(() => {
+      root.render(
+        <Harness
+          scroller={scroller}
+          onController={nextController => {
+            controller = nextController;
+          }}
+          performAutoFollowScroll={performAutoFollowScroll}
+          canAnimateTailFollow={() => false}
+        />,
+      );
+    });
+
+    act(() => {
+      controller?.enterFollowOutput('auto-follow');
+    });
+    setScrollerMetrics(scroller, {
+      scrollHeight: 1524,
+      clientHeight: 500,
+      scrollTop: 1000,
+    });
+    const firstFollowFrame = queuedFrames.shift();
+    expect(firstFollowFrame).toBeDefined();
+
+    act(() => {
+      firstFollowFrame?.(1000 / 60);
+    });
+
+    expect(performAutoFollowScroll).toHaveBeenCalledTimes(1);
+    expect(scroller.scrollTop).toBe(1000);
+  });
+
+  it('does not animate upward when the effective target moves backward', () => {
+    const queuedFrames: FrameRequestCallback[] = [];
+    let nextFrameId = 0;
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      queuedFrames.push(callback);
+      nextFrameId += 1;
+      return nextFrameId;
+    }));
+
+    const scroller = document.createElement('div');
+    setScrollerMetrics(scroller, {
+      scrollHeight: 1500,
+      clientHeight: 500,
+      scrollTop: 1000,
+    });
+    const performAutoFollowScroll = vi.fn();
+
+    act(() => {
+      root.render(
+        <Harness
+          scroller={scroller}
+          onController={nextController => {
+            controller = nextController;
+          }}
+          performAutoFollowScroll={performAutoFollowScroll}
+          getAutoFollowTargetScrollTop={() => 980}
+        />,
+      );
+    });
+
+    act(() => {
+      controller?.enterFollowOutput('auto-follow');
+    });
+    const firstFollowFrame = queuedFrames.shift();
+    expect(firstFollowFrame).toBeDefined();
+
+    act(() => {
+      firstFollowFrame?.(1000 / 60);
+    });
+
+    expect(scroller.scrollTop).toBe(1000);
   });
 
   it('exits output follow immediately when explicit user scroll intent is already away from bottom', () => {
@@ -219,6 +359,43 @@ describe('useFlowChatFollowOutput', () => {
     expect(controller?.isFollowingOutput).toBe(false);
   });
 
+  it('keeps a sticky pin armed while clearing logical follow ownership', () => {
+    const scroller = document.createElement('div');
+    setScrollerMetrics(scroller, {
+      scrollHeight: 1500,
+      clientHeight: 500,
+      scrollTop: 1000,
+    });
+    const performAutoFollowScroll = vi.fn();
+
+    act(() => {
+      root.render(
+        <Harness
+          scroller={scroller}
+          onController={nextController => {
+            controller = nextController;
+          }}
+          performAutoFollowScroll={performAutoFollowScroll}
+        />,
+      );
+    });
+
+    act(() => {
+      controller?.enterFollowOutput('auto-follow');
+      controller?.preparePinnedTurnFollowHandoff();
+    });
+
+    expect(controller?.isFollowingOutput).toBe(false);
+
+    let activated = false;
+    act(() => {
+      activated = controller?.activateArmedFollowOutput() ?? false;
+    });
+
+    expect(activated).toBe(true);
+    expect(controller?.isFollowingOutput).toBe(true);
+  });
+
   it('resumes a mounted streaming session at the tail without replaying sticky pin', () => {
     const scroller = document.createElement('div');
     setScrollerMetrics(scroller, {
@@ -253,58 +430,5 @@ describe('useFlowChatFollowOutput', () => {
     expect(controller?.isFollowingOutput).toBe(true);
     expect(performAutoFollowScroll).toHaveBeenCalledTimes(1);
     expect(performLatestTurnStickyPin).not.toHaveBeenCalled();
-  });
-
-  it('eases line-height growth without issuing another bottom snap', () => {
-    const queuedFrames: FrameRequestCallback[] = [];
-    let nextFrameId = 0;
-    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
-      queuedFrames.push(callback);
-      nextFrameId += 1;
-      return nextFrameId;
-    }));
-
-    const scroller = document.createElement('div');
-    setScrollerMetrics(scroller, {
-      scrollHeight: 1500,
-      clientHeight: 500,
-      scrollTop: 1000,
-    });
-    const performAutoFollowScroll = vi.fn(() => {
-      scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight;
-    });
-
-    act(() => {
-      root.render(
-        <Harness
-          scroller={scroller}
-          onController={nextController => {
-            controller = nextController;
-          }}
-          performAutoFollowScroll={performAutoFollowScroll}
-        />,
-      );
-    });
-
-    act(() => {
-      controller?.enterFollowOutput('auto-follow');
-    });
-    expect(performAutoFollowScroll).toHaveBeenCalledTimes(1);
-
-    setScrollerMetrics(scroller, {
-      scrollHeight: 1524,
-      clientHeight: 500,
-      scrollTop: 1000,
-    });
-    const firstFollowFrame = queuedFrames.shift();
-    expect(firstFollowFrame).toBeDefined();
-
-    act(() => {
-      firstFollowFrame?.(1000 / 60);
-    });
-
-    expect(performAutoFollowScroll).toHaveBeenCalledTimes(1);
-    expect(scroller.scrollTop).toBeGreaterThan(1000);
-    expect(scroller.scrollTop).toBeLessThan(1024);
   });
 });
