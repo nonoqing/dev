@@ -2005,6 +2005,18 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
                 .await?
         };
 
+        // SessionConfig defaults to a conservative 128128-token context window.
+        // Refresh normal sessions immediately after creation so headless and SDK
+        // entrypoints use the selected model's configured window on their first
+        // turn, just like restored sessions and hidden subagents already do.
+        self.session_manager
+            .refresh_session_context_window(&session.session_id)
+            .await?;
+        let session = self
+            .session_manager
+            .get_session(&session.session_id)
+            .unwrap_or(session);
+
         if !transient {
             Self::track_session_workspace_activity_best_effort(
                 &session.config,
