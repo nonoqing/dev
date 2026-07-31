@@ -20,6 +20,7 @@ bitfun-agent-tools = { path = "../tool-contracts" }
 bitfun-core-types = { path = "../../contracts/core-types" }
 bitfun-events = { path = "../../contracts/events" }
 bitfun-harness = { path = "../harness" }
+bitfun-observability = { path = "../observability" }
 bitfun-runtime-ports = { path = "../../contracts/runtime-ports", features = ["permission"] }
 bitfun-runtime-services = { path = "../runtime-services" }
 dashmap = { workspace = true }

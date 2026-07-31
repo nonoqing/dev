@@ -268,6 +268,7 @@ const REQWEST_PACKAGE_PROFILES = new Map([
     'bitfun-cli',
     'bitfun-desktop',
     'bitfun-miniapp-market-service',
+    'bitfun-observability-otel',
     'bitfun-skin-market-service',
   ].map((packageName) => [packageName, {
     dependencyFeatures: [...REQWEST_TRANSPORT_FEATURES, 'rustls'],

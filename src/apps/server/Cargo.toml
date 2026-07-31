@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 bitfun-core = { path = "../../crates/assembly/core", default-features = false, features = ["product-full"] }
+bitfun-observability = { path = "../../crates/execution/observability" }
+bitfun-observability-otel = { path = "../../crates/services/observability-otel" }
 
 # App-server surface: an in-process JSON-RPC server/client pair over an
 # in-memory channel transport. The websocket handler routes agent kernel RPCs
