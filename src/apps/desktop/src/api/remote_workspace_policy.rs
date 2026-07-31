@@ -539,6 +539,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     ("get_config", RemoteWorkspacePolicy::LegacyUnaudited),
     ("get_configs", RemoteWorkspacePolicy::LegacyUnaudited),
     (
+        "get_telemetry_state",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
         "get_current_workspace",
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
@@ -1693,6 +1697,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
     ("set_config", RemoteWorkspacePolicy::LegacyUnaudited),
+    (
+        "set_telemetry_level",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
     (
         "set_external_mcp_server_decision_command",
         RemoteWorkspacePolicy::RemoteUnsupported,

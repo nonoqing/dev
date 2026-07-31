@@ -24,6 +24,27 @@ async fn main() -> anyhow::Result<()> {
     let cfg = RelayConfig::from_env();
     info!("BitFun Relay Server v{}", env!("CARGO_PKG_VERSION"));
 
+    let telemetry_runtime = bitfun_observability_otel::TelemetryRuntimeHandle::new(
+        bitfun_observability_otel::TelemetryRuntimeMetadata::new(
+            bitfun_observability::TelemetryEntrypoint::Relay,
+            std::path::PathBuf::from(&cfg.room_web_dir).join("runtime"),
+        ),
+        Arc::new(bitfun_observability_otel::ReadOnlySecretFileProvider::new(
+            std::env::var_os("BITFUN_TELEMETRY_SECRET_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("/run/secrets/bitfun")),
+        )),
+    );
+    let _telemetry_shutdown = telemetry_runtime.shutdown_guard();
+    let user_telemetry = bitfun_observability::TelemetryUserConfig::new(telemetry_level_from_env());
+    if let Err(error) = telemetry_runtime.apply_config(
+        &user_telemetry,
+        &bitfun_observability_otel::TelemetryDeploymentConfig::from_deployment_env(),
+    ) {
+        tracing::warn!("Telemetry is unavailable; effective level is off: {error}");
+    }
+    let startup_observation = telemetry_runtime.startup_guard();
+
     let room_manager = RoomManager::new();
     let asset_store = Arc::new(DiskAssetStore::new_with_max_bytes(
         &cfg.room_web_dir,
@@ -114,10 +135,30 @@ async fn main() -> anyhow::Result<()> {
     info!("Relay server listening on {}", cfg.listen_addr);
     info!("WebSocket endpoint: ws://{}/ws", cfg.listen_addr);
 
+    startup_observation.complete();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
     Ok(())
+}
+
+fn telemetry_level_from_env() -> bitfun_observability::TelemetryLevel {
+    match std::env::var("BITFUN_TELEMETRY_LEVEL")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "basic" => bitfun_observability::TelemetryLevel::Basic,
+        "diagnostic" => bitfun_observability::TelemetryLevel::Diagnostic,
+        _ => bitfun_observability::TelemetryLevel::Off,
+    }
+}
+
+async fn shutdown_signal() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        tracing::warn!("Failed to install Ctrl+C handler");
+    }
 }

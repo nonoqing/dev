@@ -1088,6 +1088,12 @@ async fn run_cli() -> Result<()> {
             .init();
     }
 
+    let telemetry_runtime = initialize_cli_telemetry().await?;
+    let _telemetry_shutdown = telemetry_runtime.shutdown_guard();
+    let startup_observation = telemetry_runtime.startup_guard();
+    let _ = CLI_TELEMETRY_RUNTIME.set(telemetry_runtime);
+    startup_observation.complete();
+
     let config = CliConfig::load().unwrap_or_else(|e| {
         if !is_tui_mode {
             eprintln!("Warning: Failed to load config: {}", e);
@@ -1253,7 +1259,7 @@ async fn run_cli() -> Result<()> {
                 bitfun_core::product_runtime::build_local_runtime_services(&workspace, 16)?;
             let product_runtime = product_assembly::assemble_cli_runtime_parts(services)?;
             if !management::print_doctor(&product_runtime).await? {
-                std::process::exit(1);
+                return Err(anyhow::Error::new(ReportedCliError { exit_code: 1 }));
             }
         }
 
@@ -1296,7 +1302,7 @@ async fn run_cli() -> Result<()> {
             action: Some(AcpAction::Doctor { command }),
         }) => {
             if !acp_cli::print_doctor(&command).await? {
-                std::process::exit(1);
+                return Err(anyhow::Error::new(ReportedCliError { exit_code: 1 }));
             }
         }
 
@@ -1312,7 +1318,7 @@ async fn run_cli() -> Result<()> {
             AcpClientsAction::List => acp_cli::list_external_clients().await?,
             AcpClientsAction::Doctor => {
                 if !acp_cli::doctor_external_clients().await? {
-                    std::process::exit(1);
+                    return Err(anyhow::Error::new(ReportedCliError { exit_code: 1 }));
                 }
             }
             AcpClientsAction::Enable { client, permission } => {
@@ -1347,6 +1353,52 @@ async fn run_cli() -> Result<()> {
     }
 
     Ok(())
+}
+
+static CLI_TELEMETRY_RUNTIME: std::sync::OnceLock<
+    bitfun_observability_otel::TelemetryRuntimeHandle,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn cli_telemetry() -> bitfun_observability::Telemetry {
+    CLI_TELEMETRY_RUNTIME
+        .get()
+        .map_or_else(bitfun_observability::Telemetry::noop, |runtime| {
+            runtime.telemetry()
+        })
+}
+
+async fn initialize_cli_telemetry() -> Result<bitfun_observability_otel::TelemetryRuntimeHandle> {
+    use bitfun_observability_otel::{
+        SystemKeyringTelemetrySecrets, TelemetryDeploymentConfig, TelemetryRuntimeHandle,
+        TelemetryRuntimeMetadata,
+    };
+
+    bitfun_core::service::config::initialize_global_config()
+        .await
+        .map_err(|error| anyhow!("Failed to initialize global config service: {error}"))?;
+    let path_manager = bitfun_core::infrastructure::try_get_path_manager_arc()
+        .map_err(|error| anyhow!(error.to_string()))?;
+    let runtime = TelemetryRuntimeHandle::new(
+        TelemetryRuntimeMetadata::new(
+            bitfun_observability::TelemetryEntrypoint::Cli,
+            path_manager.user_data_dir(),
+        ),
+        std::sync::Arc::new(SystemKeyringTelemetrySecrets),
+    );
+    let service = bitfun_core::service::config::get_global_config_service().await?;
+    let config = service
+        .get_config::<bitfun_core::service::config::GlobalConfig>(None)
+        .await?;
+    if let Err(error) = runtime.apply_config(
+        &config.app.telemetry,
+        &TelemetryDeploymentConfig::from_product_build(),
+    ) {
+        tracing::warn!(
+            "Telemetry is unavailable; effective level is off: {}",
+            error
+        );
+    }
+    Ok(runtime)
 }
 
 fn exec_requests_json_output(args: &[std::ffi::OsString]) -> bool {

@@ -39,11 +39,15 @@ use bitfun_core::infrastructure::{get_path_manager_arc, try_get_path_manager_arc
 use bitfun_core::service::search::get_global_workspace_search_service;
 use bitfun_core::service::workspace::get_global_workspace_service;
 use bitfun_core::util::{elapsed_ms, TimingCollector};
+use bitfun_observability_otel::{
+    SystemKeyringTelemetrySecrets, TelemetryDeploymentConfig, TelemetryRuntimeHandle,
+    TelemetryRuntimeMetadata,
+};
 use bitfun_transport::{TauriTransportAdapter, TransportAdapter};
 use serde::Deserialize;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
@@ -113,6 +117,7 @@ static MAIN_WINDOW_CLOSE_PENDING_ON_MACOS: AtomicBool = AtomicBool::new(false);
 const MAIN_WINDOW_CLOSE_REQUESTED_EVENT: &str = "bitfun_main_window_close_requested";
 const BROWSER_WEBVIEW_PAGE_LOAD_EVENT: &str = "browser-webview-page-load";
 const CRON_DESKTOP_START_FALLBACK_DELAY: Duration = Duration::from_secs(120);
+static DESKTOP_TELEMETRY_RUNTIME: OnceLock<TelemetryRuntimeHandle> = OnceLock::new();
 pub(crate) const MAIN_WINDOW_DEFAULT_WIDTH: f64 = 1200.0;
 pub(crate) const MAIN_WINDOW_DEFAULT_HEIGHT: f64 = 800.0;
 pub(crate) const MAIN_WINDOW_MIN_WIDTH: f64 = 800.0;
@@ -455,6 +460,32 @@ pub async fn run() {
     startup_timings.record_elapsed("initialize_global_config", step_started);
     startup_trace.record_elapsed_step("native_pre_tauri", "initialize_global_config", step_started);
 
+    let path_manager = get_path_manager_arc();
+    let telemetry_runtime = TelemetryRuntimeHandle::new(
+        TelemetryRuntimeMetadata::new(
+            bitfun_observability::TelemetryEntrypoint::Desktop,
+            path_manager.user_data_dir(),
+        ),
+        Arc::new(SystemKeyringTelemetrySecrets),
+    );
+    let telemetry_deployment = TelemetryDeploymentConfig::from_product_build();
+    if let Err(error) =
+        apply_desktop_telemetry_config(&telemetry_runtime, &telemetry_deployment).await
+    {
+        log::warn!(
+            "Telemetry is unavailable; effective level is off: {}",
+            error
+        );
+    }
+    let _ = DESKTOP_TELEMETRY_RUNTIME.set(telemetry_runtime.clone());
+    let startup_observation = Arc::new(std::sync::Mutex::new(Some(
+        telemetry_runtime.startup_guard(),
+    )));
+    spawn_desktop_telemetry_config_listener(
+        telemetry_runtime.clone(),
+        telemetry_deployment.clone(),
+    );
+
     // The three steps below only depend on the global config service (initialized
     // above) and write to disjoint global singletons, so they can run concurrently:
     // - initialize_global_i18n_service: reads config, sets the global i18n singleton
@@ -529,7 +560,7 @@ pub async fn run() {
 
     let step_started = Instant::now();
     let (coordinator, scheduler, event_queue, event_router, ai_client_factory, token_usage_service) =
-        match init_agentic_system().await {
+        match init_agentic_system(telemetry_runtime.telemetry()).await {
             Ok(state) => state,
             Err(e) => {
                 log::error!("Failed to initialize agentic system: {}", e);
@@ -606,8 +637,6 @@ pub async fn run() {
 
     let terminal_state = api::terminal_api::TerminalState::new();
 
-    let path_manager = get_path_manager_arc();
-
     let mut builder = tauri::Builder::default();
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -655,6 +684,7 @@ pub async fn run() {
         .manage(scheduler)
         .manage(terminal_state)
         .manage(startup_trace.clone())
+        .manage(telemetry_runtime.clone())
         .on_page_load(|webview, payload| {
             let label = webview.label();
             if label.starts_with("embedded-browser-view-")
@@ -675,7 +705,9 @@ pub async fn run() {
                 );
             }
         })
-        .setup(move |app| {
+        .setup({
+            let startup_observation = startup_observation.clone();
+            move |app| {
             let setup_started = Instant::now();
             startup_trace.record_phase("tauri_setup_start", "native_setup");
             #[cfg(target_os = "macos")]
@@ -1052,8 +1084,15 @@ pub async fn run() {
                 since_process_start_ms
             );
             log::info!("BitFun Desktop started successfully");
+            if let Some(observation) = startup_observation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                observation.complete();
+            }
             Ok(())
-        })
+        }})
         .on_window_event({
             move |window, event| {
                 if window.label() == "main"
@@ -1267,10 +1306,12 @@ pub async fn run() {
             paste_files,
             get_config,
             get_configs,
+            api::telemetry_api::get_telemetry_state,
             computer_use_get_status,
             computer_use_request_permissions,
             computer_use_open_system_settings,
             set_config,
+            api::telemetry_api::set_telemetry_level,
             reset_config,
             export_config,
             import_config,
@@ -1828,7 +1869,9 @@ pub async fn run() {
     }
 }
 
-async fn init_agentic_system() -> anyhow::Result<(
+async fn init_agentic_system(
+    telemetry: bitfun_observability::Telemetry,
+) -> anyhow::Result<(
     Arc<bitfun_core::agentic::coordination::ConversationCoordinator>,
     Arc<bitfun_core::agentic::coordination::DialogScheduler>,
     Arc<bitfun_core::agentic::events::EventQueue>,
@@ -1871,15 +1914,15 @@ async fn init_agentic_system() -> anyhow::Result<(
             tool_state_manager,
             Some(computer_use_host),
         )
+        .with_telemetry(telemetry.clone())
         .with_permission_request_manager(permission_request_manager),
     );
 
     let stream_processor = Arc::new(execution::StreamProcessor::new(event_queue.clone()));
-    let round_executor = Arc::new(execution::RoundExecutor::new(
-        stream_processor,
-        event_queue.clone(),
-        tool_pipeline.clone(),
-    ));
+    let round_executor = Arc::new(
+        execution::RoundExecutor::new(stream_processor, event_queue.clone(), tool_pipeline.clone())
+            .with_telemetry(telemetry.clone()),
+    );
 
     // Get execution config from global settings
     let exec_config = match bitfun_core::service::config::get_global_config_service().await {
@@ -1898,13 +1941,16 @@ async fn init_agentic_system() -> anyhow::Result<(
         Err(_) => Default::default(),
     };
 
-    let execution_engine = Arc::new(execution::ExecutionEngine::new(
-        round_executor,
-        event_queue.clone(),
-        session_manager.clone(),
-        context_compressor,
-        exec_config,
-    ));
+    let execution_engine = Arc::new(
+        execution::ExecutionEngine::new(
+            round_executor,
+            event_queue.clone(),
+            session_manager.clone(),
+            context_compressor,
+            exec_config,
+        )
+        .with_telemetry(telemetry.clone()),
+    );
 
     let runtime_ownership = Arc::new(
         bitfun_core::runtime_ownership::CoreRuntimeOwnership::embedded(
@@ -1912,14 +1958,17 @@ async fn init_agentic_system() -> anyhow::Result<(
             "desktop",
         ),
     );
-    let coordinator = Arc::new(coordination::ConversationCoordinator::new(
-        session_manager.clone(),
-        execution_engine,
-        tool_pipeline,
-        event_queue.clone(),
-        event_router.clone(),
-        runtime_ownership,
-    ));
+    let coordinator = Arc::new(
+        coordination::ConversationCoordinator::new(
+            session_manager.clone(),
+            execution_engine,
+            tool_pipeline,
+            event_queue.clone(),
+            event_router.clone(),
+            runtime_ownership,
+        )
+        .with_telemetry(telemetry.clone()),
+    );
     coordinator.set_terminal_port(
         bitfun_core::product_runtime::CoreRuntimeServicesProvider::terminal_port(),
     );
@@ -1942,6 +1991,10 @@ async fn init_agentic_system() -> anyhow::Result<(
     event_router.subscribe_internal(
         "thread_goal_tokens".to_string(),
         Arc::new(bitfun_core::agentic::goal_mode::ThreadGoalTokenSubscriber),
+    );
+    event_router.subscribe_internal(
+        "agent_telemetry".to_string(),
+        Arc::new(bitfun_agent_runtime::telemetry::AgentTelemetrySubscriber::new(telemetry)),
     );
 
     log::info!("Token usage service initialized and subscriber registered");
@@ -2110,9 +2163,67 @@ pub(crate) fn perform_process_exit_cleanup() -> bool {
     if let Some(search_service) = get_global_workspace_search_service() {
         search_service.shutdown_blocking();
     }
+    if let Some(telemetry) = DESKTOP_TELEMETRY_RUNTIME.get() {
+        if std::thread::panicking() {
+            telemetry.cancel_and_discard();
+        } else {
+            let _ = telemetry.shutdown();
+        }
+    }
     bitfun_core::util::process_manager::cleanup_all_processes();
     api::remote_connect_api::cleanup_on_exit();
     true
+}
+
+async fn apply_desktop_telemetry_config(
+    runtime: &TelemetryRuntimeHandle,
+    deployment: &TelemetryDeploymentConfig,
+) -> anyhow::Result<()> {
+    let service = bitfun_core::service::config::get_global_config_service().await?;
+    let config = service
+        .get_config::<bitfun_core::service::config::GlobalConfig>(None)
+        .await?;
+    runtime
+        .apply_config(&config.app.telemetry, deployment)
+        .map(|_| ())
+        .map_err(anyhow::Error::new)
+}
+
+fn spawn_desktop_telemetry_config_listener(
+    runtime: TelemetryRuntimeHandle,
+    deployment: TelemetryDeploymentConfig,
+) {
+    use bitfun_core::service::config::{subscribe_config_updates, ConfigUpdateEvent};
+
+    let Some(mut receiver) = subscribe_config_updates() else {
+        return;
+    };
+    tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(ConfigUpdateEvent::AppUpdated | ConfigUpdateEvent::ConfigReloaded) => {
+                    if let Err(error) = apply_desktop_telemetry_config(&runtime, &deployment).await
+                    {
+                        log::warn!(
+                            "Telemetry reconfiguration failed; effective level is off: {}",
+                            error
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    if let Err(error) = apply_desktop_telemetry_config(&runtime, &deployment).await
+                    {
+                        log::warn!(
+                            "Telemetry reconfiguration after lag failed; effective level is off: {}",
+                            error
+                        );
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn configure_workspace_search_daemon_env() -> Option<std::path::PathBuf> {

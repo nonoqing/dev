@@ -5,6 +5,7 @@
 use crate::util::errors::*;
 use async_trait::async_trait;
 use bitfun_core_types::WorktreeSettings;
+use bitfun_observability::TelemetryUserConfig;
 use bitfun_runtime_ports::{PermissionRule, ToolPermissionConfig};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -106,7 +107,7 @@ fn default_close_button_behavior() -> String {
 pub struct AppConfig {
     pub language: String,
     pub auto_update: bool,
-    pub telemetry: bool,
+    pub telemetry: TelemetryUserConfig,
     pub startup_behavior: String,
     pub confirm_on_exit: bool,
     pub restore_windows: bool,
@@ -1669,7 +1670,7 @@ impl Default for AppConfig {
         Self {
             language: "zh-CN".to_string(),
             auto_update: true,
-            telemetry: false,
+            telemetry: TelemetryUserConfig::default(),
             startup_behavior: "lastWorkspace".to_string(),
             confirm_on_exit: true,
             restore_windows: true,

@@ -16,10 +16,10 @@ pub(crate) async fn init_agentic_system(
     profile: DeliveryProfile,
     runtime_ownership: Arc<CoreRuntimeOwnership>,
 ) -> Result<AgenticSystem> {
-    let system =
-        bitfun_core::agentic::system::init_agentic_system_for_profile_with_runtime_ownership(
+    let system = bitfun_core::agentic::system::init_agentic_system_for_profile_with_runtime_ownership_and_telemetry(
             profile,
             runtime_ownership,
+            crate::cli_telemetry(),
         )
         .await
         .context("Failed to initialize agentic system")?;
