@@ -60,7 +60,9 @@ restrictions remain enforced.
 ## TUI rules
 
 - Derive slash commands, palette actions, help, availability, and key bindings
-  from the action registry. Do not add a second command table.
+  from the action registry. Do not add a second command table. Emacs-style
+  editing keys (Ctrl+A/E/K/U, Alt+D, undo) are handled by a shared
+  `TextInput::handle_emacs_edit_key` fallback in both chat and startup.
 - Match established competitor entry flows when equivalent behavior exists.
   Prefer OpenCode names and interactions; do not invent `/shell` or aliases for
   the `!` Shell entry.
@@ -71,10 +73,16 @@ restrictions remain enforced.
   keeps chat/shell histories separate, treats `/` as command text, and rejects
   images and structured `@` references before Runtime submission.
 - Direct paste, `Ctrl+V`, and bracketed paste share `ComposerDraft`. Shared TUI
-  rejects unsupported image payloads before IPC.
+  rejects unsupported image payloads before IPC. Prompt stash
+  (`StashStore`, JSONL-persisted) is a separate local-only mechanism and does
+  not enter `ComposerDraft` or Runtime submission.
 - Local effects such as `/editor`, copy, and export stay local. Product work
   such as shell execution, session mutation, and permissions goes through typed
-  Runtime owners.
+  Runtime owners. Session pinning is local-only (persisted to CLI config);
+  model favorite is persisted to backend `AIModelConfig`.
+- Terminal suspend (Unix Ctrl+Z via SIGTSTP/SIGCONT) is handled at the event
+  loop layer before key dispatch. Ctrl+C / Ctrl+D exit immediately (single
+  press) after clearing any non-empty input.
 - Session-lineage membership, order, legacy relationship normalization,
   transcript reads, and targeted cancellation stay in shared Runtime owners.
   TUI may keep only the selector/read-only inspection state and must preserve

@@ -18,7 +18,7 @@ pub(crate) struct PromptStashEntry {
     pub(crate) id: String,
     pub(crate) draft: ComposerDraft,
     pub(crate) timestamp_ms: u64,
-    workspace_identity: Option<String>,
+    pub(crate) workspace_identity: Option<String>,
 }
 
 impl PromptStashEntry {
@@ -119,6 +119,10 @@ impl PromptStashStore {
 
     pub(crate) fn list(&self) -> Result<Vec<PromptStashEntry>, PromptStashError> {
         self.with_lock(false, |entries| Ok(entries.iter().rev().cloned().collect()))
+    }
+
+    pub(crate) fn is_non_empty(&self) -> Result<bool, PromptStashError> {
+        self.with_lock(false, |entries| Ok(!entries.is_empty()))
     }
 
     pub(crate) fn push(

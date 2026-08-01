@@ -580,6 +580,9 @@ pub(crate) struct ChatMode {
     >,
     hook_management_snapshot: Option<HookManagementSnapshot>,
     pending_hook_plan: Option<ExternalHookImportPlanV1>,
+    /// Cached prompt-stash non-empty flag for palette visibility checks.
+    /// Refreshed when the command palette opens and after stash mutations.
+    stash_non_empty: bool,
 }
 
 /// Map agent_type to a display name for status messages
@@ -647,6 +650,7 @@ impl ChatMode {
             hook_management_rx: None,
             hook_management_snapshot: None,
             pending_hook_plan: None,
+            stash_non_empty: false,
         }
     }
 
@@ -665,10 +669,12 @@ impl ChatMode {
         self
     }
 
-    fn action_state(&self, is_processing: bool, popup_open: bool) -> ActionState {
+    fn action_state(&self, is_processing: bool, popup_open: bool, has_input: bool) -> ActionState {
         ActionState::chat(is_processing, popup_open)
             .with_shared_tui(self.agent.is_shared())
             .with_lineage_inspection(self.lineage_inspection.is_some())
+            .with_has_input(has_input)
+            .with_stash_non_empty(self.stash_non_empty)
     }
 }
 

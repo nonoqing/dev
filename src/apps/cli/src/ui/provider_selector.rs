@@ -219,6 +219,25 @@ impl ProviderSelectorState {
         self.ensure_selected_visible();
     }
 
+    fn move_page_up(&mut self) {
+        if self.selectable_row_indices.is_empty() {
+            return;
+        }
+        let page = self.visible_rows.max(1);
+        self.selected = self.selected.saturating_sub(page);
+        self.ensure_selected_visible();
+    }
+
+    fn move_page_down(&mut self) {
+        if self.selectable_row_indices.is_empty() {
+            return;
+        }
+        let page = self.visible_rows.max(1);
+        let len = self.selectable_row_indices.len();
+        self.selected = (self.selected + page).min(len.saturating_sub(1));
+        self.ensure_selected_visible();
+    }
+
     fn ensure_selected_visible(&mut self) {
         if self.selectable_row_indices.is_empty() || self.visible_rows == 0 {
             return;
@@ -270,6 +289,14 @@ impl ProviderSelectorState {
             }
             KeyCode::Down => {
                 self.move_down();
+                None
+            }
+            KeyCode::PageUp => {
+                self.move_page_up();
+                None
+            }
+            KeyCode::PageDown => {
+                self.move_page_down();
                 None
             }
             _ => None,

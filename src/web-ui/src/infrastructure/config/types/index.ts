@@ -252,6 +252,8 @@ export interface AIModelConfig {
   thinking_budget_tokens?: number;
   /** Authentication source. Defaults to inline `api_key`. */
   auth?: AuthConfig;
+  /** Whether this model is marked as a favorite. */
+  favorite?: boolean;
 }
 
 /** Subscription provider for in-app OAuth auth. */

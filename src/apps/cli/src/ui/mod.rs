@@ -25,6 +25,7 @@ pub(crate) mod prompt_stash_selector;
 pub(crate) mod provider_selector;
 pub(crate) mod question;
 mod responsive_popup;
+mod selector_common;
 pub(crate) mod session_lineage_selector;
 pub(crate) mod session_selector;
 pub(crate) mod skill_selector;
@@ -201,6 +202,108 @@ fn merge_terminal_failure(primary: std::io::Error, cleanup: Result<()>) -> anyho
             anyhow::Error::new(primary).context(context)
         }
     }
+}
+
+// ── Terminal suspend/resume (Unix only) ──
+// Implements Ctrl+Z suspend / `fg` resume via SIGTSTP/SIGCONT.
+// On Windows these are not available; Ctrl+Z stays bound to undo.
+
+#[cfg(unix)]
+use ratatui::backend::Backend;
+
+/// Suspend the TUI: restore terminal to original state, then send SIGTSTP
+/// to the current process group. The OS suspends the process group;
+/// execution blocks here until SIGCONT is received (via `fg`).
+///
+/// If SIGTSTP fails after the terminal has been restored, the TUI is
+/// re-initialized so the caller does not end up in a broken half-restored
+/// state.
+#[cfg(unix)]
+pub(crate) fn suspend_terminal(terminal: &mut Terminal<impl Backend>) -> Result<()> {
+    // 1. Restore terminal to original state (leave alternate screen,
+    //    disable raw mode, disable mouse capture, show cursor).
+    //    Collect all errors rather than aborting on the first one so that
+    //    we make as much progress as possible.
+    let mut stdout = io::stdout();
+    let mut errors = Vec::new();
+    if let Err(error) = disable_raw_mode() {
+        errors.push(format!("disable raw mode: {error}"));
+    }
+    if let Err(error) = execute!(
+        stdout,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    ) {
+        errors.push(format!("restore terminal screen: {error}"));
+    }
+    if let Err(error) = terminal.show_cursor() {
+        errors.push(format!("show terminal cursor: {error}"));
+    }
+    if !errors.is_empty() {
+        // Terminal restore failed; try to re-enter TUI mode to get back to
+        // a known state before returning the error.
+        let _ = resume_terminal(terminal);
+        return Err(anyhow::anyhow!(errors.join("; ")));
+    }
+    // 2. Send SIGTSTP to the current process group (PID 0).
+    //    The default OS action for SIGTSTP is to suspend the process.
+    unsafe {
+        if libc::kill(0, libc::SIGTSTP) != 0 {
+            // SIGTSTP failed: the terminal is already restored to non-TUI
+            // mode but the process was not suspended. Re-initialize the TUI
+            // so the caller does not end up in a broken state.
+            let _ = resume_terminal(terminal);
+            return Err(anyhow::anyhow!(
+                "failed to send SIGTSTP: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resume the TUI: re-enter alternate screen, re-enable raw mode,
+/// re-enable mouse capture + bracketed paste, and force a full redraw.
+///
+/// All steps are attempted even if earlier ones fail, so the terminal
+/// reaches the closest possible known state. Errors are aggregated.
+#[cfg(unix)]
+pub(crate) fn resume_terminal(terminal: &mut Terminal<impl Backend>) -> Result<()> {
+    let mut errors = Vec::new();
+    if let Err(error) = enable_raw_mode() {
+        errors.push(format!("enable raw mode: {error}"));
+    }
+    let mut stdout = io::stdout();
+    if let Err(error) = execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    ) {
+        errors.push(format!("re-enter alternate screen: {error}"));
+    }
+    if let Err(error) = terminal.clear() {
+        errors.push(format!("clear terminal: {error}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(errors.join("; ")))
+    }
+}
+
+/// Suspend the terminal and resume after `fg`.
+///
+/// Suspends via SIGTSTP (the OS blocks until SIGCONT is received via `fg`),
+/// then re-initializes the terminal for TUI rendering. Callers in chat.rs
+/// and startup.rs share this single path.
+///
+/// If suspend fails, `suspend_terminal` already attempted to re-enter TUI
+/// mode, so the error is propagated without a redundant resume attempt.
+#[cfg(unix)]
+pub(crate) fn suspend_and_resume_terminal(terminal: &mut Terminal<impl Backend>) -> Result<()> {
+    suspend_terminal(terminal).and_then(|_| resume_terminal(terminal))
 }
 
 /// Render a loading/status message on the terminal (stays in alternate screen)

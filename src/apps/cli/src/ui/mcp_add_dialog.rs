@@ -15,6 +15,7 @@ use ratatui::{
 };
 
 use crate::ui::responsive_popup::{render_too_small, responsive_popup, ResponsivePopup};
+use crate::ui::selector_common::{backspace, delete_forward, insert_char};
 use crate::ui::theme::{StyleKind, Theme};
 
 /// Action returned by the MCP add dialog
@@ -619,30 +620,6 @@ impl McpAddDialogState {
 
 // ── Helper functions ──
 
-fn insert_char(buf: &mut String, cursor: &mut usize, c: char) {
-    let byte_pos = char_to_byte(buf, *cursor);
-    buf.insert(byte_pos, c);
-    *cursor += 1;
-}
-
-fn backspace(buf: &mut String, cursor: &mut usize) {
-    if *cursor > 0 {
-        *cursor -= 1;
-        let byte_pos = char_to_byte(buf, *cursor);
-        let next_byte = char_to_byte(buf, *cursor + 1);
-        buf.replace_range(byte_pos..next_byte, "");
-    }
-}
-
-fn delete_forward(buf: &mut String, cursor: &mut usize) {
-    let max = buf.chars().count();
-    if *cursor < max {
-        let byte_pos = char_to_byte(buf, *cursor);
-        let next_byte = char_to_byte(buf, *cursor + 1);
-        buf.replace_range(byte_pos..next_byte, "");
-    }
-}
-
 /// Render a single-line input field with cursor, placeholder, and horizontal scrolling
 fn render_input_line<'a>(
     label: &'a str,
@@ -726,13 +703,6 @@ fn render_input_line<'a>(
     }
 
     Line::from(spans)
-}
-
-fn char_to_byte(s: &str, char_pos: usize) -> usize {
-    s.char_indices()
-        .nth(char_pos)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len())
 }
 
 #[cfg(test)]

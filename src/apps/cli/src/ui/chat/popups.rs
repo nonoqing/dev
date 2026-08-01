@@ -200,8 +200,20 @@ impl ChatView {
         self.model_selector.move_down();
     }
 
+    pub(crate) fn model_selector_page_up(&mut self) {
+        self.model_selector.move_page_up();
+    }
+
+    pub(crate) fn model_selector_page_down(&mut self) {
+        self.model_selector.move_page_down();
+    }
+
     pub(crate) fn model_selector_confirm(&self) -> Option<ModelItem> {
         self.model_selector.confirm_selection()
+    }
+
+    pub(crate) fn model_selector_toggle_favorite(&mut self) {
+        self.model_selector.toggle_favorite();
     }
 
     pub(crate) fn model_selector_allows_edit(&self) -> bool {
@@ -237,6 +249,14 @@ impl ChatView {
 
     pub(crate) fn theme_selector_down(&mut self) {
         self.theme_selector.move_down();
+    }
+
+    pub(crate) fn theme_selector_page_up(&mut self) {
+        self.theme_selector.move_page_up();
+    }
+
+    pub(crate) fn theme_selector_page_down(&mut self) {
+        self.theme_selector.move_page_down();
     }
 
     pub(crate) fn theme_selector_confirm(&self) -> Option<ThemeItem> {
@@ -296,6 +316,14 @@ impl ChatView {
         self.agent_selector.move_down();
     }
 
+    pub(crate) fn agent_selector_page_up(&mut self) {
+        self.agent_selector.move_page_up();
+    }
+
+    pub(crate) fn agent_selector_page_down(&mut self) {
+        self.agent_selector.move_page_down();
+    }
+
     pub(crate) fn agent_selector_confirm(&self) -> Option<AgentSelectorAction> {
         self.agent_selector.confirm_selection()
     }
@@ -341,6 +369,14 @@ impl ChatView {
         self.skill_selector.move_down();
     }
 
+    pub(crate) fn skill_selector_page_up(&mut self) {
+        self.skill_selector.move_page_up();
+    }
+
+    pub(crate) fn skill_selector_page_down(&mut self) {
+        self.skill_selector.move_page_down();
+    }
+
     pub(crate) fn skill_selector_confirm(&self) -> Option<SkillSelectorAction> {
         self.skill_selector.confirm_selection()
     }
@@ -383,6 +419,14 @@ impl ChatView {
         self.subagent_selector.move_down();
     }
 
+    pub(crate) fn subagent_selector_page_up(&mut self) {
+        self.subagent_selector.move_page_up();
+    }
+
+    pub(crate) fn subagent_selector_page_down(&mut self) {
+        self.subagent_selector.move_page_down();
+    }
+
     pub(crate) fn subagent_selector_confirm(&self) -> Option<SubagentSelectorAction> {
         self.subagent_selector.confirm_selection()
     }
@@ -412,6 +456,14 @@ impl ChatView {
 
     pub(crate) fn mcp_selector_down(&mut self) {
         self.mcp_selector.move_down();
+    }
+
+    pub(crate) fn mcp_selector_page_up(&mut self) {
+        self.mcp_selector.move_page_up();
+    }
+
+    pub(crate) fn mcp_selector_page_down(&mut self) {
+        self.mcp_selector.move_page_down();
     }
 
     pub(crate) fn mcp_selector_confirm(&self) -> Option<McpItem> {
@@ -519,6 +571,22 @@ impl ChatView {
 
     pub(crate) fn session_selector_remove_item(&mut self, session_id: &str) {
         self.session_selector.remove_item(session_id);
+    }
+
+    pub(crate) fn session_selector_update_item_name(&mut self, session_id: &str, new_name: &str) {
+        self.session_selector.update_item_name(session_id, new_name);
+    }
+
+    pub(crate) fn session_selector_toggle_pin(&mut self, session_id: &str) {
+        self.session_selector.toggle_pin(session_id);
+    }
+
+    pub(crate) fn session_selector_is_renaming(&self) -> bool {
+        self.session_selector.is_renaming()
+    }
+
+    pub(crate) fn session_selector_insert_rename_text(&mut self, text: &str) {
+        self.session_selector.insert_rename_text(text);
     }
 
     // ============ Subagent Session lineage selector methods ============

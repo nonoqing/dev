@@ -140,6 +140,13 @@ fn interactive_startup_survives_resize_multiline_input_and_emits_cleanup() {
         "multiline input was submitted instead of remaining in the startup editor"
     );
 
+    // Ctrl+C clears a non-empty composer first; only a second one exits.
+    process.write(&[0x03]);
+    process.expect_output(
+        "Input cleared",
+        Duration::from_secs(15),
+        "the first interrupt did not clear the startup composer",
+    );
     process.write(&[0x03]);
     let (status, output) = process.finish(Duration::from_secs(15));
     assert!(
@@ -230,6 +237,13 @@ fn active_turn_resize_can_be_cancelled_and_returns_to_editable_input() {
         Duration::from_secs(15),
         "recovery input sentinel was not rendered after cancellation",
     );
+    // Ctrl+C clears the recovered draft first; only a second one exits.
+    process.write(&[0x03]);
+    process.expect_output(
+        "Input cleared",
+        Duration::from_secs(15),
+        "the first interrupt did not clear the recovered draft",
+    );
     process.write(&[0x03]);
 
     let (status, output) = process.finish(Duration::from_secs(15));
@@ -304,7 +318,8 @@ fn external_editor_restores_the_tui_and_applies_the_edited_draft() {
         "TUI did not disable bracketed paste before editor: {output}"
     );
 
-    process.write(&[0x15]);
+    // Ctrl+L clears the whole composer; Ctrl+U would only cut before the cursor.
+    process.write(&[0x0c]);
     process.write(b"/exit\r");
     let (status, output) = process.finish(Duration::from_secs(20));
     assert!(

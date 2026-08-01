@@ -488,6 +488,21 @@ mod tests {
     }
 
     #[test]
+    fn runtime_binding_fingerprint_ignores_favorite_toggle() {
+        let mut model = build_model("model-456", "Provider", "runtime-model");
+        model.base_url = "https://models.example/v1".to_string();
+        model.favorite = false;
+        let baseline = model_runtime_binding_fingerprint(&model);
+
+        // Toggling favorite must not change the runtime binding fingerprint.
+        model.favorite = true;
+        assert_eq!(model_runtime_binding_fingerprint(&model), baseline);
+
+        model.favorite = false;
+        assert_eq!(model_runtime_binding_fingerprint(&model), baseline);
+    }
+
+    #[test]
     fn auto_model_selectors_normalize_to_primary_for_client_lookup() {
         assert_eq!(classify_model_selector("auto"), ModelSelectorKind::Primary);
         assert_eq!(

@@ -219,7 +219,6 @@ pub(crate) struct StartupPage {
     status: Option<String>,
     /// Info popup message (rendered as overlay, dismissed by any key)
     info_popup: Option<String>,
-
     /// Popup navigation stack for back navigation
     popup_stack: PopupStack,
 }
@@ -371,6 +370,21 @@ impl StartupPage {
                             if key.kind == KeyEventKind::Press
                                 || key.kind == KeyEventKind::Repeat =>
                         {
+                            // Ctrl+Z on Unix: suspend terminal before
+                            // dispatching to handle_key (which only handles
+                            // undo on Windows).
+                            #[cfg(unix)]
+                            if matches!(
+                                (key.code, key.modifiers),
+                                (KeyCode::Char('z'), KeyModifiers::CONTROL)
+                            ) {
+                                tracing::debug!("Suspend terminal triggered");
+                                if let Err(error) = crate::ui::suspend_and_resume_terminal(terminal)
+                                {
+                                    tracing::error!("Failed to suspend terminal: {error}");
+                                }
+                                continue;
+                            }
                             if let Some(result) = self.handle_key(key) {
                                 return Ok(result);
                             }
@@ -426,6 +440,9 @@ impl StartupPage {
             Event::Paste(text) => {
                 if self.login_form.is_visible() {
                     self.login_form.insert_paste(&text);
+                } else if self.session_selector.is_visible() && self.session_selector.is_renaming()
+                {
+                    self.session_selector.insert_rename_text(&text);
                 } else if self.info_popup.is_none() && !self.any_popup_visible() {
                     self.paste_terminal_text(&text);
                 }
@@ -795,11 +812,26 @@ impl StartupPage {
                         self.apply_model_selection(&selected);
                     }
                 }
-                KeyCode::Char('e') => {
+                KeyCode::Char('e') if self.model_selector.allows_edit() => {
                     if let Some(selected) = self.model_selector.confirm_selection() {
                         self.model_selector.hide();
                         self.edit_model(&selected);
                     }
+                }
+                // Ctrl+F: toggle favorite on the selected model.
+                KeyCode::Char('f')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.model_selector.allows_edit() =>
+                {
+                    self.model_selector.toggle_favorite();
+                }
+                // Ctrl+A: open the provider list (add-model step 1).
+                KeyCode::Char('a')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.model_selector.allows_edit() =>
+                {
+                    self.push_current_popup_to_stack();
+                    self.provider_selector.show();
                 }
                 KeyCode::Esc => self.navigate_back(),
                 _ => {}
@@ -831,10 +863,13 @@ impl StartupPage {
                 SessionAction::Delete(item) => {
                     self.handle_session_delete(&item);
                 }
-                SessionAction::Close => {
-                    self.navigate_back();
+                SessionAction::Rename(item, new_name) => {
+                    self.handle_session_rename(&item, new_name);
                 }
-                SessionAction::None => {}
+                SessionAction::PinToggle(item) => {
+                    self.handle_session_pin_toggle(&item);
+                }
+                SessionAction::Close | SessionAction::None => {}
             }
             return None;
         }
@@ -937,17 +972,65 @@ impl StartupPage {
 
         // ── Normal key handling ──
 
+        // ── Slash command menu autocomplete keys ──
+        // When the inline command menu (typing "/...") is visible, capture
+        // navigation/confirm keys so they drive the completion list instead
+        // of their default actions (Tab=switch agent, Ctrl+P=command palette,
+        // Enter=submit, Up/Down=cursor, Esc=clear input).
+        if self.command_menu.is_visible() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Tab, _) | (KeyCode::Enter, _) => {
+                    if let Some(action_id) = self.command_menu.apply_selection() {
+                        self.text_input.clear();
+                        self.refresh_command_menu();
+                        return self.handle_palette_action(&action_id);
+                    }
+                    return None;
+                }
+                (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                    self.command_menu.move_up();
+                    return None;
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                    self.command_menu.move_down();
+                    return None;
+                }
+                (KeyCode::Esc, _) => {
+                    // Dismiss the command menu and clear the "/" input.
+                    self.text_input.clear();
+                    self.refresh_command_menu();
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         if let Some(action) = self.keymap.resolve(key, self.action_state(false)) {
             return self.dispatch_action(action, self.action_state(false));
         }
 
         match (key.code, key.modifiers) {
+            // Ctrl+D: exit the app only when the input box is empty.
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                if self.text_input.is_empty() {
+                    return Some(StartupResult::Exit);
+                }
+            }
             (KeyCode::Esc, _) => {
                 if !self.text_input.is_empty() {
                     self.clear_composer();
                     self.refresh_command_menu();
                 }
             }
+
+            // Emacs-style editing keys (shared with chat mode via
+            // TextInput::handle_emacs_edit_key). These reach the fallback
+            // because the keymap moved NextTool to Ctrl+N, ClearInput to
+            // Ctrl+L, and ToggleBrowse to Ctrl+B.
+            _ if self.text_input.handle_emacs_edit_key(key) => {
+                self.refresh_command_menu();
+            }
+
             (KeyCode::Up, KeyModifiers::NONE) => {
                 if !self.text_input.move_cursor_up() {
                     self.text_input.set_cursor_home();
@@ -1016,7 +1099,16 @@ impl StartupPage {
                 }
                 self.info_popup = Some(help);
             }
-            ActionHandler::Exit => return Some(StartupResult::Exit),
+            ActionHandler::Exit => {
+                // Ctrl+C on startup: clear input if non-empty, otherwise exit.
+                if !self.text_input.is_empty() {
+                    self.text_input.clear();
+                    self.refresh_command_menu();
+                    self.status = Some("Input cleared".to_string());
+                    return None;
+                }
+                return Some(StartupResult::Exit);
+            }
             ActionHandler::NewSession => {
                 return Some(StartupResult::NewSession { prompt: None });
             }
@@ -1024,8 +1116,10 @@ impl StartupPage {
             ActionHandler::SelectModel => self.show_model_selector(),
             ActionHandler::SelectTheme => self.show_theme_selector(),
             ActionHandler::AddModel => {
-                self.push_current_popup_to_stack();
-                self.provider_selector.show();
+                if !self.agent.is_shared() {
+                    self.push_current_popup_to_stack();
+                    self.provider_selector.show();
+                }
             }
             ActionHandler::OpenAgentSelector => self.show_agent_selector(),
             ActionHandler::SwitchAgent => self.cycle_agent(1),
@@ -1543,11 +1637,19 @@ impl StartupPage {
                         format!("{}d ago", elapsed.as_secs() / 86400)
                     }
                 };
+                let pinned = self
+                    .config
+                    .behavior
+                    .pinned_sessions
+                    .iter()
+                    .any(|id| id == &s.session_id);
                 SessionItem {
                     session_id: s.session_id,
                     session_name: s.session_name,
                     last_activity,
                     workspace: Some(self.workspace_display.clone()),
+                    pinned,
+                    last_active_at_ms: s.last_active_at_ms,
                 }
             })
             .collect();
@@ -1574,6 +1676,55 @@ impl StartupPage {
         }
     }
 
+    fn handle_session_rename(&mut self, item: &SessionItem, new_name: String) {
+        let agent = Arc::clone(&self.agent);
+        let sid = item.session_id.clone();
+
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { agent.rename_session(&sid, &new_name).await })
+        });
+
+        match result {
+            Ok(()) => {
+                self.session_selector
+                    .update_item_name(&item.session_id, &new_name);
+                self.status = Some(format!("Session renamed: {}", new_name));
+            }
+            Err(e) => {
+                self.status = Some(format!("Failed to rename session: {}", e));
+            }
+        }
+    }
+
+    fn handle_session_pin_toggle(&mut self, item: &SessionItem) {
+        // Reuse SessionSelectorState::toggle_pin (same path as chat mode via
+        // ChatView::session_selector_toggle_pin).
+        self.session_selector.toggle_pin(&item.session_id);
+        // Focused update: add/remove only this session ID from the latest
+        // on-disk snapshot so pins from other workspaces and concurrent Shared
+        // TUI clients are preserved.
+        let session_id = item.session_id.clone();
+        let now_pinned = !item.pinned;
+        if let Err(e) = self.config.update(|cfg| {
+            if now_pinned {
+                if !cfg
+                    .behavior
+                    .pinned_sessions
+                    .iter()
+                    .any(|id| id == &session_id)
+                {
+                    cfg.behavior.pinned_sessions.push(session_id.clone());
+                }
+            } else {
+                cfg.behavior.pinned_sessions.retain(|id| id != &session_id);
+            }
+        }) {
+            tracing::error!("Failed to persist pinned sessions: {}", e);
+        }
+        self.status = Some(format!("Toggled pin: {}", item.session_name));
+    }
+
     fn show_model_selector(&mut self) {
         self.push_current_popup_to_stack();
 
@@ -1596,6 +1747,7 @@ impl StartupPage {
                         name: m.name,
                         provider: m.provider,
                         model_name: m.model_name,
+                        favorite: m.favorite,
                     })
                     .collect();
 
@@ -1605,7 +1757,8 @@ impl StartupPage {
 
         match result {
             Some((models, current_id)) if !models.is_empty() => {
-                self.model_selector.show(models, current_id, true, false);
+                self.model_selector
+                    .show(models, current_id, !self.agent.is_shared(), false);
             }
             _ => {
                 self.status = Some("No available models found.".to_string());

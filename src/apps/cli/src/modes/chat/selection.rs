@@ -548,6 +548,7 @@ impl ChatMode {
                         name: m.name,
                         provider: m.provider,
                         model_name: m.model_name,
+                        favorite: m.favorite,
                     })
                     .collect();
 
@@ -813,6 +814,11 @@ impl ChatMode {
                     pending.kind.selected_id(),
                     error
                 );
+            }
+            if matches!(outcome, SessionUpdateApplyOutcome::Applied) {
+                if let PendingSessionOperationKind::Rename { session_name } = &pending.kind {
+                    chat_view.session_selector_update_item_name(&pending.session_id, session_name);
+                }
             }
             let status = previous_session_update_status(
                 pending.kind.name(),

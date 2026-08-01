@@ -352,7 +352,9 @@ impl ChatMode {
             (false, EffectiveColorScheme::Truecolor) => Theme::dark(),
         };
         let theme = self.resolve_configured_theme(base, appearance, scheme);
-        let shortcut_hints = self.keymap.compact_hints(self.action_state(false, false));
+        let shortcut_hints = self
+            .keymap
+            .compact_hints(self.action_state(false, false, false));
         let mut chat_view = ChatView::new(theme, shortcut_hints);
         chat_view.apply_presentation_config(&self.config.ui);
 
@@ -576,7 +578,11 @@ impl ChatMode {
                 needs_redraw = true;
             }
             chat_view.set_action_state(
-                self.action_state(self.displayed_chat_state(&chat_state).is_processing, false),
+                self.action_state(
+                    self.displayed_chat_state(&chat_state).is_processing,
+                    false,
+                    !chat_view.input_text().trim().is_empty(),
+                ),
                 &self.keymap,
             );
             chat_view.set_agent_mode_switch_allowed(session_update_allowed(
@@ -1011,6 +1017,25 @@ impl ChatMode {
                     }
                     match event {
                         Event::Key(key) => {
+                            // Ctrl+Z on Unix: suspend terminal before
+                            // dispatching to handle_key_event (which
+                            // only handles undo on Windows).
+                            #[cfg(unix)]
+                            if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
+                                if matches!(
+                                    (key.code, key.modifiers),
+                                    (KeyCode::Char('z'), KeyModifiers::CONTROL)
+                                ) {
+                                    tracing::debug!("Suspend terminal triggered");
+                                    if let Err(error) =
+                                        crate::ui::suspend_and_resume_terminal(&mut terminal)
+                                    {
+                                        tracing::error!("Failed to suspend terminal: {error}");
+                                    }
+                                    needs_redraw = true;
+                                    continue;
+                                }
+                            }
                             if let Some(reason) = self.handle_key_event(
                                 key,
                                 &mut chat_view,

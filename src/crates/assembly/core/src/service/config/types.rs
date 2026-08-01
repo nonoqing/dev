@@ -977,6 +977,10 @@ fn default_true() -> bool {
     true
 }
 
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
 /// Default streaming idle timeout between chunks.
 fn default_stream_idle_timeout() -> Option<u64> {
     Some(600)
@@ -1400,6 +1404,10 @@ pub struct AIModelConfig {
     /// time and inject the resolved Bearer token / extra headers.
     #[serde(default)]
     pub auth: AuthConfig,
+
+    /// Whether this model is marked as a favorite (persisted to backend config).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub favorite: bool,
 }
 
 /// Stable identity of the runtime-affecting parts of a concrete model config.
@@ -1412,7 +1420,12 @@ pub struct AIModelConfig {
 pub fn model_runtime_binding_fingerprint(model: &AIModelConfig) -> String {
     let mut value = serde_json::to_value(model).unwrap_or(serde_json::Value::Null);
     if let serde_json::Value::Object(fields) = &mut value {
+        // Credentials are excluded so rotating a secret does not require
+        // re-approval.  `favorite` is a display/sorting field that must not
+        // affect the runtime identity — toggling it must not invalidate an
+        // already-approved model binding.
         fields.remove("api_key");
+        fields.remove("favorite");
     }
 
     fn canonicalize(value: serde_json::Value) -> serde_json::Value {
@@ -1497,6 +1510,8 @@ struct AIModelConfigCompat {
     /// Parsed flexibly so unknown legacy auth tags fall back to ApiKey.
     #[serde(default)]
     auth: Option<serde_json::Value>,
+    #[serde(default)]
+    favorite: bool,
 }
 
 fn parse_auth_config(value: Option<serde_json::Value>) -> AuthConfig {
@@ -1546,6 +1561,7 @@ impl From<AIModelConfigCompat> for AIModelConfig {
             custom_request_body: value.custom_request_body,
             custom_request_body_mode: value.custom_request_body_mode,
             auth: parse_auth_config(value.auth),
+            favorite: value.favorite,
         }
     }
 }
@@ -1868,6 +1884,7 @@ impl Default for AIModelConfig {
             custom_request_body: None,
             custom_request_body_mode: None,
             auth: AuthConfig::ApiKey,
+            favorite: false,
         }
     }
 }

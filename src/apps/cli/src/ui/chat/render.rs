@@ -795,10 +795,7 @@ impl ChatView {
                                 };
                                 plain_lines.push(format!("{line_prefix}{wrapped}"));
                                 items.push(ListItem::new(Line::from(vec![
-                                    Span::styled(
-                                        line_prefix,
-                                        self.theme.style(StyleKind::Primary),
-                                    ),
+                                    Span::styled(line_prefix, self.theme.style(StyleKind::Primary)),
                                     Span::raw(wrapped),
                                 ])));
                             }
@@ -1126,7 +1123,7 @@ mod shortcut_contract_tests {
 
         assert_eq!(
             text,
-            "[Tab]Switch Agent [Alt+↵]Newline [Ctrl+P]Commands [↑↓]History [Ctrl+E]Browse [Ctrl+C]Quit"
+            "[Tab]Switch Agent [Alt+↵]Newline [Ctrl+P]Commands [↑↓]History [Ctrl+B]Browse [Ctrl+C]Quit"
         );
         assert_eq!(
             spans
@@ -1146,7 +1143,7 @@ mod shortcut_contract_tests {
                 "[↑↓]",
                 "History",
                 " ",
-                "[Ctrl+E]",
+                "[Ctrl+B]",
                 "Browse",
                 " ",
                 "[Ctrl+C]",

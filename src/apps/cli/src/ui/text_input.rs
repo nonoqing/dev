@@ -1,9 +1,11 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::Rect,
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
+use std::time::Instant;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Reusable multiline text input component with wrap support.
@@ -14,6 +16,51 @@ pub(crate) struct TextInput {
     pub(super) input: String,
     pub(super) cursor: usize,
     scroll_offset: usize,
+    /// Undo history snapshots (previous input states before modification).
+    undo_stack: Vec<String>,
+    /// Timestamp of the last single-character insertion, used for undo
+    /// coalescing.  When characters arrive in rapid succession (e.g. a
+    /// terminal that delivers paste as individual key events), only the first
+    /// character pushes an undo snapshot so the entire burst can be undone
+    /// in a single step.
+    last_char_time: Option<Instant>,
+}
+
+const UNDO_STACK_LIMIT: usize = 50;
+/// Maximum gap between two single-character insertions for them to be
+/// coalesced into one undo entry.  Normal typing is ~100–200 ms between
+/// keys; pasted characters arrive within a few milliseconds.
+const UNDO_COALESCE_WINDOW_MS: u128 = 50;
+
+impl TextInput {
+    /// Push current input snapshot to undo stack (called before modification).
+    fn push_undo(&mut self) {
+        if self.undo_stack.len() >= UNDO_STACK_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(self.input.clone());
+        // A non-coalescable edit breaks the typing burst chain.
+        self.last_char_time = None;
+    }
+
+    /// Like `push_undo` but skips the snapshot when the caller is part of a
+    /// rapid burst of single-character insertions.  Only the first character
+    /// in the burst gets a snapshot; subsequent characters within the
+    /// coalesce window are merged into that same undo step.
+    fn push_undo_coalescable(&mut self) {
+        let now = Instant::now();
+        let should_coalesce = self
+            .last_char_time
+            .is_some_and(|t| now.duration_since(t).as_millis() <= UNDO_COALESCE_WINDOW_MS);
+        self.last_char_time = Some(now);
+        if should_coalesce {
+            return;
+        }
+        if self.undo_stack.len() >= UNDO_STACK_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(self.input.clone());
+    }
 }
 
 fn wrapped_visual_line_count(text_width: usize, available_width: usize) -> usize {
@@ -56,6 +103,8 @@ impl TextInput {
             input: String::new(),
             cursor: 0,
             scroll_offset: 0,
+            undo_stack: Vec::new(),
+            last_char_time: None,
         }
     }
 
@@ -75,12 +124,14 @@ impl TextInput {
         if c.is_control() || c == '\u{0}' {
             return;
         }
+        self.push_undo_coalescable();
         let byte_pos = self.char_pos_to_byte_pos(self.cursor);
         self.input.insert(byte_pos, c);
         self.cursor += 1;
     }
 
     pub(super) fn handle_newline(&mut self) {
+        self.push_undo_coalescable();
         let byte_pos = self.char_pos_to_byte_pos(self.cursor);
         self.input.insert(byte_pos, '\n');
         self.cursor += 1;
@@ -88,6 +139,7 @@ impl TextInput {
 
     pub(super) fn handle_backspace(&mut self) {
         if self.cursor > 0 && !self.input.is_empty() {
+            self.push_undo();
             let byte_pos = self.char_pos_to_byte_pos(self.cursor - 1);
             if byte_pos < self.input.len() {
                 self.input.remove(byte_pos);
@@ -99,6 +151,7 @@ impl TextInput {
     pub(super) fn handle_delete(&mut self) {
         let char_count = self.input.chars().count();
         if self.cursor < char_count {
+            self.push_undo();
             let byte_pos = self.char_pos_to_byte_pos(self.cursor);
             if byte_pos < self.input.len() {
                 self.input.remove(byte_pos);
@@ -163,16 +216,141 @@ impl TextInput {
         self.cursor = line_start + counts[line];
     }
 
+    /// Delete from line start to cursor position (Ctrl+U behavior).
+    pub(super) fn delete_to_line_start(&mut self) {
+        let (_, _, line_start) = self.cursor_line_col();
+        if line_start < self.cursor {
+            self.push_undo();
+            let start_byte = self.char_pos_to_byte_pos(line_start);
+            let end_byte = self.char_pos_to_byte_pos(self.cursor);
+            self.input.replace_range(start_byte..end_byte, "");
+            self.cursor = line_start;
+        }
+    }
+
+    /// Delete from cursor position to line end (Ctrl+K behavior).
+    pub(super) fn delete_to_line_end(&mut self) {
+        let (line, _, line_start) = self.cursor_line_col();
+        let counts = self.input_line_char_counts();
+        let line_end = line_start + counts[line];
+        if self.cursor < line_end {
+            self.push_undo();
+            let start_byte = self.char_pos_to_byte_pos(self.cursor);
+            let end_byte = self.char_pos_to_byte_pos(line_end);
+            self.input.replace_range(start_byte..end_byte, "");
+        }
+    }
+
+    /// Delete one word forward from cursor (Alt+D / Alt+Delete behavior).
+    pub(super) fn delete_word_forward(&mut self) {
+        let char_count = self.input.chars().count();
+        if self.cursor >= char_count {
+            return;
+        }
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut idx = self.cursor;
+        // Skip whitespace
+        while idx < char_count && chars[idx].is_whitespace() {
+            idx += 1;
+        }
+        // Skip word characters
+        while idx < char_count && !chars[idx].is_whitespace() {
+            idx += 1;
+        }
+        if idx > self.cursor {
+            self.push_undo();
+            let start_byte = self.char_pos_to_byte_pos(self.cursor);
+            let end_byte = self.char_pos_to_byte_pos(idx);
+            self.input.replace_range(start_byte..end_byte, "");
+        }
+    }
+
+    /// Undo last input modification. Returns true if undo was performed.
+    pub(super) fn undo(&mut self) -> bool {
+        if let Some(prev) = self.undo_stack.pop() {
+            self.input = prev;
+            self.cursor = self.input.chars().count();
+            self.scroll_offset = 0;
+            self.last_char_time = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Handle Emacs-style editing keys that are shared between the chat
+    /// fallback and the startup page fallback. Returns `true` when the key was
+    /// recognized and consumed (the caller should refresh the command menu).
+    ///
+    /// Recognized bindings:
+    /// - Ctrl+A: cursor to line start
+    /// - Ctrl+E: cursor to line end
+    /// - Ctrl+K: delete to line end
+    /// - Ctrl+U: delete to line start
+    /// - Alt+D / Ctrl+Delete / Alt+Delete: delete word forward
+    /// - Delete / Shift+Delete: delete char forward
+    /// - Ctrl+- / Ctrl+_ / Ctrl+7 / Super+Z: undo (all platforms)
+    /// - Ctrl+Z: undo (Windows only; Unix intercepts Ctrl+Z for terminal suspend)
+    pub(crate) fn handle_emacs_edit_key(&mut self, key: KeyEvent) -> bool {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                self.set_cursor_home();
+                true
+            }
+            (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                self.set_cursor_end();
+                true
+            }
+            (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+                self.delete_to_line_end();
+                true
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.delete_to_line_start();
+                true
+            }
+            (KeyCode::Char('d'), KeyModifiers::ALT)
+            | (KeyCode::Delete, KeyModifiers::CONTROL)
+            | (KeyCode::Delete, KeyModifiers::ALT) => {
+                self.delete_word_forward();
+                true
+            }
+            (KeyCode::Delete, KeyModifiers::SHIFT) | (KeyCode::Delete, KeyModifiers::NONE) => {
+                self.handle_delete();
+                true
+            }
+            (KeyCode::Char('-'), KeyModifiers::CONTROL)
+            | (KeyCode::Char('_'), KeyModifiers::CONTROL)
+            | (KeyCode::Char('7'), KeyModifiers::CONTROL)
+            | (KeyCode::Char('z'), KeyModifiers::SUPER) => {
+                tracing::debug!("Undo triggered");
+                self.undo();
+                true
+            }
+            #[cfg(not(unix))]
+            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+                tracing::debug!("Undo triggered");
+                self.undo();
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn clear(&mut self) {
         self.input.clear();
         self.cursor = 0;
         self.scroll_offset = 0;
+        self.undo_stack.clear();
+        self.last_char_time = None;
     }
 
     pub(crate) fn set_text(&mut self, text: &str) {
         self.input = text.to_string();
         self.cursor = self.input.chars().count();
         self.scroll_offset = 0;
+        self.undo_stack.clear();
+        self.last_char_time = None;
     }
 
     pub(super) fn set_text_and_cursor(&mut self, text: &str, cursor: usize) {
@@ -185,6 +363,10 @@ impl TextInput {
         let char_count = self.input.chars().count();
         let start = start.min(char_count);
         let end = end.clamp(start, char_count);
+        if start == end && replacement.is_empty() {
+            return;
+        }
+        self.push_undo();
         let start_byte = self.char_pos_to_byte_pos(start);
         let end_byte = self.char_pos_to_byte_pos(end);
         self.input.replace_range(start_byte..end_byte, replacement);
@@ -223,6 +405,7 @@ impl TextInput {
         }
 
         if !normalized.is_empty() {
+            self.push_undo();
             let byte_pos = self.char_pos_to_byte_pos(self.cursor);
             self.cursor += normalized.chars().count();
             self.input.insert_str(byte_pos, &normalized);

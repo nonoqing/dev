@@ -23,6 +23,8 @@ pub(crate) struct ActionState {
     pub popup_open: bool,
     shared_tui: bool,
     lineage_inspection: bool,
+    has_input: bool,
+    stash_non_empty: bool,
 }
 
 impl ActionState {
@@ -33,6 +35,8 @@ impl ActionState {
             popup_open,
             shared_tui: false,
             lineage_inspection: false,
+            has_input: false,
+            stash_non_empty: false,
         }
     }
 
@@ -43,6 +47,8 @@ impl ActionState {
             popup_open,
             shared_tui: false,
             lineage_inspection: false,
+            has_input: false,
+            stash_non_empty: false,
         }
     }
 
@@ -53,6 +59,16 @@ impl ActionState {
 
     pub(crate) const fn with_lineage_inspection(mut self, lineage_inspection: bool) -> Self {
         self.lineage_inspection = lineage_inspection;
+        self
+    }
+
+    pub(crate) const fn with_has_input(mut self, has_input: bool) -> Self {
+        self.has_input = has_input;
+        self
+    }
+
+    pub(crate) const fn with_stash_non_empty(mut self, stash_non_empty: bool) -> Self {
+        self.stash_non_empty = stash_non_empty;
         self
     }
 
@@ -1069,7 +1085,7 @@ static ACTION_SPECS: &[ActionSpec] = &[
         contexts: CHAT,
         availability: ActionAvailability::Always,
         handler: ActionHandler::NextTool,
-        default_bindings: &["Ctrl+K"],
+        default_bindings: &["Ctrl+N"],
         fallback_bindings: &[],
         shortcut_field: None,
         palette: None,
@@ -1144,7 +1160,7 @@ static ACTION_SPECS: &[ActionSpec] = &[
         contexts: CHAT,
         availability: ActionAvailability::Always,
         handler: ActionHandler::ClearInput,
-        default_bindings: &["Ctrl+U"],
+        default_bindings: &["Ctrl+L"],
         fallback_bindings: &[],
         shortcut_field: None,
         palette: None,
@@ -1159,7 +1175,7 @@ static ACTION_SPECS: &[ActionSpec] = &[
         contexts: CHAT,
         availability: ActionAvailability::Always,
         handler: ActionHandler::ToggleBrowse,
-        default_bindings: &["Ctrl+E"],
+        default_bindings: &["Ctrl+B"],
         fallback_bindings: &[],
         shortcut_field: None,
         palette: None,
@@ -1212,6 +1228,15 @@ impl ActionSpec {
         }
         if state.lineage_inspection && !self.handler.available_in_lineage_inspection() {
             return false;
+        }
+        match self.handler {
+            ActionHandler::PromptStash if !state.has_input => return false,
+            ActionHandler::PromptStashPop | ActionHandler::PromptStashList
+                if !state.stash_non_empty =>
+            {
+                return false
+            }
+            _ => {}
         }
         match self.availability {
             ActionAvailability::Always => true,
@@ -2530,6 +2555,7 @@ mod tests {
             send_message: Some("Ctrl+S".to_string()),
             interrupt: None,
             menu: None,
+            ..Default::default()
         };
         let keymap = ResolvedKeymap::new(&shortcuts);
 
@@ -2549,6 +2575,7 @@ mod tests {
             send_message: Some("Ctrl+S".to_string()),
             interrupt: Some("Ctrl+X".to_string()),
             menu: Some("Alt+M".to_string()),
+            ..Default::default()
         };
         let keymap = ResolvedKeymap::new(&shortcuts);
 
@@ -2593,6 +2620,7 @@ mod tests {
             send_message: Some("Ctrl+D".to_string()),
             interrupt: None,
             menu: Some("Ctrl+D".to_string()),
+            ..Default::default()
         };
         let keymap = ResolvedKeymap::new(&shortcuts);
 
@@ -2616,6 +2644,7 @@ mod tests {
             send_message: Some("Ctrl+DefinitelyNotAKey".to_string()),
             interrupt: None,
             menu: None,
+            ..Default::default()
         };
         let keymap = ResolvedKeymap::new(&shortcuts);
 
@@ -2639,6 +2668,7 @@ mod tests {
             send_message: None,
             interrupt: None,
             menu: Some("Ctrl+C".to_string()),
+            ..Default::default()
         };
         let keymap = ResolvedKeymap::new(&shortcuts);
 
@@ -2669,6 +2699,7 @@ mod tests {
             send_message: Some("Esc".to_string()),
             interrupt: None,
             menu: Some("Ctrl+W".to_string()),
+            ..Default::default()
         };
         let keymap = ResolvedKeymap::new(&shortcuts);
 
@@ -2797,6 +2828,7 @@ mod tests {
             send_message: None,
             interrupt: None,
             menu: Some("Ctrl+Esc".to_string()),
+            ..Default::default()
         });
         let ctrl_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::CONTROL);
 
@@ -2825,6 +2857,7 @@ mod tests {
             send_message: None,
             interrupt: None,
             menu: Some("Ctrl+Tab".to_string()),
+            ..Default::default()
         });
 
         assert_eq!(
@@ -2856,6 +2889,7 @@ mod tests {
                 send_message: None,
                 interrupt: None,
                 menu: Some(binding.to_string()),
+                ..Default::default()
             });
             let code = if binding == "Enter" {
                 KeyCode::Enter
@@ -2894,6 +2928,7 @@ mod tests {
                     send_message: Some("Ctrl+C".to_string()),
                     interrupt: None,
                     menu: None,
+                    ..Default::default()
                 },
                 "Alt+Enter",
                 "Newline",
@@ -2904,6 +2939,7 @@ mod tests {
                     send_message: None,
                     interrupt: None,
                     menu: Some("Alt+Enter".to_string()),
+                    ..Default::default()
                 },
                 "Enter",
                 "Send",
@@ -2914,8 +2950,9 @@ mod tests {
                     send_message: None,
                     interrupt: None,
                     menu: Some("Ctrl+J".to_string()),
+                    ..Default::default()
                 },
-                "Ctrl+K",
+                "Ctrl+N",
                 "Next Tool",
                 "Prev / Next Tool",
             ),
@@ -2924,6 +2961,7 @@ mod tests {
                     send_message: None,
                     interrupt: None,
                     menu: Some("Ctrl+Home".to_string()),
+                    ..Default::default()
                 },
                 "Ctrl+End",
                 "Jump to Bottom",
@@ -2949,6 +2987,7 @@ mod tests {
             send_message: Some("Ctrl+S".to_string()),
             interrupt: None,
             menu: None,
+            ..Default::default()
         });
         let help = keymap.help_text(ActionState::chat(false, false));
 
@@ -3000,6 +3039,7 @@ mod tests {
             send_message: Some("Ctrl+C".to_string()),
             interrupt: Some("Ctrl+C".to_string()),
             menu: Some("Ctrl+C".to_string()),
+            ..Default::default()
         });
         let help = keymap.help_text(ActionState::chat(false, false));
 
@@ -3017,6 +3057,7 @@ mod tests {
             send_message: Some("Ctrl+P".to_string()),
             interrupt: None,
             menu: None,
+            ..Default::default()
         });
         let help = keymap.help_text(ActionState::chat(false, false));
 
@@ -3034,6 +3075,7 @@ mod tests {
             send_message: Some(chord.to_string()),
             interrupt: None,
             menu: Some(chord.to_string()),
+            ..Default::default()
         });
         let help = keymap.help_text(ActionState::chat(false, false));
 
@@ -3051,6 +3093,7 @@ mod tests {
             send_message: Some(format!("Ctrl+{}", "X".repeat(512))),
             interrupt: None,
             menu: None,
+            ..Default::default()
         });
         let help = keymap.help_text(ActionState::chat(false, false));
 

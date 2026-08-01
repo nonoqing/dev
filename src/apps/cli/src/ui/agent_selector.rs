@@ -13,6 +13,7 @@ use ratatui::{
 
 use crate::ui::{
     responsive_popup::{render_too_small, responsive_popup, ResponsivePopup},
+    selector_common::PagedSelector,
     theme::{StyleKind, Theme},
 };
 
@@ -146,6 +147,14 @@ impl AgentSelectorState {
         let selected = self.list_state.selected().unwrap_or(0);
         let next = (selected + 1) % self.len();
         self.list_state.select(Some(next));
+    }
+
+    pub(super) fn move_page_up(&mut self) {
+        PagedSelector::move_page_up(self)
+    }
+
+    pub(super) fn move_page_down(&mut self) {
+        PagedSelector::move_page_down(self)
     }
 
     /// Get the selected action from the unified Agent entry.
@@ -560,5 +569,23 @@ mod tests {
         assert!(state.confirm_selection().is_none());
         state.move_down();
         assert!(state.confirm_selection().is_none());
+    }
+}
+
+impl PagedSelector for AgentSelectorState {
+    fn last_area(&self) -> Option<Rect> {
+        self.last_area
+    }
+
+    fn list_state_mut(&mut self) -> &mut ListState {
+        &mut self.list_state
+    }
+
+    fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
     }
 }

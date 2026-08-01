@@ -67,8 +67,11 @@ impl ChatMode {
             return Ok(None);
         }
 
-        let modal_state =
-            self.action_state(chat_state.is_processing, self.any_popup_visible(chat_view));
+        let modal_state = self.action_state(
+            chat_state.is_processing,
+            self.any_popup_visible(chat_view),
+            !chat_view.input_text().trim().is_empty(),
+        );
         if let Some(action) = self.keymap.resolve_modal_safe(key, modal_state) {
             return self.dispatch_action(action, modal_state, chat_view, chat_state, rt_handle);
         }
@@ -133,7 +136,11 @@ impl ChatMode {
 
         // Host recovery keys win over popup-specific input handling.
         if self.any_popup_visible(chat_view) {
-            let state = self.action_state(chat_state.is_processing, true);
+            let state = self.action_state(
+                chat_state.is_processing,
+                true,
+                !chat_view.input_text().trim().is_empty(),
+            );
             if let Some(action) = self.keymap.resolve_reserved(key, state) {
                 return self.dispatch_action(action, state, chat_view, chat_state, rt_handle);
             }
@@ -216,6 +223,8 @@ impl ChatMode {
             match key.code {
                 KeyCode::Up => chat_view.model_selector_up(),
                 KeyCode::Down => chat_view.model_selector_down(),
+                KeyCode::PageUp => chat_view.model_selector_page_up(),
+                KeyCode::PageDown => chat_view.model_selector_page_down(),
                 KeyCode::Enter => {
                     if let Some(selected) = chat_view.model_selector_confirm() {
                         chat_view.hide_model_selector();
@@ -226,6 +235,19 @@ impl ChatMode {
                     if let Some(selected) = chat_view.model_selector_confirm() {
                         chat_view.hide_model_selector();
                         self.edit_model(&selected, chat_view, rt_handle);
+                    }
+                }
+                // Ctrl+F: toggle favorite on the selected model.
+                KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if chat_view.model_selector_allows_edit() {
+                        chat_view.model_selector_toggle_favorite();
+                    }
+                }
+                // Ctrl+A: open the provider list (add-model step 1).
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if chat_view.model_selector_allows_edit() {
+                        chat_view.hide_model_selector();
+                        chat_view.show_provider_selector();
                     }
                 }
                 // Note: Esc is handled globally for navigation back
@@ -248,6 +270,18 @@ impl ChatMode {
                         self.preview_theme_selection(&selected, chat_view);
                     }
                 }
+                KeyCode::PageUp => {
+                    chat_view.theme_selector_page_up();
+                    if let Some(selected) = chat_view.theme_selector_selected() {
+                        self.preview_theme_selection(&selected, chat_view);
+                    }
+                }
+                KeyCode::PageDown => {
+                    chat_view.theme_selector_page_down();
+                    if let Some(selected) = chat_view.theme_selector_selected() {
+                        self.preview_theme_selection(&selected, chat_view);
+                    }
+                }
                 KeyCode::Enter => {
                     if let Some(selected) = chat_view.theme_selector_confirm() {
                         chat_view.hide_theme_selector();
@@ -265,6 +299,8 @@ impl ChatMode {
             match key.code {
                 KeyCode::Up => chat_view.agent_selector_up(),
                 KeyCode::Down => chat_view.agent_selector_down(),
+                KeyCode::PageUp => chat_view.agent_selector_page_up(),
+                KeyCode::PageDown => chat_view.agent_selector_page_down(),
                 KeyCode::Enter => {
                     if let Some(action) = chat_view.agent_selector_confirm() {
                         self.handle_agent_selector_action(action, chat_view, chat_state, rt_handle);
@@ -284,6 +320,34 @@ impl ChatMode {
                 }
                 SessionAction::Delete(item) => {
                     self.handle_session_delete(&item, chat_view, chat_state, rt_handle);
+                }
+                SessionAction::Rename(item, new_name) => {
+                    self.handle_session_rename(&item, &new_name, chat_view, rt_handle);
+                }
+                SessionAction::PinToggle(item) => {
+                    chat_view.session_selector_toggle_pin(&item.session_id);
+                    // Focused update: add/remove only this session ID from the
+                    // latest on-disk snapshot so pins from other workspaces and
+                    // concurrent Shared TUI clients are preserved.
+                    let session_id = item.session_id.clone();
+                    let now_pinned = !item.pinned;
+                    if let Err(e) = self.config.update(|cfg| {
+                        if now_pinned {
+                            if !cfg
+                                .behavior
+                                .pinned_sessions
+                                .iter()
+                                .any(|id| id == &session_id)
+                            {
+                                cfg.behavior.pinned_sessions.push(session_id.clone());
+                            }
+                        } else {
+                            cfg.behavior.pinned_sessions.retain(|id| id != &session_id);
+                        }
+                    }) {
+                        tracing::error!("Failed to persist pinned sessions: {}", e);
+                    }
+                    chat_view.set_status(Some(format!("Toggled pin: {}", item.session_name)));
                 }
                 SessionAction::Close | SessionAction::None => {}
             }
@@ -335,6 +399,9 @@ impl ChatMode {
                 PromptStashAction::Select(id) => {
                     self.restore_prompt_stash(&id, chat_view);
                 }
+                PromptStashAction::Delete(id) => {
+                    self.delete_prompt_stash(&id, chat_view);
+                }
                 PromptStashAction::Close => self.navigate_back(chat_view),
                 PromptStashAction::None => {}
             }
@@ -345,6 +412,8 @@ impl ChatMode {
             match key.code {
                 KeyCode::Up => chat_view.skill_selector_up(),
                 KeyCode::Down => chat_view.skill_selector_down(),
+                KeyCode::PageUp => chat_view.skill_selector_page_up(),
+                KeyCode::PageDown => chat_view.skill_selector_page_down(),
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     if let Some(action) = chat_view.skill_selector_confirm() {
                         self.handle_skill_selector_action(action, chat_view, chat_state, rt_handle);
@@ -360,6 +429,8 @@ impl ChatMode {
             match key.code {
                 KeyCode::Up => chat_view.subagent_selector_up(),
                 KeyCode::Down => chat_view.subagent_selector_down(),
+                KeyCode::PageUp => chat_view.subagent_selector_page_up(),
+                KeyCode::PageDown => chat_view.subagent_selector_page_down(),
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     if let Some(action) = chat_view.subagent_selector_confirm() {
                         self.handle_subagent_selector_action(
@@ -377,6 +448,8 @@ impl ChatMode {
             match key.code {
                 KeyCode::Up => chat_view.mcp_selector_up(),
                 KeyCode::Down => chat_view.mcp_selector_down(),
+                KeyCode::PageUp => chat_view.mcp_selector_page_up(),
+                KeyCode::PageDown => chat_view.mcp_selector_page_down(),
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     if let Some(selected) = chat_view.mcp_selector_confirm() {
                         if selected.requires_external_confirmation()
@@ -540,12 +613,14 @@ impl ChatMode {
                         self.action_state(
                             self.displayed_chat_state(chat_state).is_processing,
                             false,
+                            false,
                         ),
                     ) {
                         return self.dispatch_action(
                             action,
                             self.action_state(
                                 self.displayed_chat_state(chat_state).is_processing,
+                                false,
                                 false,
                             ),
                             chat_view,
@@ -558,13 +633,64 @@ impl ChatMode {
             return Ok(None);
         }
 
-        if let Some(action) = self
-            .keymap
-            .resolve(key, self.action_state(chat_state.is_processing, false))
-        {
+        // ── Slash command menu autocomplete keys ──
+        // When the inline command menu (typing "/...") is visible, capture
+        // navigation/confirm keys so they drive the completion list instead of
+        // their default actions (Ctrl+P=command palette, Ctrl+N=next tool,
+        // Tab=switch agent, Esc=nothing). Up/Down already reach the menu
+        // through the HistoryPrevious/HistoryNext handlers, and Enter reaches
+        // it through SubmitInput, which applies the pending selection first.
+        if chat_view.command_menu_visible() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                    chat_view.command_menu_up();
+                    return Ok(None);
+                }
+                (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                    chat_view.command_menu_down();
+                    return Ok(None);
+                }
+                (KeyCode::Tab, _) => {
+                    // Mirrors the Enter path in submit_input: a slash command
+                    // cannot carry image attachments.
+                    if chat_view.draft_snapshot().has_images() {
+                        chat_view.set_status(Some(IMAGE_ATTACHMENTS_REQUIRE_MESSAGE.to_string()));
+                        return Ok(None);
+                    }
+                    if let Some(selection) = chat_view.apply_command_menu_selection() {
+                        return self.handle_action_id(
+                            &selection.action_id,
+                            Some(&selection.command_name),
+                            chat_view,
+                            chat_state,
+                            rt_handle,
+                        );
+                    }
+                    return Ok(None);
+                }
+                (KeyCode::Esc, _) => {
+                    chat_view.dismiss_command_menu();
+                    return Ok(None);
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(action) = self.keymap.resolve(
+            key,
+            self.action_state(
+                chat_state.is_processing,
+                false,
+                !chat_view.input_text().trim().is_empty(),
+            ),
+        ) {
             return self.dispatch_action(
                 action,
-                self.action_state(chat_state.is_processing, false),
+                self.action_state(
+                    chat_state.is_processing,
+                    false,
+                    !chat_view.input_text().trim().is_empty(),
+                ),
                 chat_view,
                 chat_state,
                 rt_handle,
@@ -589,11 +715,43 @@ impl ChatMode {
             }
 
             (KeyCode::Home, _) => {
-                chat_view.set_cursor_home();
+                let total = chat_view.count_message_lines(chat_state);
+                chat_view.scroll_to_top(total);
+                chat_view.set_status(Some("Jumped to first message".to_string()));
             }
 
             (KeyCode::End, _) => {
-                chat_view.set_cursor_end();
+                chat_view.scroll_to_bottom();
+                chat_view.set_status(Some("Jumped to last message".to_string()));
+            }
+
+            // Emacs-style editing keys (shared with startup page via
+            // TextInput::handle_emacs_edit_key). These reach the fallback
+            // because the keymap moved NextTool to Ctrl+N, ClearInput to
+            // Ctrl+L, and ToggleBrowse to Ctrl+B.
+            _ if chat_view.text_input.handle_emacs_edit_key(key) => {
+                self.sync_selected_native_command(chat_view);
+            }
+
+            // Ctrl+G: jump to first message; Ctrl+Alt+G: jump to last message.
+            (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
+                let total = chat_view.count_message_lines(chat_state);
+                chat_view.scroll_to_top(total);
+                chat_view.set_status(Some("Jumped to first message".to_string()));
+            }
+            (KeyCode::Char('g'), m) if m == KeyModifiers::CONTROL | KeyModifiers::ALT => {
+                chat_view.scroll_to_bottom();
+                chat_view.set_status(Some("Jumped to last message".to_string()));
+            }
+
+            // Ctrl+Alt+B: scroll up by one visible page; Ctrl+Alt+F: scroll
+            // down by one visible page.
+            (KeyCode::Char('b'), m) if m == KeyModifiers::CONTROL | KeyModifiers::ALT => {
+                let total = chat_view.count_message_lines(chat_state);
+                chat_view.scroll_page_up(total);
+            }
+            (KeyCode::Char('f'), m) if m == KeyModifiers::CONTROL | KeyModifiers::ALT => {
+                chat_view.scroll_page_down();
             }
 
             (KeyCode::Esc, _) => {
@@ -883,6 +1041,10 @@ impl ChatMode {
                     context.chat_view.mcp_add_dialog_handle_paste(&text);
                 } else if context.chat_view.login_form_visible() {
                     context.chat_view.login_form_insert_paste(&text);
+                } else if context.chat_view.session_selector_visible()
+                    && context.chat_view.session_selector_is_renaming()
+                {
+                    context.chat_view.session_selector_insert_rename_text(&text);
                 } else if context.chat_state.permission_prompt.is_none()
                     && context.chat_state.question_prompt.is_none()
                     && !context.this.any_popup_visible(context.chat_view)

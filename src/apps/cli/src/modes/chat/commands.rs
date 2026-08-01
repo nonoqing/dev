@@ -2,9 +2,7 @@ fn session_update_blocks_typed_submission(pending_for_current_session: bool, inp
     pending_for_current_session && !input.trim().starts_with('/')
 }
 
-fn steering_unsupported_reason(
-    draft: &crate::ui::composer::ComposerDraft,
-) -> Option<&'static str> {
+fn steering_unsupported_reason(draft: &crate::ui::composer::ComposerDraft) -> Option<&'static str> {
     if draft.has_images() {
         return Some(
             "Images cannot steer an active turn yet. Wait for it to finish to send this draft.",
@@ -260,7 +258,11 @@ impl ChatMode {
         if action_id == "toggle_auto_approve" || action_id.starts_with("toggle_auto_approve:") {
             let action = action_by_id("toggle_auto_approve", ActionContext::Chat)
                 .expect("Auto mode action must remain registered");
-            let state = self.action_state(displayed_is_processing, false);
+            let state = self.action_state(
+                displayed_is_processing,
+                false,
+                !chat_view.input_text().trim().is_empty(),
+            );
             if !action.available(state) {
                 chat_view.set_status(Some(action.unavailable_message(state)));
                 return Ok(None);
@@ -360,7 +362,11 @@ impl ChatMode {
         }
         self.dispatch_action(
             action,
-            self.action_state(displayed_is_processing, false),
+            self.action_state(
+                displayed_is_processing,
+                false,
+                !chat_view.input_text().trim().is_empty(),
+            ),
             chat_view,
             chat_state,
             rt_handle,
@@ -430,7 +436,11 @@ impl ChatMode {
         let builtin_action = action_for_alias(&builtin_alias, ActionContext::Chat);
         if self.agent.is_shared() {
             if let Some(action) = builtin_action {
-                let state = self.action_state(chat_state.is_processing, false);
+                let state = self.action_state(
+                    chat_state.is_processing,
+                    false,
+                    !chat_view.input_text().trim().is_empty(),
+                );
                 if let Some(usage) =
                     builtin_arguments_error(CommandRoute::Builtin, action.handler, arguments)
                 {
@@ -513,7 +523,11 @@ impl ChatMode {
         }
         if let Some(action) = builtin_action {
             if builtin_arguments_route(route, action.handler) {
-                let state = self.action_state(chat_state.is_processing, false);
+                let state = self.action_state(
+                    chat_state.is_processing,
+                    false,
+                    !chat_view.input_text().trim().is_empty(),
+                );
                 if !action.available(state) {
                     chat_view.set_status(Some(action.unavailable_message(state)));
                     return Ok(None);
@@ -592,7 +606,11 @@ impl ChatMode {
                 }
                 self.dispatch_action(
                     action,
-                    self.action_state(chat_state.is_processing, false),
+                    self.action_state(
+                        chat_state.is_processing,
+                        false,
+                        !chat_view.input_text().trim().is_empty(),
+                    ),
                     chat_view,
                     chat_state,
                     rt_handle,
@@ -1054,7 +1072,11 @@ impl ChatMode {
                     "Theme selector: ↑↓ preview, Enter apply, Esc cancel".to_string(),
                 ));
             }
-            ActionHandler::AddModel => chat_view.show_provider_selector(),
+            ActionHandler::AddModel => {
+                if !self.agent.is_shared() {
+                    chat_view.show_provider_selector();
+                }
+            }
             ActionHandler::NewSession => {
                 return Ok(Some(ChatExitReason::NewSession));
             }
@@ -1065,7 +1087,9 @@ impl ChatMode {
                 self.show_session_lineage(chat_view, chat_state, rt_handle);
             }
             ActionHandler::Timeline => {
-                let points = self.displayed_chat_state(chat_state).session_timeline_points();
+                let points = self
+                    .displayed_chat_state(chat_state)
+                    .session_timeline_points();
                 if points.is_empty() {
                     chat_view.set_status(Some(
                         "No user messages are available in the current timeline".to_string(),
@@ -1240,6 +1264,12 @@ impl ChatMode {
                     if self.agent.is_shared() {
                         return Ok(None);
                     }
+                    return Ok(Some(ChatExitReason::Quit));
+                }
+                if !chat_view.input_text().is_empty() {
+                    chat_view.clear_input();
+                    chat_view.set_status(Some("Input cleared".to_string()));
+                    return Ok(None);
                 }
                 return Ok(Some(ChatExitReason::Quit));
             }
@@ -1248,7 +1278,10 @@ impl ChatMode {
                 self.open_login_or_account_panel(chat_view, chat_state, rt_handle);
             }
             ActionHandler::Logout => self.logout(chat_state, rt_handle),
-            ActionHandler::OpenPalette => chat_view.show_command_palette(state),
+            ActionHandler::OpenPalette => {
+                self.refresh_stash_non_empty();
+                chat_view.show_command_palette(state);
+            }
             ActionHandler::SubmitInput => {
                 return self.submit_input(chat_view, chat_state, rt_handle);
             }
@@ -1660,10 +1693,8 @@ impl ChatMode {
     ) {
         let agent = self.agent.clone();
         let result = tokio::task::block_in_place(|| {
-            rt_handle.block_on(agent.steer_current_turn(
-                draft.text.clone(),
-                Some(draft.text.clone()),
-            ))
+            rt_handle
+                .block_on(agent.steer_current_turn(draft.text.clone(), Some(draft.text.clone())))
         });
         match result {
             Ok(steering_id) => {

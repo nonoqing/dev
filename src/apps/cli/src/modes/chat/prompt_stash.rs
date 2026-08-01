@@ -1,6 +1,14 @@
 use super::{ChatMode, ChatView};
 
 impl ChatMode {
+    /// Refresh the cached `stash_non_empty` flag from persistent storage.
+    /// Called when the command palette opens and after stash mutations.
+    pub(super) fn refresh_stash_non_empty(&mut self) {
+        self.stash_non_empty = crate::prompt_stash::PromptStashStore::from_config_dir()
+            .ok()
+            .is_some_and(|store| store.is_non_empty().unwrap_or(false));
+    }
+
     pub(super) fn stash_current_prompt(&mut self, chat_view: &mut ChatView) {
         let draft = chat_view.draft_snapshot();
         if chat_view.is_shell_mode() {
@@ -27,7 +35,9 @@ impl ChatMode {
             });
         match result {
             Ok(_) => {
+                self.close_all_popups(chat_view);
                 chat_view.clear_input();
+                self.stash_non_empty = true;
                 chat_view.set_status(Some("Prompt stashed".to_string()));
             }
             Err(error) => chat_view.set_status(Some(format!("Could not stash prompt: {error}"))),
@@ -42,7 +52,9 @@ impl ChatMode {
             Ok(Some(entry)) => {
                 let (draft, references_detached) =
                     entry.into_draft_for_workspace(self.workspace.as_deref());
+                self.close_all_popups(chat_view);
                 chat_view.set_chat_draft(draft);
+                self.refresh_stash_non_empty();
                 chat_view.set_status(Some(restored_status(
                     "Restored the latest stashed prompt",
                     references_detached,
@@ -93,6 +105,7 @@ impl ChatMode {
                 let (draft, references_detached) =
                     entry.into_draft_for_workspace(self.workspace.as_deref());
                 chat_view.set_chat_draft(draft);
+                self.refresh_stash_non_empty();
                 chat_view.set_status(Some(restored_status(
                     "Restored stashed prompt",
                     references_detached,
@@ -106,6 +119,35 @@ impl ChatMode {
                 ));
             }
             Err(error) => chat_view.set_status(Some(format!("Could not restore prompt: {error}"))),
+        }
+    }
+
+    pub(super) fn delete_prompt_stash(&mut self, id: &str, chat_view: &mut ChatView) {
+        let result = crate::prompt_stash::PromptStashStore::from_config_dir()
+            .map_err(|error| error.to_string())
+            .and_then(|store| store.remove(id).map_err(|error| error.to_string()));
+        match result {
+            Ok(true) => {
+                self.refresh_stash_non_empty();
+                let entries = crate::prompt_stash::PromptStashStore::from_config_dir()
+                    .ok()
+                    .and_then(|store| store.list().ok())
+                    .unwrap_or_default();
+                if entries.is_empty() {
+                    self.close_all_popups(chat_view);
+                    chat_view.set_status(Some("Prompt stash is now empty".to_string()));
+                } else {
+                    chat_view.show_prompt_stash_selector(entries);
+                    chat_view.set_status(Some("Stashed prompt deleted".to_string()));
+                }
+            }
+            Ok(false) => {
+                chat_view.set_status(Some(
+                    "That stashed prompt is no longer available; the list was refreshed elsewhere"
+                        .to_string(),
+                ));
+            }
+            Err(error) => chat_view.set_status(Some(format!("Could not delete prompt: {error}"))),
         }
     }
 }

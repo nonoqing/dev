@@ -382,7 +382,7 @@ impl CommandMenuState {
         self.last_area = None;
     }
 
-    fn hide(&mut self) {
+    pub(super) fn hide(&mut self) {
         self.visible = false;
         self.items.clear();
         self.list_state.select(None);

@@ -103,6 +103,28 @@ impl ChatView {
         }
     }
 
+    /// Scroll up by one page (visible area height).
+    pub(crate) fn scroll_page_up(&mut self, total_message_lines: usize) {
+        let page_lines = self.visible_line_count();
+        self.scroll_up(page_lines.max(1), total_message_lines);
+    }
+
+    /// Scroll down by one page (visible area height).
+    pub(crate) fn scroll_page_down(&mut self) {
+        let page_lines = self.visible_line_count();
+        self.scroll_down(page_lines.max(1));
+    }
+
+    /// Fallback terminal height (rows) when the rendered area is unknown.
+    const FALLBACK_TERMINAL_HEIGHT: usize = 24;
+
+    /// Get the number of visible lines in the messages area.
+    fn visible_line_count(&self) -> usize {
+        self.messages_area
+            .map(|a| a.height as usize)
+            .unwrap_or(Self::FALLBACK_TERMINAL_HEIGHT)
+    }
+
     pub(crate) fn scroll_to_top(&mut self, total_message_lines: usize) {
         self.committed_message_anchor = None;
         self.browse_mode = true;

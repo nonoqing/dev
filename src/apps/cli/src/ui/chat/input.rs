@@ -350,16 +350,6 @@ impl ChatView {
         self.refresh_command_menu();
     }
 
-    pub(crate) fn set_cursor_home(&mut self) {
-        self.text_input.set_cursor_home();
-        self.refresh_command_menu();
-    }
-
-    pub(crate) fn set_cursor_end(&mut self) {
-        self.text_input.set_cursor_end();
-        self.refresh_command_menu();
-    }
-
     pub(crate) fn clear_input(&mut self) {
         self.text_input.clear();
         self.workspace_references.clear();
@@ -649,6 +639,12 @@ impl ChatView {
 
     pub(crate) fn command_menu_down(&mut self) {
         self.command_menu.move_down();
+    }
+
+    /// Dismiss the slash-command menu and clear the "/" input, matching the
+    /// startup page.
+    pub(crate) fn dismiss_command_menu(&mut self) {
+        self.clear_input();
     }
 
     pub(crate) fn apply_command_menu_selection(
