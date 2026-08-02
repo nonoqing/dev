@@ -25,11 +25,13 @@ mod tests {
         render_external_hook_catalog, render_native_hook_overview, requested_session_name,
         retain_selected_native_command_for_input, selected_command_prefill,
         session_command_help_note, session_delete_allowed, session_delete_feedback,
-        session_update_allowed, session_update_blocks_typed_submission,
-        session_update_completion_should_exit, shared_session_change_is_blocked,
+        session_switch_targets_pending_delete, session_update_allowed,
+        session_update_blocks_typed_submission, session_update_completion_should_exit,
+        shared_session_change_is_blocked, steering_unsupported_reason,
         terminal_event_allowed_while_local_effect_pending, CommandRoute, ExternalAgentReviewAction,
         ExternalControlUiAction, ExternalSourceConflictPreferences, ExternalToolReviewAction,
-        HookManagementAction, SessionUpdateApplyOutcome, SHARED_TUI_CHAT_STATUS,
+        HookManagementAction, PendingSessionOperationKind, SessionUpdateApplyOutcome,
+        SHARED_TUI_CHAT_STATUS,
     };
     use crate::actions::{
         action_conflict_behavior_version, ActionHandler, ActionState, ResolvedKeymap,
@@ -2144,6 +2146,30 @@ mod tests {
     }
 
     #[test]
+    fn embedded_session_switch_waits_only_when_the_target_is_being_deleted() {
+        let deleting = PendingSessionOperationKind::Delete {
+            session_name: "Old session".to_string(),
+        };
+        let renaming = PendingSessionOperationKind::Rename {
+            session_name: "New name".to_string(),
+        };
+
+        assert!(session_switch_targets_pending_delete(
+            "session-b",
+            Some(("session-b", &deleting)),
+        ));
+        assert!(!session_switch_targets_pending_delete(
+            "session-a",
+            Some(("session-b", &deleting)),
+        ));
+        assert!(!session_switch_targets_pending_delete(
+            "session-b",
+            Some(("session-b", &renaming)),
+        ));
+        assert!(!session_switch_targets_pending_delete("session-b", None));
+    }
+
+    #[test]
     fn shared_chat_status_separates_session_selection_from_management() {
         assert!(SHARED_TUI_CHAT_STATUS.contains("current Session Agent mode"));
         assert!(SHARED_TUI_CHAT_STATUS.contains("current Session model"));
@@ -2591,5 +2617,76 @@ mod tests {
         assert!(config.contains("could not read its model settings"));
         assert!(config.contains("can read and save its settings"));
         assert!(!config.contains("requested model is not available"));
+    }
+
+    #[test]
+    fn busy_chat_submission_steers_without_inventing_a_command_or_losing_the_draft() {
+        let source = include_str!("commands.rs").replace("\r\n", "\n");
+        let submission = source
+            .split_once("fn submit_input(")
+            .expect("submit input")
+            .1
+            .split_once("fn send_shell_command(")
+            .expect("submit input boundary")
+            .0;
+        let steering = source
+            .split_once("fn steer_draft_to_agent(")
+            .expect("steering submission")
+            .1
+            .split_once("fn send_shell_command(")
+            .expect("steering submission boundary")
+            .0;
+
+        assert!(submission.contains("if chat_state.is_processing"));
+        assert!(submission.contains("steering_unsupported_reason"));
+        assert!(submission.contains("self.steer_draft_to_agent"));
+        assert!(!submission.contains("/steer"));
+        assert!(steering.contains("agent.steer_current_turn"));
+        assert!(steering.contains("chat_state.handle_user_steering"));
+        assert!(steering.contains("chat_view.set_draft(draft)"));
+    }
+
+    #[test]
+    fn active_turn_steering_accepts_text_and_rejects_rich_drafts() {
+        let plain = crate::ui::composer::ComposerDraft::from_text("check tests");
+        assert_eq!(steering_unsupported_reason(&plain), None);
+
+        let mut referenced = plain.clone();
+        referenced.workspace_references.push(
+            bitfun_agent_runtime::sdk::AgentWorkspaceReference {
+                path: "src/lib.rs".to_string(),
+                kind: bitfun_agent_runtime::sdk::AgentWorkspaceReferenceKind::File,
+                start_line: None,
+                end_line: None,
+                source: bitfun_agent_runtime::sdk::AgentWorkspaceReferenceSourceRange {
+                    start: 0,
+                    end: 11,
+                    value: "@src/lib.rs".to_string(),
+                },
+            },
+        );
+        assert!(steering_unsupported_reason(&referenced)
+            .expect("workspace reference rejection")
+            .contains("Workspace references"));
+
+        let mut imaged = plain;
+        imaged
+            .image_attachments
+            .push(crate::ui::composer::ComposerImageAttachment {
+                image: crate::ui::composer::ComposerImage::new(
+                    "image-1",
+                    "image.png",
+                    "image/png",
+                    std::sync::Arc::<[u8]>::from([1, 2, 3]),
+                ),
+                source: crate::ui::composer::ComposerSourceRange {
+                    start: 0,
+                    end: 9,
+                    value: "[Image 1]".to_string(),
+                },
+            });
+        assert!(steering_unsupported_reason(&imaged)
+            .expect("image rejection")
+            .contains("Images"));
     }
 }

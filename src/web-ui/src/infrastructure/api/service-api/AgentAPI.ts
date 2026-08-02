@@ -6,6 +6,7 @@ import type {
   DialogTurnData,
   ModelRoundAttemptDiagnostic,
   SessionRelationship,
+  SessionTurnCatalog,
 } from '@/shared/types/session-history';
 import type { ImageContextData as ImageInputContextData } from './ImageContextTypes';
 import type { AgentSource } from './CustomAgentAPI';
@@ -223,6 +224,7 @@ export interface SessionViewRestoreTiming {
   visibilityMetadataDurationMs: number;
   loadSessionWithTurnsDurationMs: number;
   normalizeTurnIdsDurationMs: number;
+  turnCatalogDurationMs?: number;
   totalDurationMs: number;
   turnLoad: SessionTurnLoadTiming;
 }
@@ -230,12 +232,45 @@ export interface SessionViewRestoreTiming {
 export interface RestoreSessionViewResponse {
   session: SessionInfo;
   turns: DialogTurnData[];
+  turnCatalog?: SessionTurnCatalog;
   contextRestoreState: 'ready' | 'pending';
   isPartial?: boolean;
   loadedTurnCount?: number;
   totalTurnCount?: number;
   timings?: SessionViewRestoreTiming;
 }
+
+export interface LoadSessionTurnWindowRequest {
+  sessionId: string;
+  workspacePath: string;
+  includeInternal?: boolean;
+  targetStorageTurnIndex: number;
+  expectedTurnId?: string;
+  expectedCatalogRevision?: string;
+  before?: number;
+  after?: number;
+  remoteConnectionId?: string;
+  remoteSshHost?: string;
+}
+
+export type LoadSessionTurnWindowResponse =
+  | {
+      status: 'ready';
+      catalogRevision: string;
+      totalTurnCount: number;
+      startOrdinal: number;
+      endOrdinalExclusive: number;
+      targetTurnId: string;
+      turns: DialogTurnData[];
+    }
+  | {
+      status: 'stale';
+      catalog: SessionTurnCatalog;
+    }
+  | {
+      status: 'not-found';
+      catalog: SessionTurnCatalog;
+    };
 
 export interface EnsureAssistantBootstrapRequest {
   sessionId: string;
@@ -846,6 +881,22 @@ export class AgentAPI {
     }
   }
 
+  async loadSessionTurnWindow(
+    request: LoadSessionTurnWindowRequest,
+  ): Promise<LoadSessionTurnWindowResponse> {
+    try {
+      return await api.invoke<LoadSessionTurnWindowResponse>('load_session_turn_window', {
+        request,
+      });
+    } catch (error) {
+      throw createTauriCommandError('load_session_turn_window', error, {
+        sessionId: request.sessionId,
+        workspacePath: request.workspacePath,
+        targetStorageTurnIndex: request.targetStorageTurnIndex,
+      });
+    }
+  }
+
   async setSessionMemoryMode(
     request: SetSessionMemoryModeRequest
   ): Promise<SetSessionMemoryModeResponse> {
@@ -1170,16 +1221,25 @@ export class AgentAPI {
     return api.listen<SessionTitleGeneratedEvent>('session_title_generated', callback);
   }
 
-  async cancelSession(sessionId: string): Promise<{
+  async cancelSession(
+    sessionId: string,
+    options?: { cancelDescendants?: boolean },
+  ): Promise<{
     cancelled: boolean;
     dialogTurnId: string | null;
   }> {
     try {
+      const request = {
+        sessionId,
+        ...(options?.cancelDescendants === undefined
+          ? {}
+          : { cancelDescendants: options.cancelDescendants }),
+      };
       return await api.invoke<{
         cancelled: boolean;
         dialogTurnId: string | null;
       }>('cancel_session', {
-        request: { sessionId }
+        request,
       });
     } catch (error) {
       throw createTauriCommandError('cancel_session', error, { sessionId });

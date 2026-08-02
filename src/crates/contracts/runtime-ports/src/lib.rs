@@ -228,6 +228,21 @@ pub struct SessionTurnLoadRequest {
     pub tail_turn_count: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTurnWindowRequest {
+    pub workspace_path: PathBuf,
+    pub session_id: String,
+    pub include_internal: bool,
+    pub target_storage_turn_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_catalog_revision: Option<String>,
+    pub before: usize,
+    pub after: usize,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionTurnLoadTiming {
@@ -253,6 +268,8 @@ pub struct SessionViewRestoreTiming {
     pub visibility_metadata_duration_ms: u64,
     pub load_session_with_turns_duration_ms: u64,
     pub normalize_turn_ids_duration_ms: u64,
+    #[serde(default)]
+    pub turn_catalog_duration_ms: u64,
     pub total_duration_ms: u64,
     pub turn_load: SessionTurnLoadTiming,
 }
@@ -1565,6 +1582,17 @@ pub struct AgentDialogTurnRequest {
     pub metadata: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Text-only steering request for one exact running dialog turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentDialogSteerRequest {
+    pub session_id: String,
+    pub turn_id: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_content: Option<String>,
+}
+
 impl AgentDialogTurnExecution {
     pub fn is_standard(&self) -> bool {
         matches!(self, Self::Standard)
@@ -1764,7 +1792,13 @@ pub struct AgentSessionReplyRoute {
 }
 
 /// Outcome for steering a message into an already-running dialog turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum DialogSteerOutcome {
     /// Steering was buffered for the running turn and will be consumed at the
     /// next model-round boundary.
@@ -2414,6 +2448,16 @@ pub trait AgentDialogTurnPort: Send + Sync {
         &self,
         request: AgentDialogTurnRequest,
     ) -> PortResult<DialogSubmitOutcome>;
+
+    async fn steer_dialog_turn(
+        &self,
+        _request: AgentDialogSteerRequest,
+    ) -> PortResult<DialogSteerOutcome> {
+        Err(PortError::new(
+            PortErrorKind::NotAvailable,
+            "dialog turn steering is not supported by this provider",
+        ))
+    }
 }
 
 #[async_trait::async_trait]
@@ -3619,6 +3663,44 @@ mod tests {
             "session_message_request"
         );
         assert_eq!(json["attachments"][0]["kind"], "remote_image");
+    }
+
+    #[test]
+    fn agent_dialog_steer_contract_round_trips_exact_turn_identity() {
+        let request = AgentDialogSteerRequest {
+            session_id: "session_1".to_string(),
+            turn_id: "turn_1".to_string(),
+            content: "Please also check the tests".to_string(),
+            display_content: Some("Also check tests".to_string()),
+        };
+        let outcome = DialogSteerOutcome::Buffered {
+            session_id: "session_1".to_string(),
+            turn_id: "turn_1".to_string(),
+            steering_id: "steer_1".to_string(),
+        };
+
+        let request_json = serde_json::to_value(&request).expect("serialize steer request");
+        let outcome_json = serde_json::to_value(&outcome).expect("serialize steer outcome");
+
+        assert_eq!(request_json["sessionId"], "session_1");
+        assert_eq!(request_json["turnId"], "turn_1");
+        assert_eq!(request_json["content"], "Please also check the tests");
+        assert_eq!(request_json["displayContent"], "Also check tests");
+        assert_eq!(outcome_json["kind"], "buffered");
+        assert_eq!(outcome_json["sessionId"], "session_1");
+        assert_eq!(outcome_json["turnId"], "turn_1");
+        assert_eq!(outcome_json["steeringId"], "steer_1");
+
+        assert_eq!(
+            serde_json::from_value::<AgentDialogSteerRequest>(request_json)
+                .expect("deserialize steer request"),
+            request
+        );
+        assert_eq!(
+            serde_json::from_value::<DialogSteerOutcome>(outcome_json)
+                .expect("deserialize steer outcome"),
+            outcome
+        );
     }
 
     #[test]

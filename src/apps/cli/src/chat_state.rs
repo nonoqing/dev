@@ -155,6 +155,12 @@ pub(crate) enum FlowItem {
     Text { content: String, is_streaming: bool },
     /// AI thinking/reasoning block
     Thinking { content: String },
+    /// User steering injected between model-round flow items.
+    UserSteering {
+        steering_id: String,
+        content: String,
+        is_pending: bool,
+    },
     /// Tool call block
     Tool { tool_state: ToolDisplayState },
 }
@@ -307,7 +313,9 @@ fn visible_message_text(message: &ChatMessage) -> String {
         .iter()
         .filter_map(|item| match item {
             FlowItem::Text { content, .. } => Some(content.as_str()),
-            FlowItem::Thinking { .. } | FlowItem::Tool { .. } => None,
+            FlowItem::Thinking { .. } | FlowItem::UserSteering { .. } | FlowItem::Tool { .. } => {
+                None
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -339,6 +347,12 @@ pub(crate) struct ModelTokenUsageSnapshot {
 }
 
 // ============ ChatState ============
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PermissionReconcileOutcome {
+    pub(crate) changed: bool,
+    pub(crate) added: bool,
+}
 
 /// Complete UI state for the chat interface.
 /// This is the single source of truth for rendering — but NOT for persistence.
@@ -689,7 +703,7 @@ impl ChatState {
     pub(crate) fn reconcile_permission_requests(
         &mut self,
         requests: Vec<PermissionRequest>,
-    ) -> bool {
+    ) -> PermissionReconcileOutcome {
         let expected = requests
             .iter()
             .map(|request| request.request_id.clone())
@@ -705,14 +719,16 @@ impl ChatState {
             )
             .filter(|request_id| !expected.contains(request_id))
             .collect::<Vec<_>>();
-        let mut changed = false;
+        let mut outcome = PermissionReconcileOutcome::default();
         for request_id in stale {
-            changed |= self.resolve_permission_request(&request_id);
+            outcome.changed |= self.resolve_permission_request(&request_id);
         }
         for request in requests {
-            changed |= self.enqueue_permission_request(request);
+            let added = self.enqueue_permission_request(request);
+            outcome.changed |= added;
+            outcome.added |= added;
         }
-        changed
+        outcome
     }
 
     /// Load historical messages from the portable runtime transcript.
@@ -894,6 +910,50 @@ impl ChatState {
             });
         }
         self.rebuild_streaming_message();
+    }
+
+    /// Add an optimistic steering item or upgrade it when the runtime emits
+    /// the authoritative injection event. Returns true only for a new item.
+    pub(crate) fn handle_user_steering(
+        &mut self,
+        steering_id: &str,
+        content: &str,
+        is_pending: bool,
+    ) -> bool {
+        if !self.is_processing || self.current_turn_id.is_none() {
+            return false;
+        }
+        if let Some(existing) = self.current_flow_items.iter_mut().find(|item| {
+            matches!(
+                item,
+                FlowItem::UserSteering {
+                    steering_id: existing_id,
+                    ..
+                } if existing_id == steering_id
+            )
+        }) {
+            if let FlowItem::UserSteering {
+                content: existing_content,
+                is_pending: existing_pending,
+                ..
+            } = existing
+            {
+                *existing_content = content.to_string();
+                if !is_pending {
+                    *existing_pending = false;
+                }
+            }
+            self.rebuild_streaming_message();
+            return false;
+        }
+
+        self.current_flow_items.push(FlowItem::UserSteering {
+            steering_id: steering_id.to_string(),
+            content: content.to_string(),
+            is_pending,
+        });
+        self.rebuild_streaming_message();
+        true
     }
 
     /// Handle a tool event.
@@ -1511,7 +1571,10 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatState, FlowItem, ModelTokenUsageSnapshot, ToolDisplayStatus};
+    use super::{
+        ChatState, FlowItem, ModelTokenUsageSnapshot, PermissionReconcileOutcome,
+        ToolDisplayStatus,
+    };
     use bitfun_agent_runtime::sdk::{
         PermissionDelegationContext, PermissionRequest, PermissionRequestSource,
         PermissionRequestSourceKind, SessionTranscript, TranscriptContent, TranscriptMessage,
@@ -1738,13 +1801,19 @@ mod tests {
         assert!(state.permission_prompt.is_none());
 
         assert!(state.enqueue_permission_request(first));
-        assert!(state.reconcile_permission_requests(vec![third]));
+        let outcome = state.reconcile_permission_requests(vec![third.clone()]);
+        assert!(outcome.changed);
+        assert!(outcome.added);
         assert_eq!(
             state
                 .permission_prompt
                 .as_ref()
                 .map(|prompt| prompt.request.request_id.as_str()),
             Some("request-m")
+        );
+        assert_eq!(
+            state.reconcile_permission_requests(vec![third]),
+            PermissionReconcileOutcome::default()
         );
     }
 
@@ -1827,6 +1896,47 @@ mod tests {
         });
 
         assert_create_plan_item(&state.current_flow_items[0]);
+    }
+
+    #[test]
+    fn user_steering_is_deduplicated_and_preserves_stream_order() {
+        let mut state = ChatState::new(
+            "session-1".to_string(),
+            "Session".to_string(),
+            "agentic".to_string(),
+            None,
+        );
+        state.handle_turn_started("turn-1", "Start the task");
+        state.handle_text_chunk("Before steering");
+
+        assert!(state.handle_user_steering("steer-1", "Also check tests", true));
+        assert!(!state.handle_user_steering("steer-1", "Also check tests", false));
+        state.handle_text_chunk("After steering");
+
+        assert!(matches!(
+            state.current_flow_items.as_slice(),
+            [
+                FlowItem::Text { content: before, .. },
+                FlowItem::UserSteering {
+                    steering_id,
+                    content,
+                    is_pending: false,
+                },
+                FlowItem::Text { content: after, .. },
+            ] if before == "Before steering"
+                && steering_id == "steer-1"
+                && content == "Also check tests"
+                && after == "After steering"
+        ));
+        assert_eq!(
+            state.current_flow_items.len(),
+            state
+                .messages
+                .last()
+                .expect("assistant message")
+                .flow_items
+                .len()
+        );
     }
 
     #[test]

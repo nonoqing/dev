@@ -660,6 +660,7 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         "get_session_file_diff_stats",
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
+    ("get_session_lineage", RemoteWorkspacePolicy::RemoteRouted),
     ("get_session_files", RemoteWorkspacePolicy::LegacyUnaudited),
     (
         "get_session_operations",
@@ -915,6 +916,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     (
         "load_persisted_session_metadata",
         RemoteWorkspacePolicy::LegacyUnaudited,
+    ),
+    (
+        "load_session_turn_window",
+        RemoteWorkspacePolicy::RemoteRouted,
     ),
     ("load_session_turns", RemoteWorkspacePolicy::LegacyUnaudited),
     (

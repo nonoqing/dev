@@ -43,6 +43,7 @@ vi.mock('@/component-library', async () => {
     Input: ReactModule.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>((props, ref) => (
       <input ref={ref} {...props} />
     )),
+    DotMatrixLoader: () => <span data-testid="dot-matrix-loader" />,
   };
 });
 
@@ -58,6 +59,14 @@ vi.mock('@/shared/utils/tabUtils', () => ({
 
 vi.mock('./SessionFilesBadge', () => ({
   SessionFilesBadge: () => <div data-testid="session-files-badge" />,
+}));
+
+vi.mock('./SessionTreePopover', () => ({
+  SessionTreePopover: () => (
+    <div className="session-tree-popover">
+      <button type="button" data-testid="flowchat-header-session-tree" />
+    </div>
+  ),
 }));
 
 function createProps(overrides: Partial<FlowChatHeaderProps> = {}): FlowChatHeaderProps {
@@ -135,8 +144,22 @@ describe('FlowChatHeader', () => {
     expect(container.querySelector('[data-testid="flowchat-header-turn-next"]')).toBeNull();
   });
 
-  it('renders background activity menus in a portal outside the scrollable panel', () => {
+  it('places the Agent tree entry immediately before background commands', () => {
+    act(() => {
+      root.render(<FlowChatHeader {...createProps({ sessionId: 'session-1' })} />);
+    });
+
+    const treeButton = container.querySelector('[data-testid="flowchat-header-session-tree"]');
+    const commandButton = container.querySelector('[data-testid="flowchat-header-background-commands"]');
+    const treeContainer = treeButton?.closest('.session-tree-popover');
+    const commandContainer = commandButton?.closest('.flowchat-header__background-command-nav');
+
+    expect(treeContainer?.nextElementSibling).toBe(commandContainer);
+  });
+
+  it('renders background command menus in a portal outside the scrollable panel', () => {
     const onStopBackgroundCommand = vi.fn();
+    const onStopAllBackgroundCommands = vi.fn();
 
     act(() => {
       root.render(
@@ -150,22 +173,25 @@ describe('FlowChatHeader', () => {
               status: 'running',
             }],
             onStopBackgroundCommand,
+            onStopAllBackgroundCommands,
           })}
         />,
       );
     });
 
-    const activityButton = container.querySelector<HTMLButtonElement>(
-      '[data-testid="flowchat-header-background-activities"]',
+    const commandButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="flowchat-header-background-commands"]',
     );
     act(() => {
-      activityButton?.click();
+      commandButton?.click();
     });
 
-    const panel = container.querySelector('.flowchat-header__background-activity-panel');
+    const panel = container.querySelector('.flowchat-header__background-command-panel');
     const menuButton = panel?.querySelector<HTMLButtonElement>(
-      '[aria-label="flowChatHeader.backgroundCommandActions"]',
+      '.flowchat-header__background-command-panel-header-actions [aria-label="flowChatHeader.backgroundCommandActions"]',
     );
+    expect(panel?.querySelector('.flowchat-header__background-section-title')).toBeNull();
+    expect(menuButton?.closest('.flowchat-header__background-command-panel-header')).not.toBeNull();
     act(() => {
       menuButton?.click();
     });
@@ -177,13 +203,13 @@ describe('FlowChatHeader', () => {
     act(() => {
       menu?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     });
-    expect(container.querySelector('.flowchat-header__background-activity-panel')).not.toBeNull();
+    expect(container.querySelector('.flowchat-header__background-command-panel')).not.toBeNull();
 
     const stopButton = menu?.querySelector<HTMLButtonElement>('[role="menuitem"]');
     act(() => {
       stopButton?.click();
     });
 
-    expect(onStopBackgroundCommand).toHaveBeenCalledTimes(1);
+    expect(onStopAllBackgroundCommands).toHaveBeenCalledTimes(1);
   });
 });
