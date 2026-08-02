@@ -15,6 +15,7 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 2. 桌面端日常开发用 `pnpm run desktop:dev`；只改前端、想更快冷启动时再用 `pnpm run desktop:preview:debug`。常用命令见 [`docs/development/common-commands-CN.md`](docs/development/common-commands-CN.md)。
 3. 改完 Rust 优先跑 `pnpm run fmt:rs`（只格式化已改或已暂存的 `.rs`）。只有刻意做更大范围格式化时才用 `cargo fmt`。
 4. 先看下方 **按任务路由** / **规范类型地图**，再按 [`docs/development/verification-CN.md`](docs/development/verification-CN.md) 选最小检查。
+5. Rust workspace 依赖在根清单中统一版本，消费 crate 只声明自身所需 feature；测试专用 feature 放入 `dev-dependencies`，受 crate feature 控制的服务能力只在对应 feature 中启用。禁止使用 `tokio/full` 绕过依赖边界。
 
 ## 如何使用本文件
 
@@ -57,7 +58,7 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 
 | 专题 | 何时打开 | 权威文档 |
 |---|---|---|
-| 产品架构 | `bitfun-core` 拆解、feature/依赖边界、构建提速类重构 | [`docs/architecture/product-architecture.md`](docs/architecture/product-architecture.md)（见 §1.1）；专题地图 [`docs/architecture/README.md`](docs/architecture/README.md) |
+| 产品架构 | `bitfun-core` 拆解、feature/依赖边界、构建提速类重构 | [`docs/architecture/product-architecture.md`](docs/architecture/product-architecture.md)（见 §1.1）；Rust 构建依赖边界：[`docs/architecture/rust-build-dependency-boundaries.md`](docs/architecture/rust-build-dependency-boundaries.md)；专题地图 [`docs/architecture/README.md`](docs/architecture/README.md) |
 | Agent Runtime 部署 | 多 GUI/TUI/Remote 实例、共享 Session 控制、进程拓扑 | [`docs/architecture/agent-runtime-deployment-design.md`](docs/architecture/agent-runtime-deployment-design.md) |
 | Agent hooks | 原生 Codex 兼容 hooks、BitFun 差异与门控 | [`docs/specs/agent-hooks.md`](docs/specs/agent-hooks.md)（[中文](docs/specs/agent-hooks.zh-CN.md)）；不要另起一套 Codex hook 契约 |
 | 物理分层 | 代码应落在哪一层、依赖方向是否正确 | 本文件 **分层模块索引** |

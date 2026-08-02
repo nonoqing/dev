@@ -855,7 +855,7 @@ mod tests {
         assert!(!same_network_origin(&original, &other_port));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn host_shell_exec_runs_git_with_workspace_cwd() {
         let workspace_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let perms = MiniAppPermissions {

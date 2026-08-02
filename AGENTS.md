@@ -16,6 +16,7 @@ copy long rule bodies back into this entry.
 2. Desktop: prefer `pnpm run desktop:dev`. Use `pnpm run desktop:preview:debug` only for faster frontend-only cold start (no Rust auto-rebuild). See [`docs/development/common-commands.md`](docs/development/common-commands.md).
 3. After Rust edits: `pnpm run fmt:rs` (changed/staged `.rs` only). Use `cargo fmt` only when you intentionally want broader formatting coverage.
 4. Use **Route by task** / **Standards map**, then pick checks from [`docs/development/verification.md`](docs/development/verification.md).
+5. Root workspace dependencies own compatible versions; consuming crates select only the features they use. Keep test-only features in `dev-dependencies`, attach feature-gated service capabilities to the owning crate feature, and do not use `tokio/full` to bypass dependency boundaries.
 
 ## How to use this file
 
@@ -58,7 +59,7 @@ When the task hits a row below, open that authority. Do not stop at the STD-01 m
 
 | Topic | Open when | Authority |
 |---|---|---|
-| Product architecture | `bitfun-core` split, feature/dependency boundaries, build-speed refactors | [`docs/architecture/product-architecture.md`](docs/architecture/product-architecture.md) (see §1.1); topic map [`docs/architecture/README.md`](docs/architecture/README.md) |
+| Product architecture | `bitfun-core` split, feature/dependency boundaries, build-speed refactors | [`docs/architecture/product-architecture.md`](docs/architecture/product-architecture.md) (see §1.1); Rust build dependencies: [`docs/architecture/rust-build-dependency-boundaries.md`](docs/architecture/rust-build-dependency-boundaries.md); topic map [`docs/architecture/README.md`](docs/architecture/README.md) |
 | Agent Runtime deployment | Multi-GUI/TUI/Remote instances, shared Session control, process topology | [`docs/architecture/agent-runtime-deployment-design.md`](docs/architecture/agent-runtime-deployment-design.md) |
 | Agent hooks | Native Codex-compatible hooks, BitFun deviations / gates | [`docs/specs/agent-hooks.md`](docs/specs/agent-hooks.md) ([中文](docs/specs/agent-hooks.zh-CN.md)); do not fork the Codex hook contract |
 | Physical layers | Where a crate/app belongs, dependency direction | **Layered Module Index** in this file |
