@@ -604,7 +604,10 @@ async fn engine_for(
     for issue in &issues {
         warn!("Agent hook configuration issue: {issue}");
     }
-    let engine = Arc::new(AgentHookEngine::new(settings));
+    let engine = Arc::new(
+        AgentHookEngine::new(settings)
+            .with_command_factory(bitfun_services_core::process_manager::create_shell_command),
+    );
     let mut cache = engine_cache().lock().await;
     if cache.len() >= MAX_CACHED_WORKSPACE_ENGINES && !cache.contains_key(&key) {
         let oldest = cache.keys().next().cloned();

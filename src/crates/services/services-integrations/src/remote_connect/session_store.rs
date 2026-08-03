@@ -84,12 +84,8 @@ fn write_private_file(path: &std::path::Path, contents: &[u8]) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("secret file has no parent directory"))?;
     std::fs::create_dir_all(parent).context("create private data directory")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .context("restrict private data directory permissions")?;
-    }
+    bitfun_services_core::path_utils::set_mode(parent, 0o700)
+        .context("restrict private data directory permissions")?;
 
     let mut random = [0u8; 8];
     OsRng.fill_bytes(&mut random);
@@ -124,12 +120,8 @@ fn write_private_file(path: &std::path::Path, contents: &[u8]) -> Result<()> {
             std::fs::remove_file(path).context("replace existing secret file")?;
         }
         std::fs::rename(&temp_path, path).context("install private secret file")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .context("restrict secret file permissions")?;
-        }
+        bitfun_services_core::path_utils::set_mode(path, 0o600)
+            .context("restrict secret file permissions")?;
         Ok(())
     })();
     if write_result.is_err() {
@@ -200,12 +192,8 @@ fn load_or_create_local_session_secret() -> Result<[u8; 32]> {
         .parent()
         .ok_or_else(|| anyhow!("session key has no parent directory"))?;
     std::fs::create_dir_all(parent).context("create session key directory")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .context("restrict session key directory permissions")?;
-    }
+    bitfun_services_core::path_utils::set_mode(parent, 0o700)
+        .context("restrict session key directory permissions")?;
 
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);

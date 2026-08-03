@@ -14,6 +14,13 @@ use tool_runtime::search::glob_search::{
     LocalGlobRequest,
 };
 
+/// Wraps `services_core::process_manager::create_command` so the Glob tool
+/// gets `CREATE_NO_WINDOW` on Windows without tool-execution owning platform
+/// awareness.
+fn create_command(program: &str) -> std::process::Command {
+    bitfun_services_core::process_manager::create_command(program)
+}
+
 pub struct GlobTool;
 
 impl Default for GlobTool {
@@ -477,6 +484,7 @@ impl Tool for GlobTool {
                 search_path: PathBuf::from(resolved_str_for_rg),
                 pattern: pattern_for_rg,
                 limit,
+                command_creator: Some(create_command),
             })
         })
         .await
@@ -664,6 +672,7 @@ mod tests {
             search_path: PathBuf::from(effective.search_path),
             pattern: effective.pattern,
             limit: 100,
+            command_creator: None,
         })
         .unwrap();
 
@@ -746,6 +755,7 @@ mod tests {
             search_path: root.clone(),
             pattern: "**/*.rs".to_string(),
             limit: 2,
+            command_creator: None,
         })
         .unwrap()
         .matches
@@ -772,6 +782,7 @@ mod tests {
             search_path: root.clone(),
             pattern: "src/*.rs".to_string(),
             limit: 10,
+            command_creator: None,
         })
         .unwrap();
         let matches = result
@@ -802,6 +813,7 @@ mod tests {
             search_path: root.clone(),
             pattern: "*".to_string(),
             limit: 10,
+            command_creator: None,
         })
         .unwrap()
         .matches

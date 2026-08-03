@@ -1398,11 +1398,7 @@ fn has_runtime_unavailable_diagnostic(candidate: &ResolvedExternalCandidate) -> 
 
 fn workspace_scope_key(workspace_root: Option<&Path>) -> String {
     let normalized = workspace_route_key(workspace_root).replace('\\', "/");
-    if cfg!(windows) {
-        normalized.to_ascii_lowercase()
-    } else {
-        normalized
-    }
+    bitfun_services_core::path_utils::normalize_path_case(&normalized)
 }
 
 fn normalize_logical_id(value: &str) -> String {

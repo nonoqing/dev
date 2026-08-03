@@ -289,22 +289,7 @@ fn update_prompt_command_shell_fingerprint(hasher: &mut Sha256, value: &[u8]) {
 }
 
 fn prompt_command_shell_path_bytes(path: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        return path.as_os_str().as_bytes().to_vec();
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        return path
-            .as_os_str()
-            .encode_wide()
-            .flat_map(u16::to_le_bytes)
-            .collect();
-    }
-    #[cfg(not(any(unix, windows)))]
-    path.to_string_lossy().as_bytes().to_vec()
+    bitfun_services_core::path_utils::path_to_native_bytes(path)
 }
 
 fn prompt_command_shell_kind_id(kind: &ExecCommandShellKind) -> String {
@@ -1169,8 +1154,7 @@ fn workspace_policy_key_from_route(route: &str) -> Option<String> {
         return None;
     }
     let normalized = route.replace('\\', "/");
-    #[cfg(windows)]
-    let normalized = normalized.to_ascii_lowercase();
+    let normalized = bitfun_services_core::path_utils::normalize_path_case(&normalized);
     let mut hasher = Sha256::new();
     hasher.update(normalized.as_bytes());
     Some(format!(

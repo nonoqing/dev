@@ -541,7 +541,6 @@ export const dependencyProfileRules = [
       'notify',
       'rusqlite',
       'serde_yaml',
-      'sha2',
       'which',
       'win32job',
       'windows',

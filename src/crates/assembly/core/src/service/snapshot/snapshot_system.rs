@@ -423,17 +423,7 @@ impl FileSnapshotSystem {
     async fn extract_file_metadata(&self, file_path: &Path) -> SnapshotResult<FileMetadata> {
         let metadata = fs::metadata(file_path)?;
 
-        let permissions = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                Some(metadata.permissions().mode())
-            }
-            #[cfg(not(unix))]
-            {
-                None
-            }
-        };
+        let permissions = bitfun_services_core::path_utils::file_mode(&metadata);
 
         let encoding = self
             .detect_file_encoding(file_path)
@@ -670,13 +660,8 @@ impl FileSnapshotSystem {
         file_path: &Path,
         metadata: &FileMetadata,
     ) -> SnapshotResult<()> {
-        #[cfg(unix)]
-        {
-            if let Some(permissions) = metadata.permissions {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(permissions);
-                fs::set_permissions(file_path, perms)?;
-            }
+        if let Some(permissions) = metadata.permissions {
+            bitfun_services_core::path_utils::set_mode(file_path, permissions)?;
         }
 
         let filetime = filetime::FileTime::from_system_time(metadata.last_modified);

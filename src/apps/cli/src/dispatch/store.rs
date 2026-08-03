@@ -2073,24 +2073,14 @@ fn ensure_private_file(path: &Path) -> Result<()> {
 
 pub(super) fn create_private_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("set private permissions on {}", path.display()))?;
-    }
+    bitfun_services_core::path_utils::set_mode(path, 0o700)
+        .with_context(|| format!("set private permissions on {}", path.display()))?;
     Ok(())
 }
 
 pub(super) fn set_private_file_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("set private permissions on {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
+    bitfun_services_core::path_utils::set_mode(path, 0o600)
+        .with_context(|| format!("set private permissions on {}", path.display()))?;
     Ok(())
 }
 

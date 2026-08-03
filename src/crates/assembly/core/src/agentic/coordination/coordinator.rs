@@ -111,6 +111,7 @@ use bitfun_runtime_ports::{
     ThreadGoalContinuationPlan, ThreadGoalStatus,
 };
 use bitfun_services_core::filesystem::{FileSearchOptions, FileSystemService, FileTreeNode};
+use bitfun_services_core::path_utils::normalize_path_case;
 use bitfun_services_core::workspace_text::{
     normalize_workspace_relative_path, resolve_workspace_relative_entry, WorkspaceEntryKind,
     WorkspaceTextReadError,
@@ -150,10 +151,7 @@ fn comparable_workspace_path(path: &str) -> String {
     while normalized.len() > 1 && normalized.ends_with('/') {
         normalized.pop();
     }
-    #[cfg(windows)]
-    {
-        normalized.make_ascii_lowercase();
-    }
+    normalized = normalize_path_case(&normalized);
     normalized
 }
 

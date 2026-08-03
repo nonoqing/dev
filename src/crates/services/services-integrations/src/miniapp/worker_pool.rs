@@ -1,11 +1,12 @@
 //! JS worker pool: LRU pool, get_or_spawn, call, stop_all, install_deps.
 
+use crate::miniapp::runtime_probe::detect_runtime;
 use crate::miniapp::worker::{JsWorker, SharedMiniAppWorkerEventSink};
 use bitfun_product_domains::miniapp::ports::{
     MiniAppInstallDepsRequest, MiniAppPortError, MiniAppPortErrorKind, MiniAppPortFuture,
     MiniAppRuntimePort,
 };
-use bitfun_product_domains::miniapp::runtime::{detect_runtime, DetectedRuntime};
+use bitfun_product_domains::miniapp::runtime::DetectedRuntime;
 use bitfun_product_domains::miniapp::types::{NodePermissions, NpmDep};
 pub use bitfun_product_domains::miniapp::worker::InstallResult;
 use bitfun_product_domains::miniapp::worker::{

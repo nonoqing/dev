@@ -2,7 +2,7 @@
 
 use crate::external_hooks::service_for;
 use crate::external_sources::normalize_workspace_root;
-use crate::infrastructure::{try_get_path_manager_arc, PathManager};
+use crate::infrastructure::try_get_path_manager_arc;
 use bitfun_product_domains::external_hook_import::{
     ExternalHookImportApplyOutcomeV1, ExternalHookImportApplyRequestV1,
     ExternalHookImportApplyResultV1, ExternalHookImportDispositionV1, ExternalHookImportHandlerV1,
@@ -125,7 +125,9 @@ async fn stores_for(workspace: Option<&Path>) -> ExternalSourceOperationResult<S
                 path_manager
                     .project_runtime_root(workspace)
                     .join("hook-imports")
-                    .join(PathManager::native_path_digest(workspace)),
+                    .join(bitfun_services_core::path_utils::native_path_digest(
+                        workspace,
+                    )),
                 ExternalSourceScope::Project,
             )
             .await?,

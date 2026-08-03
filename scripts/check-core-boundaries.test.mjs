@@ -1850,8 +1850,10 @@ test('services-core capability profiles keep heavy owners out of the empty profi
     'dep:base64',
     'dep:chrono',
     'dep:ignore',
-    'dep:sha2',
     'tokio/fs',
+    'dep:windows',
+    'windows/Win32_Foundation',
+    'windows/Win32_Storage_FileSystem',
   ]);
   assert.deepEqual(profiles.get('local-storage'), [
     'dep:bitfun-core-types',
@@ -1859,7 +1861,6 @@ test('services-core capability profiles keep heavy owners out of the empty profi
     'dep:chrono',
     'dep:fs2',
     'dep:libc',
-    'dep:sha2',
     'dep:windows',
     'tokio/fs',
     'tokio/sync',
@@ -1916,7 +1917,6 @@ test('services-core capability profiles keep heavy owners out of the empty profi
     'globset',
     'ignore',
     'libc',
-    'sha2',
     'which',
     'win32job',
     'windows',

@@ -110,7 +110,7 @@ models-dev = [
     "tokio/time",
     "windows",
 ]
-browser-control = ["anyhow", "bitfun-services-core/process-runtime", "dirs", "reqwest", "reqwest/rustls", "thiserror", "tokio/time"]
+browser-control = ["anyhow", "bitfun-services-core/filesystem", "bitfun-services-core/process-runtime", "dirs", "reqwest", "reqwest/rustls", "thiserror", "tokio/time"]
 canvas-runtime = [
     "dep:bitfun-product-domains",
     "oxc",
@@ -146,6 +146,7 @@ mcp = [
     "async-trait",
     "base64",
     "bitfun-agent-tools",
+    "bitfun-services-core/filesystem",
     "bitfun-services-core/process-runtime",
     "futures",
     "hex",
@@ -239,6 +240,7 @@ remote-connect = [
     "base64",
     "bitfun-agent-tools",
     "dep:bitfun-core-types",
+    "bitfun-services-core/filesystem",
     "bitfun-services-core/local-storage",
     "bitfun-services-core/process-runtime",
     "bitfun-runtime-ports",

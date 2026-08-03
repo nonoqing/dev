@@ -270,7 +270,7 @@ export function runManifestParserSelfTest({
     [
       servicesCoreManifest,
       'filesystem',
-      ['dep:base64', 'dep:chrono', 'dep:ignore', 'dep:sha2', 'tokio/fs'],
+      ['dep:base64', 'dep:chrono', 'dep:ignore', 'tokio/fs', 'dep:windows', 'windows/Win32_Foundation', 'windows/Win32_Storage_FileSystem'],
     ],
     [
       servicesCoreManifest,
@@ -281,7 +281,6 @@ export function runManifestParserSelfTest({
         'dep:chrono',
         'dep:fs2',
         'dep:libc',
-        'dep:sha2',
         'dep:windows',
         'tokio/fs',
         'tokio/sync',
@@ -338,7 +337,7 @@ export function runManifestParserSelfTest({
       ],
     ],
     [servicesCoreManifest, 'session-git', ['local-storage', 'dep:git2']],
-    [servicesCoreManifest, 'workspace-identity', ['dep:dunce', 'dep:sha2']],
+    [servicesCoreManifest, 'workspace-identity', ['dep:dunce']],
     [coreManifest, 'dispatch-store', ['local-storage']],
     [coreManifest, 'filesystem', ['bitfun-services-core/filesystem']],
     [coreManifest, 'local-storage', ['bitfun-services-core/local-storage']],
@@ -945,19 +944,9 @@ export function runManifestParserSelfTest({
     ['notify', ['lsp']],
     ['rusqlite', ['permission']],
     ['serde_yaml', ['markdown', 'workspace-instructions']],
-    [
-      'sha2',
-      [
-        'dispatch-workspace',
-        'filesystem',
-        'local-storage',
-        'runtime-ownership',
-        'workspace-identity',
-      ],
-    ],
     ['which', ['process-runtime']],
     ['win32job', ['process-runtime']],
-    ['windows', ['local-storage', 'process-runtime']],
+    ['windows', ['filesystem', 'local-storage', 'process-runtime']],
     ['zip', ['lsp']],
   ]);
   for (const [dependencyName, ownerFeatures] of expectedServicesCoreOwners) {
@@ -4635,13 +4624,8 @@ export function runManifestParserSelfTest({
       path: 'src/crates/contracts/product-domains/src/miniapp/runtime.rs',
       contracts: [
         'runtime_lookup_order',
-        'detect_runtime',
-        'DefaultMiniAppRuntimeProbe',
         'MiniAppRuntimeProbe',
         'detect_runtime_with_probe',
-        'which::which',
-        'std::fs::read_dir',
-        'create_version_command',
         'candidate_executable_path',
         'versioned_executable_candidate',
       ],

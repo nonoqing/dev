@@ -240,24 +240,9 @@ impl PathManager {
     /// - macOS: ~/Library/Application Support/BitFun/skills/
     /// - Linux: ~/.local/share/BitFun/skills/
     pub fn user_skills_dir(&self) -> PathBuf {
-        if cfg!(target_os = "windows") {
-            dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"))
-                .join("BitFun")
-                .join("skills")
-        } else if cfg!(target_os = "macos") {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join("Library")
-                .join("Application Support")
-                .join("BitFun")
-                .join("skills")
-        } else {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join("BitFun")
-                .join("skills")
-        }
+        bitfun_services_core::path_utils::app_data_dir()
+            .join("BitFun")
+            .join("skills")
     }
 
     /// Get BitFun-managed built-in skills directory under the user skills root.
@@ -484,7 +469,9 @@ impl PathManager {
             dunce::canonicalize(workspace_path).unwrap_or_else(|_| workspace_path.to_path_buf());
         self.project_runtime_root(workspace_path)
             .join("plugin-runtime")
-            .join(Self::native_path_digest(&canonical))
+            .join(bitfun_services_core::path_utils::native_path_digest(
+                &canonical,
+            ))
             .join("trust.json")
     }
 
@@ -553,29 +540,6 @@ impl PathManager {
         let max_prefix_len = MAX_PROJECT_SLUG_LEN.saturating_sub(suffix.len() + 1);
         let prefix = slug[..max_prefix_len].trim_end_matches('-');
         format!("{}-{}", prefix, suffix)
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn native_path_digest(path: &Path) -> String {
-        use std::os::unix::ffi::OsStrExt;
-
-        hex::encode(Sha256::digest(path.as_os_str().as_bytes()))
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn native_path_digest(path: &Path) -> String {
-        use std::os::windows::ffi::OsStrExt;
-
-        let mut hasher = Sha256::new();
-        for unit in path.as_os_str().encode_wide() {
-            hasher.update(unit.to_le_bytes());
-        }
-        hex::encode(hasher.finalize())
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    pub(crate) fn native_path_digest(path: &Path) -> String {
-        hex::encode(Sha256::digest(path.to_string_lossy().as_bytes()))
     }
 
     /// Ensure directory exists
@@ -809,7 +773,9 @@ mod tests {
             pm.project_plugin_trust_file(workspace),
             pm.project_runtime_root(workspace)
                 .join("plugin-runtime")
-                .join(PathManager::native_path_digest(workspace))
+                .join(bitfun_services_core::path_utils::native_path_digest(
+                    workspace
+                ))
                 .join("trust.json")
         );
     }
@@ -853,32 +819,6 @@ mod tests {
 
         assert!(slug.starts_with("e--projects-openbitfun-bitfun"));
         assert_eq!(runtime_root.parent(), Some(pm.projects_root().as_path()));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn plugin_trust_path_distinguishes_lossy_utf16_paths() {
-        use std::os::windows::ffi::OsStringExt;
-
-        let pm = PathManager::default();
-        let first = std::path::PathBuf::from(OsString::from_wide(&[
-            b'C' as u16,
-            b':' as u16,
-            b'\\' as u16,
-            0xd800,
-        ]));
-        let second = std::path::PathBuf::from(OsString::from_wide(&[
-            b'C' as u16,
-            b':' as u16,
-            b'\\' as u16,
-            0xd801,
-        ]));
-
-        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
-        assert_ne!(
-            pm.project_plugin_trust_file(&first),
-            pm.project_plugin_trust_file(&second)
-        );
     }
 
     #[test]

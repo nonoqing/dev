@@ -894,26 +894,12 @@ fn is_terminal_state(state: &str) -> bool {
     matches!(state, "succeeded" | "failed" | "cancelled")
 }
 
-#[cfg(unix)]
 async fn harden_directory_permissions(path: &Path) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await
+    bitfun_services_core::filesystem::set_mode_async(path, 0o700).await
 }
 
-#[cfg(not(unix))]
-async fn harden_directory_permissions(_path: &Path) -> Result<(), std::io::Error> {
-    Ok(())
-}
-
-#[cfg(unix)]
 async fn harden_file_permissions(path: &Path) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
-}
-
-#[cfg(not(unix))]
-async fn harden_file_permissions(_path: &Path) -> Result<(), std::io::Error> {
-    Ok(())
+    bitfun_services_core::filesystem::set_mode_async(path, 0o600).await
 }
 
 #[cfg(test)]

@@ -18,6 +18,9 @@ pub mod subscription_auth;
 #[cfg(feature = "ai-adapter-runtime")]
 pub use ai::AIClient;
 pub use app_paths::{get_path_manager_arc, try_get_path_manager_arc, PathManager, StorageLevel};
+pub use bitfun_services_core::path_utils::{
+    executable_candidates, path_search_key, system_executable_search_paths,
+};
 #[cfg(feature = "runtime-services")]
 pub use events::BackendEventManager;
 #[cfg(feature = "filesystem")]

@@ -30,7 +30,9 @@ fs2 = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 ignore = { workspace = true, optional = true }
 globset = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+dirs = { workspace = true }
 which = { workspace = true, optional = true }
 similar = { workspace = true }
 regex = { workspace = true }
@@ -49,14 +51,13 @@ libc = { workspace = true, optional = true }
 
 [features]
 default = []
-filesystem = ["dep:base64", "dep:chrono", "dep:ignore", "dep:sha2", "tokio/fs"]
+filesystem = ["dep:base64", "dep:chrono", "dep:ignore", "tokio/fs", "dep:windows", "windows/Win32_Foundation", "windows/Win32_Storage_FileSystem"]
 local-storage = [
     "dep:bitfun-core-types",
     "dep:bitfun-events",
     "dep:chrono",
     "dep:fs2",
     "dep:libc",
-    "dep:sha2",
     "dep:windows",
     "tokio/fs",
     "tokio/sync",
@@ -96,10 +97,10 @@ workspace-runtime = [
     "tokio/io-util",
     "tokio/sync",
 ]
-workspace-identity = ["dep:dunce", "dep:sha2"]
-runtime-ownership = ["dep:dunce", "dep:fs2", "dep:sha2"]
+workspace-identity = ["dep:dunce"]
+runtime-ownership = ["dep:dunce", "dep:fs2"]
 permission = ["dep:async-trait", "dep:bitfun-runtime-ports", "dep:rusqlite", "bitfun-runtime-ports/permission"]
-dispatch-workspace = ["dep:anyhow", "dep:sha2"]
+dispatch-workspace = ["dep:anyhow"]
 session-git = ["local-storage", "dep:git2"]
 
 [dev-dependencies]

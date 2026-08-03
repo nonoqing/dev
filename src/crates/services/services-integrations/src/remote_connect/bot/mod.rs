@@ -546,11 +546,7 @@ fn write_bot_persistence_atomic(path: &std::path::Path, json: &[u8]) -> std::io:
         )
     })?;
     std::fs::create_dir_all(parent)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-    }
+    bitfun_services_core::path_utils::set_mode(parent, 0o700)?;
 
     let file_name = path
         .file_name()

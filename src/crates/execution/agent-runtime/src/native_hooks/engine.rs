@@ -19,6 +19,11 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+/// Function pointer for creating the shell `Command` that runs a hook handler.
+/// Injected by Assembly via `AgentHookEngine::with_command_factory` so the
+/// execution layer stays platform-agnostic.
+pub(super) type HookCommandFactory = fn(&str) -> Command;
+
 /// Cap for a single model-visible hook text (reason or context). Larger
 /// output is truncated with a marker, mirroring the Codex output budget.
 pub const MAX_HOOK_MODEL_OUTPUT_BYTES: usize = 10_000;
@@ -30,11 +35,20 @@ const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Default)]
 pub struct AgentHookEngine {
     settings: AgentHookSettings,
+    command_factory: Option<HookCommandFactory>,
 }
 
 impl AgentHookEngine {
     pub fn new(settings: AgentHookSettings) -> Self {
-        Self { settings }
+        Self {
+            settings,
+            command_factory: None,
+        }
+    }
+
+    pub fn with_command_factory(mut self, factory: HookCommandFactory) -> Self {
+        self.command_factory = Some(factory);
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -97,7 +111,7 @@ impl AgentHookEngine {
             command,
             timeout.as_millis()
         );
-        let run = run_hook_command(command, payload_json, cwd, timeout).await;
+        let run = run_hook_command(command, payload_json, cwd, timeout, self.command_factory).await;
         match run {
             HookCommandRun::SpawnFailed(error) => {
                 outcome.warnings.push(format!(
@@ -168,25 +182,19 @@ async fn run_hook_command(
     payload_json: &str,
     cwd: &Path,
     timeout: Duration,
+    command_factory: Option<HookCommandFactory>,
 ) -> HookCommandRun {
-    let mut process = if cfg!(windows) {
-        let mut process = Command::new("cmd");
-        process.arg("/C").arg(command);
-        process
-    } else {
-        let mut process = Command::new("sh");
-        process.arg("-c").arg(command);
-        process
+    let factory = match command_factory {
+        Some(factory) => factory,
+        None => {
+            return HookCommandRun::SpawnFailed(
+                "No hook command factory configured; the assembly layer must inject a platform-specific shell factory via AgentHookEngine::with_command_factory".to_string(),
+            );
+        }
     };
+    let mut process = factory(command);
     if let Some(cwd) = existing_dir(cwd) {
         process.current_dir(cwd);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        process.as_std_mut().creation_flags(CREATE_NO_WINDOW);
     }
     process
         .stdin(Stdio::piped())

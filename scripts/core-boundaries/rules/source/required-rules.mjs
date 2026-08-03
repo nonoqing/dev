@@ -9010,28 +9010,8 @@ export const requiredContentRules = [
   {
     path: 'src/crates/contracts/product-domains/src/miniapp/runtime.rs',
     reason:
-      'product-domains owns MiniApp runtime detection, including the reviewed concrete PATH/fs/version probe',
+      'product-domains owns the MiniApp runtime detection contract and provider-neutral probe facade; concrete probe implementation lives in services-integrations',
     patterns: [
-      {
-        regex: /\bpub fn detect_runtime\b/,
-        message: 'missing MiniApp concrete runtime detector',
-      },
-      {
-        regex: /\bstruct DefaultMiniAppRuntimeProbe\b/,
-        message: 'missing MiniApp default runtime probe owner',
-      },
-      {
-        regex: /\bwhich::which\b/,
-        message: 'missing MiniApp PATH lookup owner',
-      },
-      {
-        regex: /\bstd::fs::read_dir\b/,
-        message: 'missing MiniApp version-manager directory scan owner',
-      },
-      {
-        regex: /\bcreate_version_command\b/,
-        message: 'missing MiniApp version process command owner',
-      },
       {
         regex: /\bpub fn runtime_lookup_order\b/,
         message: 'missing MiniApp runtime lookup order contract',

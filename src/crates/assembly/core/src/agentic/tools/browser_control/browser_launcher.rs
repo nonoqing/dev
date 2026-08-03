@@ -78,7 +78,6 @@ impl BrowserLauncher {
         Self::launch_with_cdp(kind, port).await
     }
 
-    #[cfg(target_os = "macos")]
     pub fn create_cdp_launcher_app(kind: &BrowserKind, port: u16) -> BitFunResult<String> {
         Ok(provider::BrowserLauncher::create_cdp_launcher_app(
             kind, port,

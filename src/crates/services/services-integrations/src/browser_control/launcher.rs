@@ -741,33 +741,38 @@ impl BrowserLauncher {
     }
 
     /// Create a macOS `.app` wrapper that launches the browser with CDP enabled.
-    #[cfg(target_os = "macos")]
     pub fn create_cdp_launcher_app(kind: &BrowserKind, port: u16) -> Result<String> {
-        let app_name = format!("{} Debug", kind);
-        let app_dir = format!("/Applications/{}.app", app_name);
-        let macos_dir = format!("{}/Contents/MacOS", app_dir);
-        let script_path = format!("{}/launch", macos_dir);
-        let exe = Self::browser_executable(kind);
-
-        std::fs::create_dir_all(&macos_dir)
-            .map_err(|e| anyhow!("Failed to create app bundle: {}", e))?;
-
-        let script = format!(
-            "#!/bin/bash\nexec \"{}\" --remote-debugging-port={} \"$@\"\n",
-            exe, port
-        );
-        std::fs::write(&script_path, &script)
-            .map_err(|e| anyhow!("Failed to write launcher script: {}", e))?;
-
-        #[cfg(unix)]
+        #[cfg(not(target_os = "macos"))]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
-                .map_err(|e| anyhow!("Failed to set executable permission: {}", e))?;
+            let _ = (kind, port);
+            return Err(anyhow!(
+                "CDP launcher app creation is only supported on macOS"
+            ));
         }
 
-        let plist = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
+        #[cfg(target_os = "macos")]
+        {
+            let app_name = format!("{} Debug", kind);
+            let app_dir = format!("/Applications/{}.app", app_name);
+            let macos_dir = format!("{}/Contents/MacOS", app_dir);
+            let script_path = format!("{}/launch", macos_dir);
+            let exe = Self::browser_executable(kind);
+
+            std::fs::create_dir_all(&macos_dir)
+                .map_err(|e| anyhow!("Failed to create app bundle: {}", e))?;
+
+            let script = format!(
+                "#!/bin/bash\nexec \"{}\" --remote-debugging-port={} \"$@\"\n",
+                exe, port
+            );
+            std::fs::write(&script_path, &script)
+                .map_err(|e| anyhow!("Failed to write launcher script: {}", e))?;
+
+            bitfun_services_core::path_utils::set_mode(std::path::Path::new(&script_path), 0o755)
+                .map_err(|e| anyhow!("Failed to set executable permission: {}", e))?;
+
+            let plist = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -779,14 +784,15 @@ impl BrowserLauncher {
     <string>com.bitfun.browser-debug-launcher</string>
 </dict>
 </plist>"#,
-            app_name
-        );
+                app_name
+            );
 
-        std::fs::write(format!("{}/Contents/Info.plist", app_dir), &plist)
-            .map_err(|e| anyhow!("Failed to write Info.plist: {}", e))?;
+            std::fs::write(format!("{}/Contents/Info.plist", app_dir), &plist)
+                .map_err(|e| anyhow!("Failed to write Info.plist: {}", e))?;
 
-        info!("Created CDP launcher app at {}", app_dir);
-        Ok(app_dir)
+            info!("Created CDP launcher app at {}", app_dir);
+            Ok(app_dir)
+        }
     }
 }
 

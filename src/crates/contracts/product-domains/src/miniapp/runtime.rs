@@ -6,7 +6,6 @@
 //! selection order.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeKind {
@@ -32,36 +31,6 @@ pub trait MiniAppRuntimeProbe {
     fn is_executable(&self, path: &Path) -> bool;
     fn version_dirs(&self, root: &Path) -> Vec<PathBuf>;
     fn runtime_version(&self, path: &Path) -> Option<String>;
-}
-
-pub fn detect_runtime() -> Option<DetectedRuntime> {
-    detect_runtime_with_probe(&DefaultMiniAppRuntimeProbe)
-}
-
-struct DefaultMiniAppRuntimeProbe;
-
-impl MiniAppRuntimeProbe for DefaultMiniAppRuntimeProbe {
-    fn find_on_path(&self, name: &str) -> Option<PathBuf> {
-        which::which(name).ok()
-    }
-
-    fn home_dir(&self) -> Option<PathBuf> {
-        home_dir()
-    }
-
-    fn is_executable(&self, path: &Path) -> bool {
-        is_executable(path)
-    }
-
-    fn version_dirs(&self, root: &Path) -> Vec<PathBuf> {
-        std::fs::read_dir(root)
-            .map(|read| read.flatten().map(|entry| entry.path()).collect())
-            .unwrap_or_default()
-    }
-
-    fn runtime_version(&self, path: &Path) -> Option<String> {
-        get_version(path).ok()
-    }
 }
 
 pub fn detect_runtime_with_probe<P: MiniAppRuntimeProbe + ?Sized>(
@@ -136,43 +105,6 @@ pub fn version_manager_roots(home: Option<&Path>) -> Vec<PathBuf> {
             .join("fnm")
             .join("node-versions"),
     ]
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
-}
-
-fn get_version(executable: &Path) -> Result<String, std::io::Error> {
-    let output = create_version_command(executable)
-        .arg("--version")
-        .output()?;
-    if output.status.success() {
-        let version = String::from_utf8_lossy(&output.stdout);
-        Ok(version.trim().to_string())
-    } else {
-        Err(std::io::Error::other("version check failed"))
-    }
-}
-
-fn create_version_command(program: &Path) -> Command {
-    let command = Command::new(program);
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let mut command = command;
-        command.creation_flags(CREATE_NO_WINDOW);
-        command
-    }
-
-    #[cfg(not(windows))]
-    command
 }
 
 fn find_executable_with_probe<P: MiniAppRuntimeProbe + ?Sized>(

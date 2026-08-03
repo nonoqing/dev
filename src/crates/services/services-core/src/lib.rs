@@ -27,6 +27,7 @@ pub mod lsp;
 pub mod managed_runtime;
 #[cfg(feature = "markdown")]
 pub mod markdown;
+pub mod path_utils;
 #[cfg(feature = "permission")]
 pub mod permission_store;
 #[cfg(feature = "local-storage")]

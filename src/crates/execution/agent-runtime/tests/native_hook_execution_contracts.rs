@@ -15,6 +15,16 @@ use bitfun_agent_runtime::native_hooks::{
 };
 use serde_json::json;
 use std::path::Path;
+use tokio::process::Command;
+
+/// Test shell factory that runs commands via `sh -c`, matching the Unix-only
+/// fixtures in this test file. Production code injects a platform-aware
+/// factory (`create_shell_command`) from the assembly layer.
+fn test_shell_factory(command: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command);
+    cmd
+}
 
 fn engine(hooks_json: &str) -> AgentHookEngine {
     let (settings, issues) = AgentHookSettings::from_layers(&[AgentHookSettingsLayer {
@@ -23,7 +33,7 @@ fn engine(hooks_json: &str) -> AgentHookEngine {
         bytes: hooks_json.as_bytes().to_vec(),
     }]);
     assert!(issues.is_empty(), "unexpected settings issues: {issues:?}");
-    AgentHookEngine::new(settings)
+    AgentHookEngine::new(settings).with_command_factory(test_shell_factory)
 }
 
 fn pre_tool_use_payload(tool_name: &str) -> AgentHookPayload {

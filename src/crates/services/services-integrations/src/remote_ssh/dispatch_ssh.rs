@@ -1591,14 +1591,8 @@ pub async fn sync_workspace(
 }
 
 pub fn harden_result_directory(path: &std::path::Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("restrict result staging {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
+    bitfun_services_core::path_utils::set_mode(path, 0o700)
+        .with_context(|| format!("restrict result staging {}", path.display()))?;
     Ok(())
 }
 

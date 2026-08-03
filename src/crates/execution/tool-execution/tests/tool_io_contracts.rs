@@ -163,6 +163,7 @@ fn execute_local_glob_keeps_shallowest_matches() {
         search_path: root.clone(),
         pattern: "**/*.rs".to_string(),
         limit: 2,
+        command_creator: None,
     })
     .expect("glob should succeed");
 
@@ -193,6 +194,7 @@ fn execute_local_glob_returns_matches_relative_to_derived_walk_root() {
         search_path: root.clone(),
         pattern: "src/*.rs".to_string(),
         limit: 10,
+        command_creator: None,
     })
     .expect("glob should succeed");
 
@@ -220,6 +222,7 @@ fn execute_local_glob_treats_rg_no_match_as_empty_result() {
         search_path: root.clone(),
         pattern: "empty-dir/**/*".to_string(),
         limit: 10,
+        command_creator: None,
     })
     .expect("empty glob should not fail");
 

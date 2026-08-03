@@ -248,33 +248,10 @@ impl GetFileDiffTool {
     fn workspace_relative_path(file_path: &Path, context: &ToolUseContext) -> Option<String> {
         let workspace_root = context.workspace_root()?;
         file_path.strip_prefix(workspace_root).ok().map(|path| {
-            Self::normalize_workspace_relative_path_text(
+            bitfun_services_core::path_utils::normalize_path_separators(
                 path.to_string_lossy().as_ref(),
-                cfg!(windows),
             )
         })
-    }
-
-    fn normalize_workspace_relative_path_text(path: &str, windows: bool) -> String {
-        if windows {
-            path.replace('\\', "/")
-        } else {
-            path.to_string()
-        }
-    }
-
-    fn is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
-        if metadata.file_type().is_symlink() {
-            return true;
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-            metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-        }
-        #[cfg(not(windows))]
-        false
     }
 
     fn ensure_prepared_target_path(
@@ -978,9 +955,8 @@ impl GetFileDiffTool {
             }
         };
 
-        let relative_path_str = Self::normalize_workspace_relative_path_text(
+        let relative_path_str = bitfun_services_core::path_utils::normalize_path_separators(
             relative_path.to_string_lossy().as_ref(),
-            cfg!(windows),
         );
         debug!("GetFileDiff tool file relative path: {}", relative_path_str);
 
@@ -1006,9 +982,8 @@ impl GetFileDiffTool {
                             )))
                         }
                     };
-                    repo_paths.push(Self::normalize_workspace_relative_path_text(
+                    repo_paths.push(bitfun_services_core::path_utils::normalize_path_separators(
                         repo_relative.to_string_lossy().as_ref(),
-                        cfg!(windows),
                     ));
                 }
                 repo_paths
@@ -1103,7 +1078,7 @@ impl GetFileDiffTool {
                         Ok(metadata) => metadata,
                         Err(error) => return Some(Err(error)),
                     };
-                    if Self::is_symlink_or_reparse_point(&metadata) {
+                    if bitfun_services_core::path_utils::is_symlink_or_reparse_point(&metadata) {
                         return Some(Err(BitFunError::tool(
                         "Prepared Review does not read untracked symlink or reparse-point targets"
                             .to_string(),
@@ -2411,18 +2386,6 @@ mod tests {
         assert_eq!(first["original_content"], "");
         assert_eq!(first["modified_content"], "");
         assert_eq!(second["cursor"], next_cursor);
-    }
-
-    #[test]
-    fn workspace_relative_path_preserves_unix_literal_backslashes() {
-        assert_eq!(
-            GetFileDiffTool::normalize_workspace_relative_path_text(r"src/literal\name.rs", false,),
-            r"src/literal\name.rs"
-        );
-        assert_eq!(
-            GetFileDiffTool::normalize_workspace_relative_path_text(r"src\windows\name.rs", true,),
-            "src/windows/name.rs"
-        );
     }
 
     #[tokio::test]

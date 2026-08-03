@@ -219,13 +219,6 @@ pub async fn browser_control_restart_with_cdp(
 /// Create a macOS .app wrapper for the browser with CDP enabled.
 #[tauri::command]
 pub async fn browser_control_create_launcher() -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        let kind = selected_browser_kind().await?;
-        BrowserLauncher::create_cdp_launcher_app(&kind, DEFAULT_CDP_PORT).map_err(|e| e.to_string())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err("CDP launcher app creation is only supported on macOS".into())
-    }
+    let kind = selected_browser_kind().await?;
+    BrowserLauncher::create_cdp_launcher_app(&kind, DEFAULT_CDP_PORT).map_err(|e| e.to_string())
 }

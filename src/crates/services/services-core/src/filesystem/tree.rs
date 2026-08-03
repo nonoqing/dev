@@ -909,38 +909,7 @@ impl FileTreeService {
     /// Formats a permissions string from already-fetched metadata, avoiding an
     /// extra stat per entry.
     fn permissions_string_from_metadata(metadata: &std::fs::Metadata) -> String {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = metadata.permissions().mode();
-
-            let user = format!(
-                "{}{}{}",
-                if mode & 0o400 != 0 { "r" } else { "-" },
-                if mode & 0o200 != 0 { "w" } else { "-" },
-                if mode & 0o100 != 0 { "x" } else { "-" }
-            );
-            let group = format!(
-                "{}{}{}",
-                if mode & 0o040 != 0 { "r" } else { "-" },
-                if mode & 0o020 != 0 { "w" } else { "-" },
-                if mode & 0o010 != 0 { "x" } else { "-" }
-            );
-            let other = format!(
-                "{}{}{}",
-                if mode & 0o004 != 0 { "r" } else { "-" },
-                if mode & 0o002 != 0 { "w" } else { "-" },
-                if mode & 0o001 != 0 { "x" } else { "-" }
-            );
-
-            format!("{}{}{}", user, group, other)
-        }
-
-        #[cfg(windows)]
-        {
-            let readonly = metadata.permissions().readonly();
-            (if readonly { "r--" } else { "rw-" }).to_string()
-        }
+        crate::path_utils::permissions_string(metadata)
     }
 
     pub async fn search_files(
