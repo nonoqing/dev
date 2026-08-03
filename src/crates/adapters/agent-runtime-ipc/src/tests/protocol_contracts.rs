@@ -1,15 +1,15 @@
 use crate::operation::RuntimeIpcSessionRequirement;
 use crate::{
     serialize_frame_with_limit, InitializeRequest, RuntimeIpcError, RuntimeIpcErrorCode,
-    RuntimeIpcFrame, RuntimeIpcOperation, RuntimeSessionRenameRequest, RuntimeUserAnswersRequest,
-    MAX_REQUEST_FRAME_BYTES, PROTOCOL_VERSION,
+    RuntimeIpcFrame, RuntimeIpcOperation, RuntimeSessionForkRequest, RuntimeSessionRenameRequest,
+    RuntimeUserAnswersRequest, MAX_REQUEST_FRAME_BYTES, PROTOCOL_VERSION,
 };
 
 use bitfun_product_domains::tool_permissions::PermissionReply;
 use bitfun_runtime_ports::{
     AgentContextReloadRequest, AgentContextReloadTarget, AgentDialogTurnRequest,
-    AgentSessionModeUpdateRequest, AgentSessionModelUpdateRequest, AgentSubmissionSource,
-    DialogSubmissionPolicy,
+    AgentSessionCompactionRequest, AgentSessionModeUpdateRequest, AgentSessionModelUpdateRequest,
+    AgentSubmissionSource, DialogSubmissionPolicy,
 };
 use serde_json::{json, Map};
 
@@ -118,7 +118,7 @@ fn protocol_round_trips_the_reviewed_session_model_operation() {
 
 #[test]
 fn protocol_round_trips_the_current_session_rename_operation() {
-    assert_eq!(PROTOCOL_VERSION, 7);
+    assert_eq!(PROTOCOL_VERSION, 9);
 
     let operation = RuntimeIpcOperation::RenameSession {
         request: RuntimeSessionRenameRequest {
@@ -147,6 +147,76 @@ fn protocol_round_trips_the_current_session_rename_operation() {
         decoded.rules().session_requirement,
         RuntimeIpcSessionRequirement::CurrentController
     );
+}
+
+#[test]
+fn protocol_round_trips_fork_as_an_atomic_idle_controller_transition() {
+    let operation = RuntimeIpcOperation::ForkSession {
+        request: RuntimeSessionForkRequest {
+            session_id: "session-1".to_string(),
+            before_turn_id: Some("turn-2".to_string()),
+        },
+    };
+
+    let encoded = serde_json::to_value(&operation).expect("serialize session fork");
+    assert_eq!(
+        encoded,
+        json!({
+            "operation": "fork_session",
+            "request": {
+                "sessionId": "session-1",
+                "beforeTurnId": "turn-2"
+            }
+        })
+    );
+    let decoded: RuntimeIpcOperation =
+        serde_json::from_value(encoded).expect("deserialize session fork");
+
+    assert_eq!(decoded, operation);
+    assert_eq!(decoded.session_id(), Some("session-1"));
+    let rules = decoded.rules();
+    assert_eq!(
+        rules.session_requirement,
+        RuntimeIpcSessionRequirement::CurrentController
+    );
+    assert!(rules.requires_idle);
+    assert!(rules.serializes_session_selection);
+    assert!(rules.side_effecting);
+}
+
+#[test]
+fn protocol_round_trips_manual_compaction_as_an_idle_controller_turn() {
+    let operation = RuntimeIpcOperation::CompactSession {
+        request: AgentSessionCompactionRequest {
+            session_id: "session-1".to_string(),
+            turn_id: "turn-compact-1".to_string(),
+        },
+    };
+
+    let encoded = serde_json::to_value(&operation).expect("serialize compaction");
+    assert_eq!(
+        encoded,
+        json!({
+            "operation": "compact_session",
+            "request": {
+                "sessionId": "session-1",
+                "turnId": "turn-compact-1"
+            }
+        })
+    );
+    let decoded: RuntimeIpcOperation =
+        serde_json::from_value(encoded).expect("deserialize compaction");
+
+    assert_eq!(decoded, operation);
+    assert_eq!(decoded.session_id(), Some("session-1"));
+    let rules = decoded.rules();
+    assert_eq!(
+        rules.session_requirement,
+        RuntimeIpcSessionRequirement::CurrentController
+    );
+    assert!(rules.requires_idle);
+    assert!(!rules.serializes_session_selection);
+    assert!(rules.side_effecting);
 }
 
 #[test]

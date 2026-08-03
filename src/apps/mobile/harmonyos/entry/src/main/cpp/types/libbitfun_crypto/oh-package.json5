@@ -1,0 +1,6 @@
+{
+  "name": "libbitfun_crypto.so",
+  "types": "./Index.d.ts",
+  "version": "1.0.0",
+  "description": "ArkTS declarations for the BitFun crypto NAPI module."
+}

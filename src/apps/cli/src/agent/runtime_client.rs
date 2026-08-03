@@ -13,19 +13,19 @@ use tokio::sync::{broadcast, Mutex};
 
 use bitfun_agent_runtime::sdk::{
     AgentDialogTurnRequest, AgentEventReceiver, AgentLocalCommandTurnRecordRequest, AgentRuntime,
-    AgentSessionCreateRequest, AgentSessionDeleteRequest, AgentSessionForkRequest,
-    AgentSessionForkResult, AgentSessionListRequest, AgentSessionModeUpdateRequest,
-    AgentSessionModelUpdateRequest, AgentSessionRenameRequest, AgentSessionRestoreRequest,
-    AgentSessionUsageRequest, AgentTurnCancellationRequest, AgentTurnSettlementRequest,
-    AgentUserAnswersRequest, PermissionReply, PermissionRequest, PermissionRequestEventReceiver,
-    PortError, PortErrorKind, RuntimeError, SessionTranscript, SessionTranscriptRequest,
-    SessionUsageReport,
+    AgentSessionCompactionRequest, AgentSessionCreateRequest, AgentSessionDeleteRequest,
+    AgentSessionForkBeforeTurnRequest, AgentSessionForkRequest, AgentSessionForkResult,
+    AgentSessionListRequest, AgentSessionModeUpdateRequest, AgentSessionModelUpdateRequest,
+    AgentSessionRenameRequest, AgentSessionRestoreRequest, AgentSessionUsageRequest,
+    AgentTurnCancellationRequest, AgentTurnSettlementRequest, AgentUserAnswersRequest,
+    PermissionReply, PermissionRequest, PermissionRequestEventReceiver, PortError, PortErrorKind,
+    RuntimeError, SessionTranscript, SessionTranscriptRequest, SessionUsageReport,
 };
 use bitfun_agent_runtime_ipc::{
     RuntimeIpcClient, RuntimeIpcClientError, RuntimeIpcClientEvent, RuntimeIpcErrorCode,
     RuntimeIpcEvent, RuntimeIpcOperation, RuntimeIpcOperationResult,
-    RuntimeIpcStreamInvalidationReason, RuntimeSessionRenameRequest, RuntimeSessionRestoreRequest,
-    RuntimeUserAnswersRequest,
+    RuntimeIpcStreamInvalidationReason, RuntimeSessionForkRequest, RuntimeSessionRenameRequest,
+    RuntimeSessionRestoreRequest, RuntimeUserAnswersRequest,
 };
 use bitfun_events::{AgenticEvent, AgenticEventEnvelope};
 use bitfun_runtime_ports::{
@@ -731,6 +731,90 @@ impl CliAgentRuntimeClient {
             .map_err(|error| anyhow::anyhow!(error.into_message()))
     }
 
+    pub(crate) async fn fork_current_session(
+        &self,
+        before_turn_id: Option<&str>,
+    ) -> Result<(
+        AgentSessionSummary,
+        AgentSessionWorkspaceBinding,
+        SessionTranscript,
+    )> {
+        let source_session_id = self.require_session_id().await?;
+        let workspace_path = self.project_workspace_path_string();
+        let (session, transcript) = match &self.backend {
+            CliAgentRuntimeBackend::Embedded(runtime) => {
+                let forked = match before_turn_id {
+                    Some(source_turn_id) => {
+                        runtime
+                            .fork_session_before_turn(AgentSessionForkBeforeTurnRequest {
+                                workspace_path: workspace_path.clone(),
+                                source_session_id,
+                                source_turn_id: source_turn_id.to_string(),
+                                remote_connection_id: None,
+                                remote_ssh_host: None,
+                            })
+                            .await
+                    }
+                    None => {
+                        runtime
+                            .fork_session(AgentSessionForkRequest {
+                                workspace_path: workspace_path.clone(),
+                                source_session_id,
+                                remote_connection_id: None,
+                                remote_ssh_host: None,
+                            })
+                            .await
+                    }
+                }
+                .map_err(|error| anyhow::anyhow!(error.into_message()))?;
+                let restored = runtime
+                    .restore_session(AgentSessionRestoreRequest {
+                        workspace_path: workspace_path.clone(),
+                        session_id: forked.session_id.clone(),
+                        include_internal: false,
+                        remote_connection_id: None,
+                        remote_ssh_host: None,
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.into_message()))?;
+                let transcript = runtime
+                    .read_session_transcript(SessionTranscriptRequest {
+                        session_id: forked.session_id,
+                        turn_id: None,
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.into_message()))?;
+                (restored.session, transcript)
+            }
+            CliAgentRuntimeBackend::Shared(client) => match client
+                .request(RuntimeIpcOperation::ForkSession {
+                    request: RuntimeSessionForkRequest {
+                        session_id: source_session_id,
+                        before_turn_id: before_turn_id.map(str::to_string),
+                    },
+                })
+                .await?
+            {
+                RuntimeIpcOperationResult::SessionForked {
+                    session,
+                    transcript,
+                } => (session, transcript),
+                _ => return Err(unexpected_shared_result("fork_session")),
+            },
+        };
+
+        let binding = self
+            .resolve_session_workspace_binding(&session.session_id, Path::new(&workspace_path))
+            .await?;
+        *self.session_id.lock().await = Some(session.session_id.clone());
+        *self.current_turn_id.lock().await = None;
+        self.shared_pending_permissions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        Ok((session, binding, transcript))
+    }
+
     pub(crate) async fn generate_session_usage_report(
         &self,
         request: AgentSessionUsageRequest,
@@ -937,6 +1021,49 @@ impl CliAgentRuntimeClient {
         tracing::info!("Created core session: {}", id);
 
         Ok(id)
+    }
+
+    pub(crate) async fn start_session_compaction(&self, session_id: &str) -> Result<String> {
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let request = AgentSessionCompactionRequest {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.clone(),
+        };
+        *self.current_turn_id.lock().await = Some(turn_id.clone());
+
+        let submission: Result<String> = async {
+            match &self.backend {
+                CliAgentRuntimeBackend::Embedded(runtime) => {
+                    let accepted = runtime
+                        .start_session_compaction(request)
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error.into_message()))?;
+                    if accepted.session_id != session_id || accepted.turn_id != turn_id {
+                        return Err(anyhow::anyhow!(
+                            "Runtime accepted manual compaction with an unexpected identity"
+                        ));
+                    }
+                    Ok(accepted.turn_id)
+                }
+                CliAgentRuntimeBackend::Shared(client) => match client
+                    .request(RuntimeIpcOperation::CompactSession { request })
+                    .await?
+                {
+                    RuntimeIpcOperationResult::TurnAccepted {
+                        session_id: accepted_session,
+                        turn_id: accepted_turn,
+                    } if accepted_session == session_id && accepted_turn == turn_id => {
+                        Ok(accepted_turn)
+                    }
+                    _ => return Err(unexpected_shared_result("compact_session")),
+                },
+            }
+        }
+        .await;
+        if submission.is_err() {
+            *self.current_turn_id.lock().await = None;
+        }
+        submission
     }
 
     pub(crate) async fn send_message(&self, message: String, agent_type: &str) -> Result<String> {
@@ -1489,6 +1616,44 @@ mod tests {
         assert!(rename.contains("RuntimeIpcOperation::RenameSession"));
         assert!(!rename.contains("serde_json::to_value"));
         assert!(!rename.contains("serde_json::from_value"));
+    }
+
+    #[test]
+    fn session_compaction_uses_direct_runtime_or_private_shared_ipc() {
+        let source = include_str!("runtime_client.rs").replace("\r\n", "\n");
+        let compact = source
+            .split_once("pub(crate) async fn start_session_compaction(")
+            .expect("compaction method")
+            .1
+            .split_once("pub(crate) async fn send_message(")
+            .expect("compaction method boundary")
+            .0;
+
+        assert!(compact.contains("CliAgentRuntimeBackend::Embedded(runtime)"));
+        assert!(compact.contains(".start_session_compaction(request)"));
+        assert!(compact.contains("RuntimeIpcOperation::CompactSession { request }"));
+        assert!(compact.contains("RuntimeIpcOperationResult::TurnAccepted"));
+        assert!(!compact.contains("serde_json::to_value"));
+        assert!(!compact.contains("serde_json::from_value"));
+    }
+
+    #[test]
+    fn interactive_session_fork_uses_the_same_runtime_boundary_in_both_deployments() {
+        let source = include_str!("runtime_client.rs").replace("\r\n", "\n");
+        let fork = source
+            .split_once("pub(crate) async fn fork_current_session(")
+            .expect("interactive fork method")
+            .1
+            .split_once("pub(crate) async fn generate_session_usage_report(")
+            .expect("interactive fork method boundary")
+            .0;
+
+        assert!(fork.contains("CliAgentRuntimeBackend::Embedded(runtime)"));
+        assert!(fork.contains(".fork_session_before_turn("));
+        assert!(fork.contains(".fork_session(AgentSessionForkRequest"));
+        assert!(fork.contains("CliAgentRuntimeBackend::Shared(client)"));
+        assert!(fork.contains("RuntimeIpcOperation::ForkSession"));
+        assert!(fork.contains("RuntimeIpcOperationResult::SessionForked"));
     }
 
     #[test]

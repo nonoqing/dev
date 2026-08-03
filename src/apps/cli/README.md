@@ -80,6 +80,23 @@ only when the current invocation may approve tool requests. Non-interactive `exe
 `AskUserQuestion`; provide all required input in the initial prompt. The hidden legacy `--confirm`
 flag maps to the safe default and should not be used in new automation.
 
+### Interactive session and context commands
+
+The Embedded and Shared TUI use the same session command names:
+
+- `/sessions` opens the session browser; `/resume`, `/continue`, and `/history` are aliases.
+- `/new` starts a fresh conversation session; `/clear` is its OpenCode-compatible alias and does not
+  merely clear the terminal display.
+- `/fork` opens an OpenCode-compatible fork dialog. `Full session` copies through the latest
+  persisted turn; choosing a previous user prompt forks immediately before that turn and copies the
+  prompt into the composer without sending it. Forking requires an idle session.
+- `/status` opens a transient view of current session, runtime, workspace, approval, and latest
+  primary-model request facts observed by this TUI. It is not a cumulative usage report; use
+  `/usage` for cumulative session usage in Embedded TUI.
+- `/compact` compacts the current session's model context without deleting saved conversation
+  history; `/summarize` is its OpenCode-compatible alias. Compaction is available only while the
+  session is idle.
+
 The interactive TUI supports per-session worktree isolation through `/worktree`. Run the command
 without arguments to toggle it, or use `/worktree on`, `/worktree off`, and `/worktree status`.
 The header shows the active branch and `Worktree: on|off`; detached managed worktrees use their base

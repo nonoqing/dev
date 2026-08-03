@@ -2,177 +2,109 @@
 
 [English](./CONTRIBUTING.md)
 
-感谢你对 BitFun 的兴趣！BitFun 是一个由 Rust 与 TypeScript 驱动的多端 AI 编程环境，桌面端/CLI/Server 共享核心逻辑。本指南说明如何高效参与贡献。
+感谢关注 BitFun。BitFun 是 Rust + TypeScript 的多端 AI 编程环境，桌面端 / CLI / Server 共用一套核心逻辑。
+
+本文面向**想参与贡献的人**：怎么搭环境、怎么提 PR、我们欢迎什么。  
+**怎么改代码、架构边界、验证选型**以 [`AGENTS-CN.md`](AGENTS-CN.md) / [`AGENTS.md`](AGENTS.md) 为准——请勿把本文当成又一份命令清单或验证表。
 
 ## 行为准则
 
-请保持尊重、友善与建设性沟通。我们欢迎不同背景与经验的贡献者。
+请保持尊重、友善、就事论事。欢迎不同背景与经验的贡献者。
 
 ## 快速开始
 
 ### 环境准备
 
-- Node.js 22.12+（建议 LTS 版本）
-- pnpm 10.15.0（建议通过 Corepack 使用）
-- Rust toolchain（通过 rustup 安装）
-- 桌面端开发需准备 Tauri 依赖
+- Node.js 22.12+（建议 LTS）
+- pnpm 10.15.0（建议用 Corepack）
+- Rust 工具链（[rustup](https://rustup.rs/)）
+- 做桌面端还需 [Tauri 前置依赖](https://v2.tauri.app/start/prerequisites/)
 
-BitFun 将本地 JavaScript 构建和 CI 统一到 Node.js 22.12+。仓库里的
-GitHub Actions 升级使用的是兼容 Node.js 24 的 action runtime，但项目脚本
-默认仍以 Node.js 22.12+ 为基线，除非局部指南另有说明。从旧 Node.js 版本切换
-后，请重新运行 `pnpm install`。
+本地 JS 构建与 CI 统一以 Node.js 22.12+ 为基线。仓库里的 GitHub Actions 可能用到兼容 Node.js 24 的 action runtime，但项目脚本仍默认按 22.12+ 编写。从更旧的 Node 切过来后，请重新执行 `pnpm install`。
 
-#### Windows：OpenSSL 配置
+#### Windows：OpenSSL
 
-大多数 Windows 贡献者不需要手动配置 OpenSSL。使用 `pnpm run desktop:dev`
-或常规 `desktop:build*` 脚本即可；脚本会在需要时自动引导预编译的 OpenSSL 包。
+多数 Windows 贡献者不必手配 OpenSSL。直接用 `pnpm run desktop:dev` 或常规 `desktop:build*` 即可；脚本会在需要时拉取预编译包。
 
-只有在自动引导失败、准备 CI 环境，或你明确使用 `pnpm run desktop:dev:raw`
-时才需要手动处理。此时运行 `scripts/ci/setup-openssl-windows.ps1`，或将
-`OPENSSL_DIR` 指向预编译的 x64 OpenSSL 目录，并设置 `OPENSSL_STATIC=1`。
+仅在自动拉取失败、准备 CI，或你主动使用 `pnpm run desktop:dev:raw` 时再自行处理：运行 `scripts/ci/setup-openssl-windows.ps1`，或设置指向预编译 x64 的 `OPENSSL_DIR`，并设 `OPENSSL_STATIC=1`。
 
-#### 构建前置检查
-
-当 `cargo check --workspace`、`cargo check -p bitfun-desktop` 或 pnpm 构建
-命令报出难以理解的错误（如 "resource path doesn't exist" 或 sherpa-onnx
-下载失败）时，运行前置检查以识别缺失的依赖并获取可操作的修复命令：
-
-```bash
-pnpm run check:build-prereqs           # 仅检查
-pnpm run check:build-prereqs -- --fix  # 尝试自动修复缺失的前置依赖
-```
-
-检查项包括：
-
-- 缺少 `node_modules`（修复：`pnpm install`）
-- 缺少 `src/mobile-web/dist`（修复：`pnpm run prepare:mobile-web` —
-  bitfun-desktop 的 Tauri 构建脚本将该目录作为资源引用，缺失时
-  `cargo check -p bitfun-desktop` 和 `cargo check --workspace` 会失败）
-- 缺少 sherpa-onnx 预编译库（sherpa-onnx-sys 构建脚本会在构建时从
-  GitHub 下载；若网络连通性差导致下载失败，设置
-  `SHERPA_ONNX_LIB_DIR` 指向 `target/sherpa-onnx-prebuilt/` 下的预编译
-  lib 目录以使用本地副本）
-
-### 安装依赖
+### 安装
 
 ```bash
 pnpm install
 ```
 
-### 常用命令
+### 日常命令
 
 ```bash
-# Desktop（日常开发推荐）
-pnpm run desktop:dev                # 完整热更新：Vite HMR + Rust 自动重编译并重启
-
-# Desktop（轻量预览，无 Rust 自动重编译）
-pnpm run desktop:preview:debug      # 复用预构建二进制 + Vite HMR；Rust 改动需手动重启
-
-# Desktop（生产构建）
-pnpm run desktop:build
-
-# E2E
-pnpm run e2e:test
+pnpm run desktop:dev                # 完整热更新：Vite HMR + Rust 自动重编并重启
+pnpm run desktop:preview:debug      # 预构建二进制 + Vite HMR；Rust 不会自动重编
 ```
 
-> **`desktop:dev` 与 `desktop:preview:debug` 的区别**：`desktop:dev` 运行 `tauri dev`，提供**完整热更新** — 前端改动通过 Vite HMR 即时生效，Rust/后端改动会触发增量重编译并自动重启应用，是日常开发的首选方式。`desktop:preview:debug` 启动预构建的 debug 二进制和 Vite dev server；前端编辑仍可 HMR，但 **Rust 侧改动不会自动重编译** — 需要手动停止并重新运行命令（或使用 `--force-rebuild`）。适合仅需迭代前端代码、或希望跳过 `tauri dev` 初始化以更快冷启动的场景。
+日常开发优先 `desktop:dev`；只迭代前端、或希望冷启动更快时用 `desktop:preview:debug`。
 
-> 完整脚本列表见 [`package.json`](package.json)。agent 专用命令、验证与架构规则见 [`AGENTS.md`](AGENTS.md)。
+完整命令列表：[`docs/development/common-commands-CN.md`](docs/development/common-commands-CN.md)（亦可查 [`package.json`](package.json)）。  
+改完代码后，按 [`docs/development/verification-CN.md`](docs/development/verification-CN.md) 选**最小**检查。  
+架构与编码规范：[`AGENTS-CN.md`](AGENTS-CN.md)。
 
-### 桌面端调试工具
+### 桌面端调试
 
-桌面端 dev 构建会启用 `devtools` Cargo feature。`F12` 打开原生 webview
-DevTools；`Cmd/Ctrl + Shift + I` 切换 BitFun 元素检查器，`Cmd/Ctrl + Shift + J`
-也可以打开原生 DevTools。面向最终用户的 `release` 构建不会启用这些工具。
+dev 构建会打开 `devtools`：`F12` 打开原生 webview DevTools；`Cmd/Ctrl + Shift + I` 切换 BitFun 元素检查器；`Cmd/Ctrl + Shift + J` 也可打开原生 DevTools。面向用户的 `release` 包不带这些工具。
 
-## 代码规范与架构约束
+## 代码规范
 
-架构敏感规则、模块边界和验证矩阵以 [`AGENTS.md`](AGENTS.md) 为准。面向贡献者只需把握：
+架构、模块边界、i18n / 主题 / 日志、宿主与远程规则、验证矩阵，一律以 [`AGENTS-CN.md`](AGENTS-CN.md)（以及就近模块 `AGENTS.md`）为准。PR 对齐那些索引即可，不要把细则再抄进本文。
 
-- 日志只使用英文，并保持必要、可读。
-- 用户可见文案走项目 i18n 流程；不要把 Web UI locale catalog 共享给较小产品形态。
-- shared core 必须保持平台无关；Desktop/Tauri 细节属于 app adapter，并通过类型化能力接口回流；需要事件投递时使用已有生产 transport adapter。
-- Tauri command 使用 `snake_case` 命令名和结构化 `request` 参数。
-- core 拆解、feature 边界、依赖边界和构建提速重构必须遵循
-  `docs/architecture/product-architecture.md`。
-- 功能级规则应放在离代码最近的模块 `AGENTS.md` 中。
+文档如何存放（Spec / Design / Plan）：[`docs/development/docs-governance-CN.md`](docs/development/docs-governance-CN.md)、[`docs/specs/README.md`](docs/specs/README.md)。
 
-## 重点关注的贡献方向
+## 欢迎的贡献方向
 
-1. 贡献好的想法/创意（功能、交互、视觉等），提交 Issue
-   > 欢迎产品经理、UI 设计师通过 PI 快速提交创意，我们会帮助完善开发
-2. 优化 Agent 系统和效果
-3. 对提升系统稳定性和完善基础能力
-4. 扩展生态（Skills、MCP、LSP 插件，或者对某些垂域开发场景的更好支持）
+1. 功能、交互、视觉等想法：提 Issue。产品 / UI 也可经 PI 快速投稿，我们会协助落到可开发状态。
+2. 提升 Agent 系统与整体质量。
+3. 稳定性与基础能力。
+4. 扩展生态（Skills、MCP、LSP 插件，或特定领域场景支持）。
 
-## 贡献流程与 PR 约定
+### 不止功能与修 bug
 
-### 除功能/修复外的贡献方向
-
-我们欢迎不仅限于功能或修复的 PR。示例包括：
-
-| 贡献方向 | 位置/文件 | 示例说明 |
+| 方向 | 位置 | 说明 |
 | --- | --- | --- |
-| Prompts | `src/crates/assembly/core/src/agentic/agents/prompts/` | 新增或优化提示词，并按需更新相关逻辑 |
-| Tools | `src/crates/assembly/core/src/agentic/tools/implementations/`、`src/crates/assembly/core/src/agentic/tools/registry.rs` | 新增工具实现，并在工具注册表中注册 |
-| Subagents | `src/crates/assembly/core/src/agentic/agents/custom_subagents/`、`src/crates/assembly/core/src/agentic/agents/registry.rs` | 新增子代理实现，并在子代理注册表中注册 |
-| 模式贡献 | `src/crates/assembly/core/src/agentic/agents/*_mode.rs`、`src/crates/assembly/core/src/agentic/agents/prompts/*_mode.md`、`src/web-ui/src/locales/*/settings/modes.json` | 新增/优化 Agent 模式（例如 Plan/Debug/Agentic 或自定义模式）的逻辑与提示词，并同步前端模式文案 |
-| Code Agent 与 AIIde 场景指南 | `website/src/docs/` | 补充流程、playbook 与真实场景说明（或从 `README.md` 链接） |
+| Prompts | `src/crates/assembly/core/src/agentic/agents/prompts/` | 新增或优化提示词，并按需改相关逻辑 |
+| Tools | `src/crates/assembly/core/src/agentic/tools/implementations/`、`.../registry.rs` | 实现工具并完成注册 |
+| Subagents | `src/crates/assembly/core/src/agentic/agents/custom_subagents/`、`.../registry.rs` | 实现子代理并完成注册 |
+| 模式 | `*_mode.rs`、`prompts/*_mode.md`、`src/web-ui/src/locales/*/settings/modes.json` | 模式逻辑、提示词与前端文案保持同步 |
+| 场景指南 | `website/src/docs/` | 流程 / playbook（也可从 `README.md` 链过去） |
+
+## 贡献流程与 PR
 
 ### 开始前
 
-- 先开 Issue 说明问题或方案，尤其是较大改动，以避免重复与设计冲突
-- 新功能或 UI 变更建议先讨论设计方向，确保符合产品体验
-- 将 Issue 和 PR 模板作为填写指引；保持 PR 聚焦，必要时说明跳过了哪些验证以及原因。
+- 较大改动先开 Issue，减少重复劳动和设计打架。
+- 新功能或 UI 变更尽早对齐设计方向。
+- 按 Issue / PR 模板填写；PR 保持聚焦；若跳过某些验证，请在描述里说明原因。
 
 ### PR 标题与描述
 
-建议使用 Conventional Commits 风格，便于维护版本记录与自动化流程：
+建议 Conventional Commits：`feat:`、`fix:`、`docs:`、`chore:`、`refactor:`、`test:`。
 
-- `feat:` 新功能
-- `fix:` 修复问题
-- `docs:` 文档变更
-- `chore:` 维护/依赖
-- `refactor:` 重构且不改行为
-- `test:` 测试相关
+UI 改动请附前后对比截图或短录屏。若借助了 AI，请注明，并说明测试深度（未测 / 轻测 / 已测）。
 
-UI 改动请附前后对比截图或短录屏，方便快速评审。
+勿提交：临时 AI prompt、本机绝对路径、草稿产物、配对密钥、token、证书，以及其他无关文件。
 
-如为 AI 辅助产出，请在 PR 中注明并说明测试程度（未测/轻测/已测），便于评审风险。
+### 分支与范围
 
-不要提交临时 AI prompt、本地绝对路径、生成的草稿文件、配对密钥、token、证书或无关产物。PR 应聚焦于本次产品或维护改动。
-
-### 分支管理
-
-**`main` 分支为默认协作分支，并接受特性 PR。** 本仓库欢迎产品经理、开发者使用 AI 生成代码进行快速验证或提交想法，因此 **所有 PR 请直接提交到 `main` 分支**。
-
-### 变更范围
-
-保持 PR 小而聚焦，避免混杂无关改动。
+**请向 `main` 提 PR。** 变更尽量小而专一，不要把无关改动捆在一起。
 
 ## 测试与验证
 
-按改动文件和行为选择最小检查。完整构建和大范围测试由 CI 保护；只有改动影响构建、打包、发布行为，
-或 CI 无法覆盖对应路径时，才在本地运行更重命令。
+按改动文件选**最小**检查。完整矩阵见 [`docs/development/verification-CN.md`](docs/development/verification-CN.md)。宽范围套件交给 CI；只有影响构建 / 打包，或 CI 覆盖不到时，再在本地跑更重的命令。
 
-常见本地检查：
-
-| 改动类型 | 常用验证 |
-| --- | --- |
-| 仓库元信息或 GitHub 配置 | `pnpm run check:repo-hygiene && pnpm run check:github-config && git diff --check` |
-| 前端运行时或 UI | `pnpm run type-check:web`；行为变化时再加最近的 focused test |
-| Mobile web | `pnpm --dir src/mobile-web run type-check` |
-| Rust 共享 runtime 或 services | `cargo check --workspace`；行为变化时再加 focused `cargo test` |
-| Desktop/Tauri 集成 | `cargo check -p bitfun-desktop` |
-| i18n 资源或契约 | 使用 `AGENTS.md` 中匹配的 i18n 验证行 |
-
-UI 改动在有帮助时附截图或短录屏。无法运行相关检查时，在 PR 中说明原因，并提供风险更低的手动验证路径。
+跑不了相关检查时，在 PR 里说明原因，并给出风险更低的手动验证办法。
 
 ## 安全与合规
 
-- 不要提交密钥、Token、证书或任何敏感信息
-- 新增依赖请确认许可证兼容并说明用途
+- 勿提交密钥、Token、证书或敏感信息。
+- 新增依赖请确认许可证兼容，并简述用途。
 
 ## 感谢
 
-每一份贡献都很重要，欢迎提交 Issue、PR 或建议！
+Issue、PR 与建议都很重要，欢迎参与。

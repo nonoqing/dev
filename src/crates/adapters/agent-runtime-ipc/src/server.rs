@@ -463,6 +463,11 @@ async fn run_initialized_connection(
                         *active_turn_id = Some(turn_id.clone());
                         Some(turn_id)
                     }
+                    RuntimeIpcOperation::CompactSession { request } => {
+                        let turn_id = request.turn_id.clone();
+                        *active_turn_id = Some(turn_id.clone());
+                        Some(turn_id)
+                    }
                     _ => None,
                 };
                 let side_effecting = rules.side_effecting;
@@ -543,21 +548,30 @@ async fn run_initialized_connection(
                 let RuntimeIpcFrame::Response { result, .. } = &response else {
                     unreachable!("response frame was just constructed")
                 };
-                if let RuntimeIpcOperationResult::SessionCreated { session } = result {
-                    lease_transition =
-                        match config.leases.switch(connection_id, &session.session_id) {
-                            Ok(transition) => transition,
-                            Err(error) => {
-                                send_runtime_error(
-                                    stream,
-                                    config.request_timeout,
-                                    Some(request_id),
-                                    error,
-                                )
-                                .await?;
-                                continue;
-                            }
-                        };
+                let created_session_id = match result {
+                    RuntimeIpcOperationResult::SessionCreated { session } => {
+                        Some(session.session_id.as_str())
+                    }
+                    RuntimeIpcOperationResult::SessionForked { session, .. } => {
+                        Some(session.session_id.as_str())
+                    }
+                    _ => None,
+                };
+                if let Some(created_session_id) = created_session_id {
+                    lease_transition = match config.leases.switch(connection_id, created_session_id)
+                    {
+                        Ok(transition) => transition,
+                        Err(error) => {
+                            send_runtime_error(
+                                stream,
+                                config.request_timeout,
+                                Some(request_id),
+                                error,
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
                 }
                 let mut event_stream_unavailable = false;
                 if let Some(session_id) = match result {
@@ -565,6 +579,9 @@ async fn run_initialized_connection(
                         Some(session.session_id.as_str())
                     }
                     RuntimeIpcOperationResult::SessionRestored { session, .. } => {
+                        Some(session.session_id.as_str())
+                    }
+                    RuntimeIpcOperationResult::SessionForked { session, .. } => {
                         Some(session.session_id.as_str())
                     }
                     _ => None,
@@ -581,7 +598,7 @@ async fn run_initialized_connection(
                             config.request_timeout,
                             Some(request_id),
                             RuntimeIpcErrorCode::Internal,
-                            "runtime returned a different turn id than the submitted operation",
+                            "runtime returned a different turn id than the accepted turn operation",
                         )
                         .await?;
                         return Err(RuntimeIpcServerError::Disconnected);

@@ -61,24 +61,26 @@ pub use bitfun_runtime_ports::{
     AgentBackgroundResultRequest, AgentDialogTurnPort, AgentDialogTurnRequest,
     AgentInputAttachment, AgentLifecycleDeliveryPort, AgentLocalCommandTurnPort,
     AgentLocalCommandTurnRecordRequest, AgentSessionArchiveRequest,
-    AgentSessionArchiveStateRequest, AgentSessionClosePort, AgentSessionCreateRequest,
+    AgentSessionArchiveStateRequest, AgentSessionClosePort, AgentSessionCompactionPort,
+    AgentSessionCompactionRequest, AgentSessionCompactionResult, AgentSessionCreateRequest,
     AgentSessionCreateResult, AgentSessionDeleteRequest, AgentSessionForkAtTurnRequest,
-    AgentSessionForkPort, AgentSessionForkRequest, AgentSessionForkResult, AgentSessionListRequest,
-    AgentSessionManagementPort, AgentSessionModePort, AgentSessionModeUpdateRequest,
-    AgentSessionModelPort, AgentSessionModelUpdateRequest, AgentSessionRenameRequest,
-    AgentSessionSummary, AgentSessionUsagePort, AgentSessionUsageRequest,
-    AgentSessionWorkspaceBinding, AgentSessionWorkspaceRequest, AgentSubmissionPort,
-    AgentSubmissionRequest, AgentSubmissionResult, AgentSubmissionSource,
-    AgentThreadGoalCreateRequest, AgentThreadGoalDeliveryRequest, AgentThreadGoalGetRequest,
-    AgentThreadGoalManagementPort, AgentThreadGoalUpdateStatusRequest,
-    AgentTransientSessionDiscardRequest, AgentTurnCancellationPort, AgentTurnCancellationRequest,
-    AgentTurnCancellationResult, AgentTurnSettlementPort, AgentTurnSettlementRequest, ClockPort,
-    DialogSubmissionPolicy, DialogSubmitOutcome, FileSystemPort, GitPort, McpCatalogPort,
-    NetworkPort, PermissionAuditRecord, PermissionDelegationContext, PermissionGrant,
-    PermissionGrantKey, PermissionReply, PermissionReplySource, PermissionRequest,
-    PermissionRequestEvent, PermissionRequestSource, PermissionRequestSourceKind, PortError,
-    PortErrorKind, PortResult, RemoteAssistantWorkspaceFacts, RemoteCapabilityPort,
-    RemoteConnectionPort, RemoteProjectionPort, RemoteRecentWorkspaceFacts, RemoteWorkspaceFacts,
+    AgentSessionForkBeforeTurnRequest, AgentSessionForkPort, AgentSessionForkRequest,
+    AgentSessionForkResult, AgentSessionListRequest, AgentSessionManagementPort,
+    AgentSessionModePort, AgentSessionModeUpdateRequest, AgentSessionModelPort,
+    AgentSessionModelUpdateRequest, AgentSessionRenameRequest, AgentSessionSummary,
+    AgentSessionUsagePort, AgentSessionUsageRequest, AgentSessionWorkspaceBinding,
+    AgentSessionWorkspaceRequest, AgentSubmissionPort, AgentSubmissionRequest,
+    AgentSubmissionResult, AgentSubmissionSource, AgentThreadGoalCreateRequest,
+    AgentThreadGoalDeliveryRequest, AgentThreadGoalGetRequest, AgentThreadGoalManagementPort,
+    AgentThreadGoalUpdateStatusRequest, AgentTransientSessionDiscardRequest,
+    AgentTurnCancellationPort, AgentTurnCancellationRequest, AgentTurnCancellationResult,
+    AgentTurnSettlementPort, AgentTurnSettlementRequest, ClockPort, DialogSubmissionPolicy,
+    DialogSubmitOutcome, FileSystemPort, GitPort, McpCatalogPort, NetworkPort,
+    PermissionAuditRecord, PermissionDelegationContext, PermissionGrant, PermissionGrantKey,
+    PermissionReply, PermissionReplySource, PermissionRequest, PermissionRequestEvent,
+    PermissionRequestSource, PermissionRequestSourceKind, PortError, PortErrorKind, PortResult,
+    RemoteAssistantWorkspaceFacts, RemoteCapabilityPort, RemoteConnectionPort,
+    RemoteProjectionPort, RemoteRecentWorkspaceFacts, RemoteWorkspaceFacts,
     RemoteWorkspaceFileRuntimeHost, RemoteWorkspaceKind, RemoteWorkspacePort,
     RemoteWorkspaceRuntimeHost, RemoteWorkspaceUpdate, RuntimeEventEnvelope, RuntimeEventSink,
     RuntimeEventType, RuntimeServiceCapability, RuntimeServicePort, SessionStorageKind,
@@ -139,6 +141,14 @@ impl AgentRuntimeBuilder {
 
     pub fn with_session_mode_port(mut self, port: Arc<dyn AgentSessionModePort>) -> Self {
         self.inner = self.inner.with_session_mode_port(port);
+        self
+    }
+
+    pub fn with_session_compaction_port(
+        mut self,
+        port: Arc<dyn AgentSessionCompactionPort>,
+    ) -> Self {
+        self.inner = self.inner.with_session_compaction_port(port);
         self
     }
 
@@ -461,6 +471,13 @@ impl AgentRuntime {
         self.inner.update_session_mode(request).await
     }
 
+    pub async fn start_session_compaction(
+        &self,
+        request: AgentSessionCompactionRequest,
+    ) -> Result<AgentSessionCompactionResult, RuntimeError> {
+        self.inner.start_session_compaction(request).await
+    }
+
     pub async fn fork_session(
         &self,
         request: AgentSessionForkRequest,
@@ -473,6 +490,13 @@ impl AgentRuntime {
         request: AgentSessionForkAtTurnRequest,
     ) -> Result<AgentSessionForkResult, RuntimeError> {
         self.inner.fork_session_at_turn(request).await
+    }
+
+    pub async fn fork_session_before_turn(
+        &self,
+        request: AgentSessionForkBeforeTurnRequest,
+    ) -> Result<AgentSessionForkResult, RuntimeError> {
+        self.inner.fork_session_before_turn(request).await
     }
 
     pub async fn generate_session_usage(

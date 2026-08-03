@@ -15,6 +15,7 @@ node_modules
 dist
 dist-ssr
 *.local
+*.local.md
 **/dist
 **/dist-ssr
 !src/crates/contracts/product-domains/src/miniapp/builtin/assets/ppt-live/dist/

@@ -7,7 +7,7 @@
 [`plugin-runtime-design.md`](extensions/plugin-runtime-design.md)；跨 GUI/TUI 的产品定制、品牌资源、界面
 布局选择和内置扩展见 [`product-customization-blueprint.md`](product-customization-blueprint.md)；HarmonyOS PC 原生
 CLI/TUI 的目标、问题和风险规约见 [`platform-portability-design.md`](platform-portability-design.md)；跨专题顺序见
-[`../plans/product-architecture-evolution-plan.md`](../plans/product-architecture-evolution-plan.md)。本文只补充
+[`../specs/plans/product-architecture-evolution-plan.md`](../specs/plans/product-architecture-evolution-plan.md)。本文只补充
 CLI 产品入口、配置兼容、TUI 布局消费和 CLI Agent 体验，不重复定义这些文档中的通用契约或内部 ABI。公开
 BitFun Agent SDK 与 Headless CLI 的产品选择、能力一致性和 SDK Host 边界见
 [`agent-sdk-product-architecture.md`](agent-sdk-product-architecture.md)；多个 GUI/TUI/Remote/CLI 实例并存时，交互式 TUI
@@ -256,12 +256,12 @@ Headless CLI 和公开 Agent SDK 都调用同一 Agent Runtime API，但交付�
 
 | 形态 | 默认部署 | 当前 Shared 范围 |
 |---|---|---|
-| 交互式 TUI | Embedded | 显式 `--shared` 后支持 Session list/create/restore、transcript、当前 Session rename/Agent mode/model、声明式上下文 reload、Turn submit/cancel、Permission 和 UserInput |
+| 交互式 TUI | Embedded | 显式 `--shared` 后支持 Session list/create/restore/delete/fork、transcript、当前 Session rename/Agent mode/model、声明式上下文 reload、当前 Session 手动 context compaction、Turn submit/cancel、Permission 和 UserInput |
 | `bitfun exec` / CI | Embedded | 不接受 Shared；保持独立进程、stdout/stderr 和退出码语义 |
 | ACP / SDK Host / GUI / Remote / Peer | 各自既有部署 | 不消费 TUI IPC，也不因本开关改变生命周期 |
 
-Shared TUI 不提供 Session delete/fork、模型目录/默认值、Agent/Subagent 管理、MCP/扩展、账号同步、用量、observer、replay 或 controller transfer；对应入口给出明确的 Embedded 恢复建议，不在 Client 进程初始化第二套 Core owner。
-Shared 模式的斜杠命令、快捷键帮助和底部提示使用同一能力投影：`/rename <name>` 修改当前 Session 名称；`/agent`、Tab 和 Shift+Tab 只切换当前 Session 的 Agent mode；`/models` 只切换当前 Session 的 model；`/reload [skills|instructions]` 刷新下一条消息使用的声明式上下文。Embedded 与 Shared 的 `/help` 都从 Action Registry 展示 `/rename <name>` 和 `/reload`；在 slash menu 中选择 rename 只预填命令并等待用户输入名称。若外部来源使用相同命令名，用户明确选择的 BitFun 命令可完成这一次参数提交，即使偏好保存失败也不会重新弹出来源选择。它们不进入管理页面，也不修改未来 Session 的默认值。其他不支持动作不显示为可执行入口。Session 切换失败保留原控制权；单个连接已有活动 Turn 时拒绝重复提交以及 Session rename/mode/model update，但允许 reload 只影响下一条消息；事件订阅失效后当前视图立即失效并要求重启 Shared TUI。
+Shared TUI 不提供 Session archive、模型目录/默认值、Agent/Subagent 管理、MCP/扩展、账号同步、用量、observer、replay 或通用 controller transfer；对应入口给出明确的 Embedded 恢复建议，不在 Client 进程初始化第二套 Core owner。
+Shared 模式的斜杠命令、快捷键帮助和底部提示使用同一能力投影：OpenCode 对齐的 `/fork` 以 `Full session` 或历史用户提示词选择分支边界；选择提示词时 fork 只复制该 Turn 之前的历史，并把提示词放回 composer 而不自动发送。`/rename <name>` 修改当前 Session 名称；`/agent`、Tab 和 Shift+Tab 只切换当前 Session 的 Agent mode；`/models` 只切换当前 Session 的 model；`/reload [skills|instructions]` 刷新下一条消息使用的声明式上下文；OpenCode 对齐的 `/compact` 及其 `/summarize` alias 以一个可取消的 maintenance Turn 压缩当前 Session 上下文，不增加自创命令或快捷键。该 Turn 与普通对话共用 Session 原子准入，取得所有权后再读取待压缩上下文；权威 transcript 保留完整 tool payload，但重建模型上下文时排除该 maintenance Turn。Embedded 与 Shared 的 `/help` 都从 Action Registry 展示这些入口；在 slash menu 中选择 rename 只预填命令并等待用户输入名称。若外部来源使用相同命令名，用户明确选择的 BitFun 命令可完成这一次参数提交，即使偏好保存失败也不会重新弹出来源选择。它们不进入管理页面，也不修改未来 Session 的默认值。其他不支持动作不显示为可执行入口。Session 切换或 fork 失败保留原控制权；Shared fork 只有在新 Session 与 transcript 的响应可编码后才原子转移 controller。单个连接已有活动 Turn 时拒绝重复提交、fork、manual compaction 以及 Session rename/mode/model update，但允许 reload 只影响下一条消息；事件订阅失效后当前视图立即失效并要求重启 Shared TUI。
 
 部署差异由 CLI Runtime client 封装。Embedded 以 Rust 类型直接调用 `AgentRuntime`，不初始化 IPC 或执行 JSON 编解码；Shared 将同一业务请求映射为一个有界本机 frame，Client/Server 各自只编码一次，再交给同一 Runtime owner。多 TUI 复用一个 Runtime 进程，连接和队列保持有界，不按 TUI 数量复制 Session owner。详细的 4+1 视图、帧上限和并发边界见
 [`agent-runtime-deployment-design.md`](agent-runtime-deployment-design.md)。
