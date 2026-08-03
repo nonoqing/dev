@@ -22,12 +22,6 @@
 
 本地 JS 构建与 CI 统一以 Node.js 22.12+ 为基线。仓库里的 GitHub Actions 可能用到兼容 Node.js 24 的 action runtime，但项目脚本仍默认按 22.12+ 编写。从更旧的 Node 切过来后，请重新执行 `pnpm install`。
 
-#### Windows：OpenSSL
-
-多数 Windows 贡献者不必手配 OpenSSL。直接用 `pnpm run desktop:dev` 或常规 `desktop:build*` 即可；脚本会在需要时拉取预编译包。
-
-仅在自动拉取失败、准备 CI，或你主动使用 `pnpm run desktop:dev:raw` 时再自行处理：运行 `scripts/ci/setup-openssl-windows.ps1`，或设置指向预编译 x64 的 `OPENSSL_DIR`，并设 `OPENSSL_STATIC=1`。
-
 #### 构建前置检查
 
 当 `cargo check --workspace`、`cargo check -p bitfun-desktop` 或 pnpm 构建

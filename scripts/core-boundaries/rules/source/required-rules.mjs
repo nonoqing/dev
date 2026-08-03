@@ -2,6 +2,34 @@
 
 export const requiredContentRules = [
   {
+    path: 'Cargo.toml',
+    reason:
+      'workspace Reqwest defaults must stay transport-only so client owners select one TLS backend explicitly',
+    patterns: [
+      {
+        regex: /^reqwest[ \t]*=[ \t]*\{[ \t]*version[ \t]*=[ \t]*"[^"]+",[ \t]*default-features[ \t]*=[ \t]*false,[ \t]*features[ \t]*=[ \t]*\[[ \t]*"http2",[ \t]*"json",[ \t]*"stream",[ \t]*"multipart",[ \t]*"query",[ \t]*"form"[ \t]*\][ \t]*\}[ \t]*$/m,
+        message:
+          'workspace Reqwest dependency must use the reviewed transport/data feature allowlist',
+      },
+    ],
+  },
+  ...[
+    'src/apps/cli/Cargo.toml',
+    'src/apps/desktop/Cargo.toml',
+    'src/crates/adapters/ai-adapters/Cargo.toml',
+    'src/crates/services/miniapp-market-service/Cargo.toml',
+    'src/crates/services/skin-market-service/Cargo.toml',
+  ].map((path) => ({
+    path,
+    reason: 'first-party Reqwest client owners must select the repository TLS backend explicitly',
+    patterns: [
+      {
+        regex: /^reqwest\s*=\s*\{\s*workspace\s*=\s*true,\s*features\s*=\s*\[\s*"rustls"\s*\]\s*\}/m,
+        message: 'Reqwest client dependency must explicitly enable rustls',
+      },
+    ],
+  })),
+  {
     path: 'src/crates/services/services-core/src/lib.rs',
     reason:
       'services-core must compile concrete service owners only through their declared capability features',
@@ -501,6 +529,29 @@ export const requiredContentRules = [
         regex: /\brequire_capability\b/,
         message: 'missing typed capability requirement check',
       },
+      {
+        regex:
+          /#\[cfg\(any\(test, feature = "test-support"\)\)\]\s*pub mod test_support;/,
+        message: 'runtime-services test support must stay out of ordinary library builds',
+      },
+      {
+        regex: /#\[cfg\(test\)\]\s*mod runtime_services_contracts;/,
+        message: 'runtime-services owner contracts must run in the default crate test target',
+      },
+    ],
+  },
+  {
+    path: 'src/crates/execution/runtime-services/Cargo.toml',
+    reason: 'runtime-services test support must require an explicit dev-only feature',
+    patterns: [
+      {
+        regex: /^test-support\s*=\s*\[\]\s*$/m,
+        message: 'missing empty runtime-services test-support feature',
+      },
+      {
+        regex: /^default\s*=\s*\[\]\s*$/m,
+        message: 'runtime-services default feature set must stay empty',
+      },
     ],
   },
   {
@@ -535,7 +586,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/runtime-services/tests/runtime_services_contracts.rs',
+    path: 'src/crates/execution/runtime-services/src/runtime_services_contracts.rs',
     reason:
       'runtime-services must keep behavior-equivalence contracts for required services, optional capabilities, registry assembly, and remote port exposure',
     patterns: [
@@ -716,7 +767,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/sdk_smoke.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_session_contracts/sdk_smoke.rs',
     reason:
       'agent-runtime SDK smoke tests must prove the facade works with injected fake provider, services, tools, harnesses, and hooks without core',
     patterns: [
@@ -1340,7 +1391,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/deep_review_policy_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_long_horizon_contracts/deep_review_policy_contracts.rs',
     reason:
       'agent-runtime DeepReview owner must keep behavior-equivalence contracts for policy, queue state, tool context, report enrichment, and cache updates',
     patterns: [
@@ -1375,7 +1426,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/prompt_cache_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_definition_contracts/prompt_cache_contracts.rs',
     reason:
       'agent-runtime prompt-cache owner must keep behavior-equivalence contracts for cache identity, expiry, invalidation, and scope-key shape',
     patterns: [
@@ -1669,7 +1720,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/agent_registry_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_definition_contracts/agent_registry_contracts.rs',
     reason:
       'agent-runtime agent registry owner must keep behavior-equivalence contracts for visibility, availability, shared mode config, and source ordering',
     patterns: [
@@ -1807,7 +1858,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/custom_subagent_discovery_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_definition_contracts/custom_subagent_discovery_contracts.rs',
     reason:
       'agent-runtime custom subagent discovery owner must keep behavior-equivalence contracts for BitFun directory priority, foreign directory exclusion, and load errors',
     patterns: [
@@ -1824,7 +1875,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/custom_subagent_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_definition_contracts/custom_subagent_contracts.rs',
     reason:
       'agent-runtime custom subagent owner must keep behavior-equivalence contracts for defaults and front-matter serialization decisions',
     patterns: [
@@ -1910,7 +1961,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/post_call_hook_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_interaction_contracts/post_call_hook_contracts.rs',
     reason:
       'agent-runtime post-call hook owner must keep behavior-equivalence contracts for successful tool-call hook routing',
     patterns: [
@@ -1933,7 +1984,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/post_call_hook_execution_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_interaction_contracts/post_call_hook_execution_contracts.rs',
     reason:
       'agent-runtime post-call hook owner must keep concrete-executor routing behavior-equivalence contracts',
     patterns: [
@@ -2062,7 +2113,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/scheduler_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_session_contracts/scheduler_contracts.rs',
     reason:
       'agent-runtime scheduler owner must keep behavior-equivalence contracts for background delivery, queueing, reply suppression, steering, round injection, and turn outcomes',
     patterns: [
@@ -2198,7 +2249,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/thread_goal_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_long_horizon_contracts/thread_goal_contracts.rs',
     reason:
       'agent-runtime thread-goal owner must keep behavior-equivalence contracts for goal creation, continuation limits, budget reporting, and wire response shape',
     patterns: [
@@ -2226,7 +2277,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/prompt_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_definition_contracts/prompt_contracts.rs',
     reason:
       'agent-runtime prompt owner must keep behavior-equivalence contracts for user context and reminder ordering',
     patterns: [
@@ -2264,7 +2315,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/events_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_session_contracts/events_contracts.rs',
     reason:
       'agent-runtime event owner must keep behavior-equivalence contracts for event wire labels',
     patterns: [
@@ -2414,7 +2465,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/scheduled_job_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_session_contracts/scheduled_job_contracts.rs',
     reason:
       'agent-runtime scheduled-job owner must keep behavior-equivalence contracts for wire shape, retry, coalescing, one-shot, missing-session, and restart recovery semantics',
     patterns: [
@@ -2705,7 +2756,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/execution/agent-runtime/tests/deep_research_contracts.rs',
+    path: 'src/crates/execution/agent-runtime/tests/agent_long_horizon_contracts/deep_research_contracts.rs',
     reason:
       'agent-runtime must keep behavior-equivalence contracts for DeepResearch citation renumbering',
     patterns: [

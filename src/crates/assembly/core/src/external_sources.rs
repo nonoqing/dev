@@ -6933,6 +6933,7 @@ mod tests {
             oauth: None,
             oauth_enabled: None,
             xaa: None,
+            timeouts: Default::default(),
         }
     }
 
@@ -7492,8 +7493,8 @@ mod tests {
             &ConfigUpdateEvent::ModelConfigurationUpdated
         ));
         assert!(!config_update_refreshes_external_model_bindings(
-            &ConfigUpdateEvent::ThemeUpdated {
-                theme_id: "dark".to_string(),
+            &ConfigUpdateEvent::AppearanceUpdated {
+                appearance_id: "bitfun-dark".to_string(),
             }
         ));
     }

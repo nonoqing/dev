@@ -1,5 +1,19 @@
 // Boundary rules for feature assembly and optional dependency ownership.
 
+export const servicesReqwestOwnerFeatures = [
+  'announcement',
+  'browser-control',
+  'debug-log',
+  'mcp',
+  'miniapp-market',
+  'miniapp-runtime',
+  'remote-connect',
+  'remote-ssh-concrete',
+  'review-platform',
+  'speech',
+  'web-tools',
+];
+
 export const optionalDependencyFeatureOwnerRules = [
   {
     crateName: 'services-core',
@@ -21,7 +35,7 @@ export const optionalDependencyFeatureOwnerRules = [
       { depName: 'libc', ownerFeatures: ['local-storage', 'process-runtime'] },
       { depName: 'notify', ownerFeatures: ['lsp'] },
       { depName: 'rusqlite', ownerFeatures: ['permission'] },
-      { depName: 'serde_yaml', ownerFeatures: ['markdown'] },
+      { depName: 'serde_yaml', ownerFeatures: ['markdown', 'workspace-instructions'] },
       {
         depName: 'sha2',
         ownerFeatures: [
@@ -86,8 +100,8 @@ export const optionalDependencyFeatureOwnerRules = [
       { depName: 'indexmap', ownerFeatures: ['product-full'] },
       { depName: 'md5', ownerFeatures: ['product-full'] },
       { depName: 'reqwest', ownerFeatures: ['ai-adapter-runtime', 'product-full'] },
-      { depName: 'rmcp', ownerFeatures: ['product-full'] },
       { depName: 'rusqlite', ownerFeatures: ['product-full'] },
+      { depName: 'semver', ownerFeatures: ['product-full'] },
       { depName: 'serde_yaml', ownerFeatures: ['workspace-runtime'] },
       { depName: 'similar', ownerFeatures: ['product-full'] },
       { depName: 'terminal-core', ownerFeatures: ['terminal'] },
@@ -115,7 +129,7 @@ export const optionalDependencyFeatureOwnerRules = [
       },
       { depName: 'bitfun-agent-runtime', ownerFeatures: ['deep-research', 'hook-import'] },
       { depName: 'bitfun-core-types', ownerFeatures: ['speech'] },
-      { depName: 'bitfun-product-domains', ownerFeatures: ['canvas-runtime', 'function-agents', 'hook-import', 'miniapp-runtime', 'plugin-source'] },
+      { depName: 'bitfun-product-domains', ownerFeatures: ['canvas-runtime', 'function-agents', 'hook-import', 'miniapp-market', 'miniapp-runtime', 'plugin-source'] },
       { depName: 'bitfun-runtime-ports', ownerFeatures: ['git', 'remote-connect', 'remote-ssh', 'remote-ssh-concrete', 'script-tool-runtime'] },
       {
         depName: 'bitfun-services-core',
@@ -131,7 +145,7 @@ export const optionalDependencyFeatureOwnerRules = [
       { depName: 'git2', ownerFeatures: ['git'] },
       { depName: 'hex', ownerFeatures: ['hook-import', 'mcp', 'miniapp-market', 'plugin-source', 'remote-connect'] },
       { depName: 'hostname', ownerFeatures: ['remote-connect'] },
-      { depName: 'image', ownerFeatures: ['remote-connect'] },
+      { depName: 'image', ownerFeatures: ['miniapp-market', 'remote-connect'] },
       { depName: 'local-ip-address', ownerFeatures: ['remote-connect'] },
       { depName: 'libc', ownerFeatures: ['plugin-source'] },
       { depName: 'mac_address', ownerFeatures: ['remote-connect'] },
@@ -143,7 +157,7 @@ export const optionalDependencyFeatureOwnerRules = [
       // remote-ssh-concrete: one-click relay deploy fetches the signed release
       // checksum over HTTPS and verifies it on this device, because the target
       // server has no minisign and no trust root of its own.
-      { depName: 'reqwest', ownerFeatures: ['announcement', 'browser-control', 'debug-log', 'mcp', 'miniapp-market', 'miniapp-runtime', 'remote-connect', 'remote-ssh-concrete', 'review-platform', 'speech', 'web-tools'] },
+      { depName: 'reqwest', ownerFeatures: servicesReqwestOwnerFeatures },
       { depName: 'rmcp', ownerFeatures: ['mcp'] },
       { depName: 'russh', ownerFeatures: ['remote-ssh-concrete'] },
       { depName: 'russh-keys', ownerFeatures: ['remote-ssh-concrete'] },
@@ -175,8 +189,8 @@ export const optionalDependencyFeatureOwnerRules = [
     dependencies: [
       { depName: 'dirs', ownerFeatures: ['miniapp'] },
       { depName: 'log', ownerFeatures: ['function-agents'] },
-      { depName: 'hex', ownerFeatures: ['external-sources', 'miniapp', 'plugin-source'] },
-      { depName: 'sha2', ownerFeatures: ['external-sources', 'miniapp', 'plugin-source'] },
+      { depName: 'hex', ownerFeatures: ['appearance-market', 'external-sources', 'miniapp', 'plugin-source'] },
+      { depName: 'sha2', ownerFeatures: ['appearance-market', 'external-sources', 'miniapp', 'plugin-source'] },
       { depName: 'which', ownerFeatures: ['miniapp'] },
     ],
   },
@@ -261,9 +275,9 @@ export const coreClosedFeatureProfileRules = [
   {
     manifestPath: 'src/crates/services/services-core/Cargo.toml',
     featureName: 'workspace-instructions',
-    requiredFeatureRefs: ['dep:globset', 'tokio/fs', 'tokio/io-util'],
+    requiredFeatureRefs: ['dep:globset', 'dep:serde_yaml', 'tokio/fs', 'tokio/io-util'],
     exact: true,
-    reason: 'services-core workspace-instructions must own declarative instruction glob expansion only',
+    reason: 'services-core workspace-instructions must own declarative instruction discovery, scope parsing, and glob expansion only',
   },
   {
     manifestPath: 'src/crates/services/services-core/Cargo.toml',
@@ -489,6 +503,6 @@ export const ownerCrateFeatureAssemblyRules = [
   {
     manifestPath: 'src/crates/contracts/product-domains/Cargo.toml',
     reason: 'product-domains must keep product domain feature groups explicit and default-light',
-    requiredProductFullFeatures: ['plugin-source', 'miniapp', 'function-agents', 'external-sources'],
+    requiredProductFullFeatures: ['appearance-market', 'plugin-source', 'miniapp', 'function-agents', 'external-sources'],
   },
 ];

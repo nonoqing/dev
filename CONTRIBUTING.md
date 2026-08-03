@@ -22,12 +22,6 @@ Be respectful, kind, and constructive. We welcome contributors of all background
 
 BitFun standardizes local JavaScript builds and CI on Node.js 22.12+. GitHub Actions in this repo may use Node.js 24-compatible action runtimes, but project scripts should run on Node.js 22.12+ unless a narrower local guide says otherwise. After switching from an older Node.js version, rerun `pnpm install`.
 
-#### Windows: OpenSSL
-
-Most Windows contributors do not need to configure OpenSSL manually. Use `pnpm run desktop:dev` or the normal `desktop:build*` scripts; they bootstrap a pre-built OpenSSL package when needed.
-
-Only handle OpenSSL yourself when the bootstrap fails, you are preparing CI, or you intentionally use `pnpm run desktop:dev:raw`. In that case, run `scripts/ci/setup-openssl-windows.ps1`, or set `OPENSSL_DIR` to a pre-built x64 OpenSSL directory and set `OPENSSL_STATIC=1`.
-
 #### Build Prerequisites Check
 
 When `cargo check --workspace`, `cargo check -p bitfun-desktop`, or pnpm build

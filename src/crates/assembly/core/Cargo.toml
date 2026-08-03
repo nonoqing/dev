@@ -40,6 +40,7 @@ dashmap = { workspace = true, optional = true }
 indexmap = { workspace = true, optional = true }
 
 reqwest = { workspace = true, optional = true }
+semver = { workspace = true, optional = true }
 
 # Debug Log HTTP Server
 axum = { workspace = true, optional = true }
@@ -57,15 +58,14 @@ include_dir = { workspace = true, optional = true }
 similar = { workspace = true, optional = true }
 urlencoding = { workspace = true }
 
-# MCP Streamable HTTP client (official rust-sdk)
-rmcp = { workspace = true, features = [
-    "transport-streamable-http-client-reqwest",
-], optional = true }
 # Shared AI protocol adapters
 bitfun-ai-adapters = { path = "../../adapters/ai-adapters", optional = true }
 
 # Lightweight agent stream processing
 bitfun-agent-stream = { path = "../../execution/agent-stream", optional = true }
+
+# Immutable built-in Agent prompt content
+bitfun-agent-content = { path = "../agent-content", optional = true }
 
 # Agent runtime owner contracts
 bitfun-agent-runtime = { path = "../../execution/agent-runtime", optional = true }
@@ -137,6 +137,7 @@ product-full = [
     "canvas-runtime",
     "dep:axum",
     "dep:bitfun-agent-runtime",
+    "dep:bitfun-agent-content",
     "dep:bitfun-agent-stream",
     "dep:bitfun-harness",
     "dep:chrono-tz",
@@ -155,8 +156,8 @@ product-full = [
     "dep:image",
     "dep:md5",
     "dep:reqwest",
+    "dep:semver",
     "dep:rusqlite",
-    "dep:rmcp",
     "dep:similar",
     "dep:tokio-tungstenite",
     "dep:tower-http",
@@ -246,6 +247,7 @@ ssh-remote = [
 ]
 
 [dev-dependencies]
+bitfun-runtime-services = { path = "../../execution/runtime-services", features = ["test-support"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 

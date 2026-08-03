@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 import { SessionFilesBadge } from './SessionFilesBadge';
 import { SessionTreePopover, type SessionTreeSelection } from './SessionTreePopover';
 import { useWorkspaceContext } from '@/infrastructure/contexts/WorkspaceContext';
+import { getAppearanceOverlayHost } from '@/infrastructure/appearance';
 import { computeFixedPopoverPosition } from '@/shared/utils/fixedPopoverViewport';
 import { createReviewPlatformTab } from '@/shared/utils/tabUtils';
 import './FlowChatHeader.scss';
@@ -219,12 +220,11 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
   }, [searchOpenRequest]);
 
   useEffect(() => {
-    if (!hasBackgroundCommands) {
-      setIsBackgroundCommandPanelOpen(false);
-      setIsBackgroundCommandSectionMenuOpen(false);
-      setOpenBackgroundCommandMenuId(null);
-      setBackgroundCommandMenuPosition(null);
-    }
+    if (hasBackgroundCommands) return;
+
+    setIsBackgroundCommandSectionMenuOpen(false);
+    setOpenBackgroundCommandMenuId(null);
+    setBackgroundCommandMenuPosition(null);
   }, [hasBackgroundCommands]);
 
   useEffect(() => {
@@ -251,7 +251,7 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
         leftActions.getBoundingClientRect().width,
         rightActions.getBoundingClientRect().width,
       ));
-      header.style.setProperty('--flowchat-header-side-width', `${sideWidth}px`);
+      header.style.setProperty('--bf-appearance-token-flowchat-header-side-width', `${sideWidth}px`);
     };
 
     updateSideWidth();
@@ -298,7 +298,6 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
   );
 
   const handleToggleBackgroundCommandPanel = () => {
-    if (!hasBackgroundCommands) return;
     setIsBackgroundCommandSectionMenuOpen(false);
     setOpenBackgroundCommandMenuId(null);
     setIsBackgroundCommandPanelOpen(prev => !prev);
@@ -382,7 +381,11 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
     }
 
     return (
-      <div className="flowchat-header__background-command-actions">
+      <div
+        className="flowchat-header__background-command-actions"
+        data-bf-component="flow-chat-header"
+        data-bf-part="backgroundActivity"
+      >
         <IconButton
           className="flowchat-header__background-command-menu-button"
           variant="ghost"
@@ -398,7 +401,9 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
         {openBackgroundCommandMenuId === command.execSessionKey && backgroundCommandMenuPosition ? createPortal(
           <div
             ref={backgroundCommandMenuRef}
-            className="flowchat-header__background-command-menu flowchat-header__background-command-menu--portal"
+            className="flowchat-header__background-command-menu"
+            data-bf-component="flow-chat-header"
+            data-bf-part="commandMenu"
             role="menu"
             aria-label={t('flowChatHeader.backgroundCommandActions')}
             style={backgroundCommandMenuPosition}
@@ -409,6 +414,8 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
                 type="button"
                 role="menuitem"
                 className="flowchat-header__background-command-menu-item"
+                data-bf-component="flow-chat-header"
+                data-bf-part="commandItem"
                 onClick={(event) => handleCommandInputRequest(event, command)}
               >
                 <Keyboard size={12} aria-hidden="true" />
@@ -420,6 +427,8 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
                 type="button"
                 role="menuitem"
                 className="flowchat-header__background-command-menu-item flowchat-header__background-command-menu-item--danger"
+                data-bf-component="flow-chat-header"
+                data-bf-part="commandItem"
                 onClick={(event) => handleCommandStop(event, command)}
                 disabled={command.isStopping === true}
               >
@@ -432,7 +441,7 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
               </button>
             ) : null}
           </div>,
-          document.body,
+          getAppearanceOverlayHost(),
         ) : null}
       </div>
     );
@@ -447,10 +456,17 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
   }
 
   return (
-    <div className="flowchat-header" ref={headerRef}>
+    <div
+      className="flowchat-header"
+      ref={headerRef}
+      data-bf-component="flow-chat-header"
+      data-bf-part="root"
+    >
       <div
         className="flowchat-header__actions flowchat-header__actions--left"
         ref={leftActionsRef}
+        data-bf-component="flow-chat-header"
+        data-bf-part="leftActions"
       >
         <SessionFilesBadge sessionId={sessionId} />
       </div>
@@ -458,6 +474,8 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
       <Tooltip content={currentUserMessage} placement="bottom">
         <div
           className="flowchat-header__message"
+          data-bf-component="flow-chat-header"
+          data-bf-part="message"
           role="button"
           tabIndex={0}
           onClick={onJumpToCurrentTurn}
@@ -471,7 +489,12 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
             turn: currentTurn
           })}
         >
-          <span className="flowchat-header__turn-badge" aria-label={turnBadgeLabel}>
+          <span
+            className="flowchat-header__turn-badge"
+            aria-label={turnBadgeLabel}
+            data-bf-component="flow-chat-header"
+            data-bf-part="turnBadge"
+          >
             <span>{turnBadgeLabel}</span>
           </span>
           <span className="flowchat-header__message-text">
@@ -480,7 +503,12 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
         </div>
       </Tooltip>
 
-      <div className="flowchat-header__actions" ref={rightActionsRef}>
+      <div
+        className="flowchat-header__actions"
+        ref={rightActionsRef}
+        data-bf-component="flow-chat-header"
+        data-bf-part="actions"
+      >
         <SessionTreePopover
           sessionId={sessionId}
           fallbackWorkspacePath={currentWorkspace?.rootPath}
@@ -489,7 +517,12 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
           onCancelSession={onCancelSessionTreeSession}
           t={t}
         />
-        <div className="flowchat-header__background-command-nav" ref={backgroundCommandPanelRef}>
+        <div
+          className="flowchat-header__background-command-nav"
+          ref={backgroundCommandPanelRef}
+          data-bf-component="flow-chat-header"
+          data-bf-part="backgroundActivity"
+        >
           <IconButton
             className={[
               'flowchat-header__background-command-nav-button',
@@ -500,7 +533,6 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
             size="xs"
             onClick={handleToggleBackgroundCommandPanel}
             tooltip={backgroundCommandLabel}
-            disabled={!hasBackgroundCommands}
             aria-label={backgroundCommandLabel}
             aria-expanded={isBackgroundCommandPanelOpen}
             aria-haspopup="dialog"
@@ -517,16 +549,18 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
             </span>
           </IconButton>
 
-          {isBackgroundCommandPanelOpen && hasBackgroundCommands && (
+          {isBackgroundCommandPanelOpen && (
             <div
               className="flowchat-header__background-command-panel"
+              data-bf-component="flow-chat-header"
+              data-bf-part="activityPanel"
               role="dialog"
               aria-label={backgroundCommandLabel}
             >
               <div className="flowchat-header__background-command-panel-header">
                 <span>{backgroundCommandLabel}</span>
                 <div className="flowchat-header__background-command-panel-header-actions">
-                  {onStopAllBackgroundCommands ? (
+                  {hasBackgroundCommands && onStopAllBackgroundCommands ? (
                     <IconButton
                       className="flowchat-header__background-command-menu-button"
                       variant="ghost"
@@ -546,7 +580,9 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
                   {isBackgroundCommandSectionMenuOpen && backgroundCommandMenuPosition ? createPortal(
                     <div
                       ref={backgroundCommandMenuRef}
-                      className="flowchat-header__background-command-menu flowchat-header__background-command-menu--portal"
+                      className="flowchat-header__background-command-menu"
+                      data-bf-component="flow-chat-header"
+                      data-bf-part="commandMenu"
                       role="menu"
                       aria-label={t('flowChatHeader.backgroundCommandActions')}
                       style={backgroundCommandMenuPosition}
@@ -556,18 +592,24 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
                         type="button"
                         role="menuitem"
                         className="flowchat-header__background-command-menu-item flowchat-header__background-command-menu-item--danger"
+                        data-bf-component="flow-chat-header"
+                        data-bf-part="commandItem"
                         onClick={handleCommandStopAll}
                       >
                         <Square size={12} aria-hidden="true" />
                         <span>{t('flowChatHeader.backgroundCommandStopAll')}</span>
                       </button>
                     </div>,
-                    document.body,
+                    getAppearanceOverlayHost(),
                   ) : null}
                 </div>
               </div>
-              <div className="flowchat-header__background-command-list">
-                {displayBackgroundCommands.map((command) => (
+              <div
+                className="flowchat-header__background-command-list"
+                data-bf-component="flow-chat-header"
+                data-bf-part="activitySection"
+              >
+                {hasBackgroundCommands ? displayBackgroundCommands.map((command) => (
                   <div
                     key={command.execSessionKey}
                     className="flowchat-header__background-command-list-item"
@@ -592,7 +634,11 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
                     </button>
                     {renderBackgroundCommandActions(command)}
                   </div>
-                ))}
+                )) : (
+                  <div className="flowchat-header__background-command-empty-state">
+                    {t('flowChatHeader.backgroundCommandEmpty')}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -610,7 +656,13 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
           <GitPullRequest size={14} />
         </IconButton>
         {isSearchOpen ? (
-          <div className="flowchat-header__search" role="search" data-testid="flowchat-header-search-bar">
+          <div
+            className="flowchat-header__search"
+            role="search"
+            data-testid="flowchat-header-search-bar"
+            data-bf-component="flow-chat-header"
+            data-bf-part="search"
+          >
             <Input
               ref={searchInputRef}
               className="flowchat-header__search-field"
@@ -618,7 +670,11 @@ export const FlowChatHeader: React.FC<FlowChatHeaderProps> = ({
               inputSize="small"
               prefix={<Search size={12} className="flowchat-header__search-prefix-icon" aria-hidden="true" />}
               suffix={
-                <span className="flowchat-header__search-inline-controls">
+                <span
+                  className="flowchat-header__search-inline-controls"
+                  data-bf-component="flow-chat-header"
+                  data-bf-part="searchControls"
+                >
                   <span className="flowchat-header__search-count" aria-live="polite">
                     {searchQuery.trim()
                       ? hasNoResults

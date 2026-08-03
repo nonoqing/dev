@@ -46,9 +46,10 @@ native ID、disposition 和稳定 reason code，不包含 command arguments、UR
 
 environment 值或引用、header/authorization、cwd、未知字段和其他 transport 不猜测、不复制、不记录。导入条目始终为
 `enabled: false` 与 `autoStart: false`；local 条目不继承完整父进程环境，只保留 MCP runtime owner 提供的安全环境。
-Codex 的 legacy `name` 是上游忽略的展示字段，不进入导入结果或行为版本；`startup_timeout_sec`、`tool_timeout_sec`、
-`enabled_tools`、`disabled_tools`、approval、environment/scopes/OAuth 与并行调用等运行敏感字段仍按不支持处理，不能因
-静态发现成功而丢弃语义后导入。
+Codex 的 legacy `name` 是上游忽略的展示字段，不进入导入结果或行为版本；`startup_timeout_sec`（含旧
+`startup_timeout_ms`）和 `tool_timeout_sec` 可进入受审批保护的兼容运行投影，但当前原生快照格式不能无损保留它们，
+因此仍会阻断 C0a 导入。`enabled_tools`、`disabled_tools`、approval、environment/scopes/OAuth 与并行调用等运行敏感字段
+仍按不支持处理，不能因静态发现成功而丢弃语义后导入。
 Codex 未显式声明 cwd 时，其兼容运行投影仍会把当前 workspace 作为 effective cwd；现有原生快照格式不会保留这项隐式
 语义，因此 workspace 场景的 local 声明返回“需要设置”，不能以“没有 cwd 字段”为由导入后继承 BitFun 进程目录。
 
@@ -347,6 +348,7 @@ Plugin Host Runtime、LSP，以及通用动态模型路由器。现有 capabilit
 
 | 能力 | OpenCode | Claude Code | Codex | 当前边界 |
 |---|---|---|---|---|
+| Rules / Instructions | 用户级 `AGENTS.md`/Claude fallback 与本地 `instructions` 文件、glob；项目级本地文件、glob | 用户与项目 `CLAUDE.md`、项目导入及 `.claude/rules/**/*.md`；带 `paths` 的规则延迟生效 | 用户与项目 `AGENTS.md` | 无条件来源按既有 user → workspace 顺序进入启动上下文；Claude path-scoped rule 仅在 `Read` 成功返回且工作区相对路径命中后追加到当前会话历史。条件内容在压缩时丢弃，之后需再次命中读取才恢复；不增加 watcher、UI、Plugin Host Runtime 或第二套 Rules owner。Remote 只发现远端工作区来源，不回退控制端用户目录。 |
 | Prompt Command | JSON/JSONC、Markdown 的 prompt、本地文本文件与经审阅 shell 上下文子集 | legacy `commands/**/*.md` 的同一子集；Skills 仍由 Skill 归属模块处理 | 没有稳定、独立于 Skills 的声明式 Command 来源，因此不伪造 provider | `$ARGUMENTS`/位置参数及模板内 workspace 相对 UTF-8 `@file` 可展开；`!shell` 在展示精确计划并重新校验后仅把 stdout 加入 Prompt，参数相关计划不可记住。Claude `allowed-tools` 只校验宿主格式，不授予预批准；动态/绝对/越界文件、指定 Agent/模型等整体受限；Remote 不回退本机执行。 |
 | Subagent | 用户/项目声明的安全子集 | 用户/项目 `agents/**/*.md` 的安全子集 | 用户/项目 `[agents]`、角色文件与安全配置层子集 | prompt、描述、`Default`/真实继承/不透明模型引用、OpenCode 不透明 variant、Claude/Codex reasoning effort 和可表达工具请求进入既有归属模块；无 profile 的模型引用可唯一精确匹配，variant/effort profile 必须由用户绑定到现有配置后才可激活。来源请求、profile、实际模型和解析方式在 Web/TUI 可见。权限、私有 MCP/Hook、reasoning summary/verbosity、采样、并发等没有对应实现的字段仍会阻止或降级。 |
 | MCP | 用户/显式目录/项目配置的安全子集 | user/project/local 原生层的安全子集 | 用户与项目 `config.toml` 原生层的安全子集 | 支持可表达的 stdio 与 HTTPS Streamable HTTP；发现不启动 Server，首次激活继续经 BitFun MCP 审批。OAuth、remote executor、per-tool policy 等不完整语义明确降级。 |
@@ -356,6 +358,7 @@ Plugin Host Runtime、LSP，以及通用动态模型路由器。现有 capabilit
 
 生态原生语义由各 adapter 以契约测试固定，不抽象成全局优先级：
 
+- Claude path-scoped Instructions 只解析 `.claude/rules/**/*.md` front matter 中非空的 `paths` 字符串列表；无效 YAML、绝对路径、URL、父目录逃逸与无效 glob 均 fail closed。用户与项目规则沿用既有 Instructions 发现、去重和渲染预算，执行引擎只识别成功的 `Read`/deferred `Read` 工具结果，不根据 Grep、Edit 或失败结果推测规则生效。规则首次命中后作为带来源身份的内部提醒持久化，同一活动上下文不重复注入。
 - Claude legacy Command 扫描用户与项目 `.claude/commands/**/*.md`，保留 `frontend/component` 到
   `/frontend:component` 的原生命名空间；同层重名无效，遵循 Claude Code 当前“personal 覆盖 project”的 Skill/legacy Command
   规则，同名 Skill 仅通过有界名称索引遮蔽 Command。
@@ -628,8 +631,12 @@ Command；明确缺失且未被标记失败的 Command 是稳定删除。产品�
    扩展。删除项的一次性用户通知/有界墓碑尚未实现，当前行会在稳定重扫后消失；该展示增强
    留待后续 PR，不能改变“先撤 route、禁止新调用”的运行语义。
 8. 外部本地进程不继承 BitFun 的完整父进程环境，只保留启动所需的系统基线和配置显式声明的变量；这仍不是 OS
-   沙箱，进程继续拥有当前用户的文件、网络和子进程权限。Remote 执行域、OpenCode OAuth client 配置、SSE、完整
-   `timeout`/Agent 范围和通用凭据归属模块明确延后。
+   沙箱，进程继续拥有当前用户的文件、网络和子进程权限。OpenCode V1 标量 `timeout`、Codex 启动/工具 timeout 与
+   Claude Code 单服务器执行 timeout 已映射为统一的启动、目录读取、执行阶段事实；Codex `startup_timeout_sec` 同时约束
+   初始化和首次工具目录请求，`tool_timeout_sec` 只约束工具执行。只有来源显式声明时才覆盖现有运行行为；当前使用每次请求的
+   硬期限，不因 progress 重置，超时只停止
+   BitFun 的当前等待，不承诺服务端工作已经取消，也不触发自动重放或重启。Remote 执行域、OpenCode OAuth client 配置、SSE、OpenCode V2 分阶段 timeout
+   配置格式、Agent 范围和通用凭据归属模块明确延后。
 9. 本阶段只把外部 MCP 的 Tool 目录接入 Agent Tool 归属模块。通用 Resource/Prompt/MCP App Desktop 接口不接受无工作区
    上下文的外部 runtime id；外部服务器发起的 roots、sampling 和 elicitation 请求也一律拒绝，防止跨工作区读取或借用
    BitFun 宿主能力。后续若接入这些能力，必须先补独立契约、工作区路由与权限交互，不能复用全局连接绕过当前边界。

@@ -131,7 +131,7 @@ describe('FlowChatHeader', () => {
     });
 
     const header = container.querySelector<HTMLElement>('.flowchat-header');
-    expect(header?.style.getPropertyValue('--flowchat-header-side-width')).toBe('196px');
+    expect(header?.style.getPropertyValue('--bf-appearance-token-flowchat-header-side-width')).toBe('196px');
   });
 
   it('omits the list, previous-turn, and next-turn navigation controls', () => {
@@ -155,6 +155,24 @@ describe('FlowChatHeader', () => {
     const commandContainer = commandButton?.closest('.flowchat-header__background-command-nav');
 
     expect(treeContainer?.nextElementSibling).toBe(commandContainer);
+  });
+
+  it('opens the background command panel when no commands exist', () => {
+    act(() => {
+      root.render(<FlowChatHeader {...createProps()} />);
+    });
+
+    const commandButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="flowchat-header-background-commands"]',
+    );
+    expect(commandButton?.disabled).toBe(false);
+
+    act(() => {
+      commandButton?.click();
+    });
+
+    const panel = container.querySelector('.flowchat-header__background-command-panel');
+    expect(panel?.textContent).toContain('flowChatHeader.backgroundCommandEmpty');
   });
 
   it('renders background command menus in a portal outside the scrollable panel', () => {

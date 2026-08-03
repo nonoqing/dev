@@ -1224,6 +1224,17 @@ pub struct AgentLocalCommandTurnRecordRequest {
     pub metadata: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The authoritative persisted identity assigned to a completed local command Turn.
+///
+/// The product-facing adapter may use this result to reconcile a provisional UI
+/// projection. Catalog data remains owned by the session persistence boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLocalCommandTurnRecordResult {
+    pub turn_id: String,
+    pub storage_turn_index: usize,
+}
+
 /// Starts one user-authored shell command as a normal, model-visible tool turn.
 ///
 /// The caller provides the exact turn identity so interactive adapters can
@@ -2266,6 +2277,138 @@ pub trait AgentSessionManagementPort: Send + Sync {
     ) -> PortResult<Option<AgentSessionWorkspaceBinding>>;
 }
 
+/// Provider-neutral lifecycle facts needed to render a Session lineage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSessionLifecycleStatus {
+    Active,
+    Archived,
+    Completed,
+}
+
+/// Minimal Session facts exposed by the Runtime lineage capability.
+///
+/// This intentionally does not mirror the persistence owner's full metadata
+/// object. Product surfaces receive only the stable facts required for
+/// navigation and status display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionLineageEntry {
+    pub session_id: String,
+    pub session_name: String,
+    pub agent_type: String,
+    pub created_at_ms: u64,
+    pub status: AgentSessionLifecycleStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ssh_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_completion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_user_attention: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionLineageSnapshot {
+    pub root_session_id: String,
+    #[serde(default)]
+    pub sessions: Vec<AgentSessionLineageEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionLineageRequest {
+    pub workspace_path: String,
+    pub anchor_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ssh_host: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionLineageTranscriptRequest {
+    pub workspace_path: String,
+    pub root_session_id: String,
+    pub session_id: String,
+    /// Terminal Turns that an authoritative read must prove settled. This is a
+    /// read-consistency precondition; settlement and transcript construction
+    /// remain Runtime-owned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_settled_turn_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ssh_host: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionLineageInspection {
+    pub transcript: SessionTranscript,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionLineageCancellationRequest {
+    pub workspace_path: String,
+    pub root_session_id: String,
+    pub session_id: String,
+    /// Exact Turn shown as active when the user requested interruption. The
+    /// Runtime rejects a changed target instead of cancelling a newer Turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_active_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<AgentSubmissionSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ssh_host: Option<String>,
+}
+
+/// Authoritative Session-lineage use cases shared by product surfaces.
+///
+/// The provider owns persistence scope, legacy relationship normalization,
+/// membership/order, and consistent transcript reads. Surfaces may project
+/// the returned flat snapshot into their own tree presentation, but must not
+/// recompute lineage facts or read Session files directly.
+#[async_trait::async_trait]
+pub trait AgentSessionLineagePort: Send + Sync {
+    async fn get_session_lineage(
+        &self,
+        request: AgentSessionLineageRequest,
+    ) -> PortResult<Option<AgentSessionLineageSnapshot>>;
+
+    async fn read_lineage_session_transcript(
+        &self,
+        request: AgentSessionLineageTranscriptRequest,
+    ) -> PortResult<AgentSessionLineageInspection>;
+
+    async fn cancel_lineage_session(
+        &self,
+        request: AgentSessionLineageCancellationRequest,
+    ) -> PortResult<AgentTurnCancellationResult>;
+}
+
 /// Narrow workspace-reference use cases shared by first-party interactive
 /// adapters. Implementations keep filesystem search and persisted message
 /// lookup behind the authoritative Session owner.
@@ -2317,7 +2460,7 @@ pub trait AgentLocalCommandTurnPort: Send + Sync {
     async fn record_completed_local_command_turn(
         &self,
         request: AgentLocalCommandTurnRecordRequest,
-    ) -> PortResult<()>;
+    ) -> PortResult<AgentLocalCommandTurnRecordResult>;
 }
 
 #[async_trait::async_trait]
@@ -2502,6 +2645,13 @@ pub struct AgentTurnCancellationRequest {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_timeout_ms: Option<u64>,
+    /// Whether a Session-wide cancellation also cascades into descendants.
+    #[serde(default = "default_cancel_descendants")]
+    pub cancel_descendants: bool,
+}
+
+fn default_cancel_descendants() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3811,6 +3961,7 @@ mod tests {
             requester_session_id: Some("requester_session".to_string()),
             reason: Some("user_cancelled".to_string()),
             wait_timeout_ms: Some(1500),
+            cancel_descendants: false,
         };
 
         let json = serde_json::to_value(request).expect("serialize cancel request");
@@ -3821,6 +3972,114 @@ mod tests {
         assert_eq!(json["requesterSessionId"], "requester_session");
         assert_eq!(json["reason"], "user_cancelled");
         assert_eq!(json["waitTimeoutMs"], 1500);
+        assert_eq!(json["cancelDescendants"], false);
+
+        let legacy = serde_json::from_value::<AgentTurnCancellationRequest>(serde_json::json!({
+            "sessionId": "session_1"
+        }))
+        .expect("deserialize legacy cancel request");
+        assert!(legacy.cancel_descendants);
+    }
+
+    #[test]
+    fn session_lineage_contracts_serialize_provider_neutral_facts() {
+        let request = AgentSessionLineageRequest {
+            workspace_path: "/workspace/project".to_string(),
+            anchor_session_id: "child_1".to_string(),
+            remote_connection_id: Some("conn-1".to_string()),
+            remote_ssh_host: Some("host-1".to_string()),
+        };
+        let snapshot = AgentSessionLineageSnapshot {
+            root_session_id: "root_1".to_string(),
+            sessions: vec![AgentSessionLineageEntry {
+                session_id: "child_1".to_string(),
+                session_name: "Research".to_string(),
+                agent_type: "explore".to_string(),
+                created_at_ms: 1_000,
+                status: AgentSessionLifecycleStatus::Completed,
+                active_turn_id: None,
+                parent_session_id: Some("root_1".to_string()),
+                parent_tool_call_id: Some("tool_1".to_string()),
+                subagent_type: Some("explore".to_string()),
+                workspace_path: Some("/workspace/project".to_string()),
+                remote_connection_id: Some("conn-1".to_string()),
+                remote_ssh_host: Some("host-1".to_string()),
+                unread_completion: Some("interrupted".to_string()),
+                needs_user_attention: None,
+            }],
+        };
+        let transcript_request = AgentSessionLineageTranscriptRequest {
+            workspace_path: "/workspace/project".to_string(),
+            root_session_id: "root_1".to_string(),
+            session_id: "child_1".to_string(),
+            required_settled_turn_ids: vec!["turn-terminal".to_string()],
+            remote_connection_id: None,
+            remote_ssh_host: None,
+        };
+        let cancellation_request = AgentSessionLineageCancellationRequest {
+            workspace_path: "/workspace/project".to_string(),
+            root_session_id: "root_1".to_string(),
+            session_id: "child_1".to_string(),
+            expected_active_turn_id: Some("turn-live".to_string()),
+            source: Some(AgentSubmissionSource::Cli),
+            reason: Some("user_cancelled".to_string()),
+            wait_timeout_ms: Some(5_000),
+            remote_connection_id: None,
+            remote_ssh_host: None,
+        };
+        let inspection = AgentSessionLineageInspection {
+            transcript: SessionTranscript {
+                session_id: "child_1".to_string(),
+                messages: Vec::new(),
+            },
+            active_turn_id: Some("turn-live".to_string()),
+        };
+
+        let request_json = serde_json::to_value(request).expect("serialize lineage request");
+        let snapshot_json = serde_json::to_value(snapshot).expect("serialize lineage snapshot");
+        let transcript_json =
+            serde_json::to_value(transcript_request).expect("serialize transcript request");
+        let cancellation_json =
+            serde_json::to_value(cancellation_request).expect("serialize cancellation request");
+        let inspection_json =
+            serde_json::to_value(inspection).expect("serialize lineage inspection");
+
+        assert_eq!(request_json["anchorSessionId"], "child_1");
+        assert_eq!(request_json["remoteConnectionId"], "conn-1");
+        assert_eq!(snapshot_json["rootSessionId"], "root_1");
+        assert_eq!(snapshot_json["sessions"][0]["status"], "completed");
+        assert_eq!(snapshot_json["sessions"][0]["parentSessionId"], "root_1");
+        assert_eq!(
+            snapshot_json["sessions"][0]["unreadCompletion"],
+            "interrupted"
+        );
+        assert_eq!(transcript_json["sessionId"], "child_1");
+        assert_eq!(transcript_json["rootSessionId"], "root_1");
+        assert_eq!(
+            transcript_json["requiredSettledTurnIds"],
+            serde_json::json!(["turn-terminal"])
+        );
+        let legacy_transcript =
+            serde_json::from_value::<AgentSessionLineageTranscriptRequest>(serde_json::json!({
+                "workspacePath": "/workspace/project",
+                "rootSessionId": "root_1",
+                "sessionId": "child_1"
+            }))
+            .expect("deserialize precondition-free lineage transcript request");
+        assert!(legacy_transcript.required_settled_turn_ids.is_empty());
+        assert_eq!(cancellation_json["source"], "cli");
+        assert_eq!(cancellation_json["waitTimeoutMs"], 5_000);
+        assert_eq!(cancellation_json["expectedActiveTurnId"], "turn-live");
+        let legacy_cancellation =
+            serde_json::from_value::<AgentSessionLineageCancellationRequest>(serde_json::json!({
+                "workspacePath": "/workspace/project",
+                "rootSessionId": "root_1",
+                "sessionId": "child_1"
+            }))
+            .expect("deserialize pre-exact-target lineage cancellation request");
+        assert!(legacy_cancellation.expected_active_turn_id.is_none());
+        assert_eq!(inspection_json["transcript"]["sessionId"], "child_1");
+        assert_eq!(inspection_json["activeTurnId"], "turn-live");
     }
 
     #[test]
@@ -3981,6 +4240,20 @@ mod tests {
         assert_eq!(json["metadata"]["kind"], "usage_report");
         assert!(json.get("turnKind").is_none());
         assert!(json.get("modelVisible").is_none());
+    }
+
+    #[test]
+    fn local_command_turn_result_serializes_authoritative_identity() {
+        let result = AgentLocalCommandTurnRecordResult {
+            turn_id: "turn_8".to_string(),
+            storage_turn_index: 7,
+        };
+
+        let json = serde_json::to_value(result).expect("serialize local command turn result");
+
+        assert_eq!(json["turnId"], "turn_8");
+        assert_eq!(json["storageTurnIndex"], 7);
+        assert_eq!(json.as_object().map(|value| value.len()), Some(2));
     }
 
     #[test]
