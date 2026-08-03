@@ -57,6 +57,7 @@ safe_enum!(AgentModeClass {
     Review => "review",
     Goal => "goal",
     Custom => "custom",
+    Other => "other",
 });
 safe_enum!(TurnTrigger {
     User => "user",
@@ -307,8 +308,8 @@ macro_rules! observation {
             }
 
             pub fn finish(self, facts: $finish) {
-                let (attributes, status, _) = facts.into_parts();
-                self.0.finish(attributes, status);
+                let (attributes, status, severity) = facts.into_parts();
+                self.0.finish_terminal(attributes, status, severity);
             }
         }
     };
@@ -329,30 +330,6 @@ observation!(StartupObservation, StartupFinishFacts);
 
 pub fn start_startup(telemetry: &Telemetry) -> StartupObservation {
     StartupObservation(telemetry.start_operation(OperationKind::Startup, Vec::new, None))
-}
-
-pub fn record_startup_terminal(
-    telemetry: &Telemetry,
-    facts: StartupFinishFacts,
-    duration_ms: Option<u64>,
-) {
-    if !telemetry.accepts_terminal_projection() {
-        return;
-    }
-    let (mut attributes, _, severity) = facts.into_parts();
-    if let Some(duration_ms) = duration_ms {
-        attributes.push(Attribute::u64(
-            "bitfun.app.startup.duration_ms",
-            duration_ms,
-        ));
-    }
-    telemetry.record_terminal_projection(
-        OperationKind::Startup,
-        attributes,
-        duration_ms,
-        severity,
-        None,
-    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,36 +368,6 @@ pub fn start_session(
         },
         parent,
     ))
-}
-
-pub fn record_session_terminal(
-    telemetry: &Telemetry,
-    start: SessionStartFacts,
-    facts: SessionFinishFacts,
-    duration_ms: Option<u64>,
-) {
-    if !telemetry.accepts_terminal_projection() {
-        return;
-    }
-    let (mut attributes, _, severity) = facts.into_parts();
-    attributes.extend([
-        Attribute::enumeration("bitfun.agent.session.operation", start.operation.as_str()),
-        Attribute::enumeration("bitfun.agent.session.class", start.session_class.as_str()),
-        Attribute::boolean("bitfun.agent.session.remote", start.remote),
-    ]);
-    if let Some(duration_ms) = duration_ms {
-        attributes.push(Attribute::u64(
-            "bitfun.agent.session.duration_ms",
-            duration_ms,
-        ));
-    }
-    telemetry.record_terminal_projection(
-        OperationKind::Session,
-        attributes,
-        duration_ms,
-        severity,
-        None,
-    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,27 +462,6 @@ pub fn start_turn_with_relation(
     ))
 }
 
-pub fn record_turn_terminal(
-    telemetry: &Telemetry,
-    facts: TurnFinishFacts,
-    duration_ms: Option<u64>,
-) {
-    if !telemetry.accepts_terminal_projection() {
-        return;
-    }
-    let (mut attributes, _, severity) = facts.into_parts();
-    if let Some(duration_ms) = duration_ms {
-        attributes.push(Attribute::u64("bitfun.agent.turn.duration_ms", duration_ms));
-    }
-    telemetry.record_terminal_projection(
-        OperationKind::Turn,
-        attributes,
-        duration_ms,
-        severity,
-        None,
-    );
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoundStartFacts {
     pub index_bucket: IndexBucket,
@@ -585,30 +511,6 @@ pub fn start_round(
         },
         parent,
     ))
-}
-
-pub fn record_round_terminal(
-    telemetry: &Telemetry,
-    facts: RoundFinishFacts,
-    duration_ms: Option<u64>,
-) {
-    if !telemetry.accepts_terminal_projection() {
-        return;
-    }
-    let (mut attributes, _, severity) = facts.into_parts();
-    if let Some(duration_ms) = duration_ms {
-        attributes.push(Attribute::u64(
-            "bitfun.agent.round.duration_ms",
-            duration_ms,
-        ));
-    }
-    telemetry.record_terminal_projection(
-        OperationKind::Round,
-        attributes,
-        duration_ms,
-        severity,
-        None,
-    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -760,44 +662,6 @@ pub fn start_inference(
     ))
 }
 
-pub fn record_inference_terminal(
-    telemetry: &Telemetry,
-    start: Option<InferenceStartFacts>,
-    facts: InferenceFinishFacts,
-    duration_ms: Option<u64>,
-) {
-    if !telemetry.accepts_terminal_projection() {
-        return;
-    }
-    let (mut attributes, _, severity) = facts.into_parts();
-    if let Some(start) = start {
-        attributes.extend([
-            Attribute::enumeration(
-                "bitfun.inference.provider_class",
-                start.provider_class.as_str(),
-            ),
-            Attribute::enumeration("bitfun.inference.model_class", start.model_class.as_str()),
-            Attribute::enumeration(
-                "bitfun.inference.protocol_class",
-                start.protocol_class.as_str(),
-            ),
-        ]);
-    }
-    if let Some(duration_ms) = duration_ms {
-        attributes.push(Attribute::u64(
-            "bitfun.inference.request.duration_ms",
-            duration_ms,
-        ));
-    }
-    telemetry.record_terminal_projection(
-        OperationKind::Inference,
-        attributes,
-        duration_ms,
-        severity,
-        None,
-    );
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InferenceUsageFacts {
     pub provider_class: ProviderClass,
@@ -837,16 +701,6 @@ pub fn record_inference_usage(telemetry: &Telemetry, facts: InferenceUsageFacts)
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolStartFacts {
-    pub tool_class: ToolClass,
-    pub source_class: ToolSourceClass,
-    pub tool_kind: ToolKind,
-    pub parallel: bool,
-    pub remote: bool,
-    pub background: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolIdentityFacts {
     pub tool_class: ToolClass,
     pub source_class: ToolSourceClass,
     pub tool_kind: ToolKind,
@@ -929,41 +783,6 @@ pub fn start_tool(
     ))
 }
 
-pub fn record_tool_terminal(
-    telemetry: &Telemetry,
-    identity: Option<ToolIdentityFacts>,
-    facts: ToolFinishFacts,
-    duration_ms: Option<u64>,
-) {
-    if !telemetry.accepts_terminal_projection() {
-        return;
-    }
-    let (mut attributes, _, severity) = facts.into_parts();
-    if let Some(identity) = identity {
-        attributes.extend([
-            Attribute::enumeration("bitfun.tool.class", identity.tool_class.as_str()),
-            Attribute::enumeration("bitfun.tool.source_class", identity.source_class.as_str()),
-            Attribute::enumeration("bitfun.tool.kind", identity.tool_kind.as_str()),
-            Attribute::boolean("bitfun.tool.execute.parallel", identity.parallel),
-            Attribute::boolean("bitfun.tool.execute.remote", identity.remote),
-            Attribute::boolean("bitfun.tool.execute.background", identity.background),
-        ]);
-    }
-    if let Some(duration_ms) = duration_ms {
-        attributes.push(Attribute::u64(
-            "bitfun.tool.execute.duration_ms",
-            duration_ms,
-        ));
-    }
-    telemetry.record_terminal_projection(
-        OperationKind::Tool,
-        attributes,
-        duration_ms,
-        severity,
-        None,
-    );
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PermissionEvaluateStartFacts {
     pub intent_count_bucket: CountBucket,
@@ -1019,8 +838,8 @@ impl PermissionEvaluationObservation {
     }
 
     pub fn finish(self, facts: PermissionFinishFacts) {
-        let (attributes, status, _) = facts.evaluation_parts();
-        self.0.finish(attributes, status);
+        let (attributes, status, severity) = facts.evaluation_parts();
+        self.0.finish_terminal(attributes, status, severity);
     }
 }
 
@@ -1044,38 +863,6 @@ pub fn start_permission_evaluation(
     ))
 }
 
-pub fn record_permission_evaluation_terminal(
-    telemetry: &Telemetry,
-    start: PermissionEvaluateStartFacts,
-    facts: PermissionFinishFacts,
-    duration_ms: Option<u64>,
-) {
-    if !telemetry.accepts_terminal_projection() {
-        return;
-    }
-    let (mut attributes, _, severity) = facts.evaluation_parts();
-    attributes.extend([
-        Attribute::enumeration(
-            "bitfun.permission.evaluate.intent_count_bucket",
-            start.intent_count_bucket.as_str(),
-        ),
-        Attribute::boolean("bitfun.permission.evaluate.delegated", start.delegated),
-    ]);
-    if let Some(duration_ms) = duration_ms {
-        attributes.push(Attribute::u64(
-            "bitfun.permission.evaluate.duration_ms",
-            duration_ms,
-        ));
-    }
-    telemetry.record_terminal_projection(
-        OperationKind::PermissionEvaluate,
-        attributes,
-        duration_ms,
-        severity,
-        None,
-    );
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PermissionConfirmationStartFacts {
     pub request_count_bucket: CountBucket,
@@ -1091,8 +878,8 @@ impl PermissionConfirmationObservation {
     }
 
     pub fn finish(self, facts: PermissionFinishFacts) {
-        let (attributes, status, _) = facts.confirmation_parts();
-        self.0.finish(attributes, status);
+        let (attributes, status, severity) = facts.confirmation_parts();
+        self.0.finish_terminal(attributes, status, severity);
     }
 }
 
@@ -1117,41 +904,6 @@ pub fn start_permission_confirmation(
         },
         parent,
     ))
-}
-
-pub fn record_permission_confirmation_terminal(
-    telemetry: &Telemetry,
-    start: PermissionConfirmationStartFacts,
-    facts: PermissionFinishFacts,
-    duration_ms: Option<u64>,
-) {
-    if !telemetry.accepts_terminal_projection() {
-        return;
-    }
-    let (mut attributes, _, severity) = facts.confirmation_parts();
-    attributes.extend([
-        Attribute::enumeration(
-            "bitfun.permission.confirmation.request_count_bucket",
-            start.request_count_bucket.as_str(),
-        ),
-        Attribute::boolean(
-            "bitfun.permission.confirmation.auto_approve",
-            start.auto_approve,
-        ),
-    ]);
-    if let Some(duration_ms) = duration_ms {
-        attributes.push(Attribute::u64(
-            "bitfun.permission.confirmation.duration_ms",
-            duration_ms,
-        ));
-    }
-    telemetry.record_terminal_projection(
-        OperationKind::PermissionConfirmation,
-        attributes,
-        duration_ms,
-        severity,
-        None,
-    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1222,35 +974,6 @@ pub fn start_compression(
     ))
 }
 
-pub fn record_compression_terminal(
-    telemetry: &Telemetry,
-    start: CompressionStartFacts,
-    facts: CompressionFinishFacts,
-    duration_ms: Option<u64>,
-) {
-    if !telemetry.accepts_terminal_projection() {
-        return;
-    }
-    let (mut attributes, _, severity) = facts.into_parts();
-    attributes.push(Attribute::enumeration(
-        "bitfun.agent.compression.trigger",
-        start.trigger.as_str(),
-    ));
-    if let Some(duration_ms) = duration_ms {
-        attributes.push(Attribute::u64(
-            "bitfun.agent.compression.duration_ms",
-            duration_ms,
-        ));
-    }
-    telemetry.record_terminal_projection(
-        OperationKind::Compression,
-        attributes,
-        duration_ms,
-        severity,
-        None,
-    );
-}
-
 pub const fn index_bucket(index: usize) -> IndexBucket {
     match index.saturating_add(1) {
         1 => IndexBucket::One,
@@ -1281,11 +1004,22 @@ pub const fn count_bucket(count: usize) -> CountBucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InMemorySink, PolicySnapshot, TelemetryLevel, ValidatedRecord};
+    use crate::{AttributeValue, InMemorySink, PolicySnapshot, TelemetryLevel, ValidatedRecord};
     use std::sync::Arc;
 
+    fn enum_attribute<'a>(record: &'a ValidatedRecord, key: &str) -> Option<&'a str> {
+        record
+            .attributes()
+            .iter()
+            .find(|attribute| attribute.key() == key)
+            .and_then(|attribute| match attribute.value() {
+                AttributeValue::Enum(value) => Some(*value),
+                _ => None,
+            })
+    }
+
     #[test]
-    fn span_finish_emits_trace_only() {
+    fn owner_finish_emits_trace_and_one_terminal_projection() {
         let sink = Arc::new(InMemorySink::default());
         let (telemetry, _) = Telemetry::build(
             PolicySnapshot::new(TelemetryLevel::Diagnostic)
@@ -1314,8 +1048,173 @@ mod tests {
             deleted_lines: None,
         });
         let records = sink.records();
-        assert_eq!(records.len(), 1);
-        assert!(matches!(records[0], ValidatedRecord::Span(_)));
+        assert_eq!(records.len(), 4);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record, ValidatedRecord::Span(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record, ValidatedRecord::Metric(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record, ValidatedRecord::Log(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn owner_finish_preserves_inference_classes_and_error_type_across_signals() {
+        let sink = Arc::new(InMemorySink::default());
+        let (telemetry, _) = Telemetry::build(
+            PolicySnapshot::new(TelemetryLevel::Diagnostic)
+                .with_trace_sample_ratio(1.0)
+                .with_success_log_sample_ratio(1.0),
+            sink.clone(),
+        );
+        start_inference(
+            &telemetry,
+            InferenceStartFacts {
+                provider_class: ProviderClass::AnthropicCompatible,
+                model_class: ModelClass::Code,
+                protocol_class: InferenceProtocolClass::Messages,
+            },
+            None,
+        )
+        .finish(InferenceFinishFacts {
+            completion: CompletionFacts::failed(SafeErrorType::RateLimited),
+            attempt_bucket: AttemptBucket::Two,
+            status_class: Some(StatusClass::ClientError),
+            retryable: Some(true),
+            ttft_ms: None,
+            input_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            cache_read_tokens: None,
+        });
+
+        let records = sink.records();
+        assert_eq!(records.len(), 4);
+        for record in &records {
+            assert_eq!(enum_attribute(record, "error.type"), Some("rate_limited"));
+            assert_eq!(
+                enum_attribute(record, "bitfun.inference.provider_class"),
+                Some("anthropic_compatible")
+            );
+            assert_eq!(
+                enum_attribute(record, "bitfun.inference.model_class"),
+                Some("code")
+            );
+        }
+        for record in records
+            .iter()
+            .filter(|record| matches!(record, ValidatedRecord::Span(_) | ValidatedRecord::Log(_)))
+        {
+            assert_eq!(
+                enum_attribute(record, "bitfun.inference.protocol_class"),
+                Some("messages")
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_log_uses_owner_span_context_only_when_trace_exists() {
+        let diagnostic_sink = Arc::new(InMemorySink::default());
+        let (diagnostic, _) = Telemetry::build(
+            PolicySnapshot::new(TelemetryLevel::Diagnostic)
+                .with_trace_sample_ratio(1.0)
+                .with_success_log_sample_ratio(1.0),
+            diagnostic_sink.clone(),
+        );
+        let observation = start_turn(
+            &diagnostic,
+            TurnStartFacts {
+                mode_class: AgentModeClass::Agentic,
+                trigger: TurnTrigger::User,
+                remote: false,
+                subagent: false,
+            },
+            None,
+        );
+        let expected = observation.context().unwrap().span_context();
+        observation.finish(TurnFinishFacts {
+            completion: CompletionFacts::completed(),
+            finish_reason: Some(FinishReasonClass::Completed),
+            round_count: Some(1),
+            tool_count: Some(0),
+            first_result_ms: None,
+            modified_file_count: None,
+            added_lines: None,
+            deleted_lines: None,
+        });
+        let diagnostic_records = diagnostic_sink.records();
+        let span = diagnostic_records
+            .iter()
+            .find_map(|record| match record {
+                ValidatedRecord::Span(span) => Some(span),
+                _ => None,
+            })
+            .expect("turn span");
+        let log = diagnostic_records
+            .iter()
+            .find_map(|record| match record {
+                ValidatedRecord::Log(log) => Some(log),
+                _ => None,
+            })
+            .expect("turn terminal log");
+        assert_eq!(span.context(), expected);
+        assert_eq!(log.span_context(), Some(expected));
+
+        let basic_sink = Arc::new(InMemorySink::default());
+        let (basic, _) = Telemetry::build(
+            PolicySnapshot::new(TelemetryLevel::Basic).with_success_log_sample_ratio(1.0),
+            basic_sink.clone(),
+        );
+        let observation = start_turn(
+            &basic,
+            TurnStartFacts {
+                mode_class: AgentModeClass::Other,
+                trigger: TurnTrigger::User,
+                remote: false,
+                subagent: false,
+            },
+            None,
+        );
+        assert!(observation.context().is_none());
+        observation.finish(TurnFinishFacts {
+            completion: CompletionFacts::failed(SafeErrorType::Timeout),
+            finish_reason: Some(FinishReasonClass::Error),
+            round_count: None,
+            tool_count: None,
+            first_result_ms: None,
+            modified_file_count: None,
+            added_lines: None,
+            deleted_lines: None,
+        });
+        let basic_records = basic_sink.records();
+        assert!(basic_records
+            .iter()
+            .all(|record| !matches!(record, ValidatedRecord::Span(_))));
+        for record in &basic_records {
+            assert_eq!(enum_attribute(record, "error.type"), Some("timeout"));
+        }
+        let log = basic_records
+            .iter()
+            .find_map(|record| match record {
+                ValidatedRecord::Log(log) => Some(log),
+                _ => None,
+            })
+            .expect("basic terminal log");
+        assert_eq!(log.span_context(), None);
     }
 
     #[test]
@@ -1390,27 +1289,27 @@ mod tests {
             PolicySnapshot::new(TelemetryLevel::Basic).with_success_log_sample_ratio(1.0),
             sink.clone(),
         );
-        record_tool_terminal(
+        start_tool(
             &telemetry,
-            Some(ToolIdentityFacts {
+            ToolStartFacts {
                 tool_class: ToolClass::BuiltIn,
                 source_class: ToolSourceClass::BuiltIn,
                 tool_kind: ToolKind::Filesystem,
                 parallel: false,
                 remote: false,
                 background: false,
-            }),
-            ToolFinishFacts {
-                completion: CompletionFacts::completed(),
-                queue_ms: Some(2),
-                preflight_ms: Some(3),
-                confirmation_ms: None,
-                execution_ms: Some(5),
-                failure_source: None,
-                exit_status_class: Some(ExitStatusClass::Success),
             },
-            Some(10),
-        );
+            None,
+        )
+        .finish(ToolFinishFacts {
+            completion: CompletionFacts::completed(),
+            queue_ms: Some(2),
+            preflight_ms: Some(3),
+            confirmation_ms: None,
+            execution_ms: Some(5),
+            failure_source: None,
+            exit_status_class: Some(ExitStatusClass::Success),
+        });
         let records = sink.records();
         assert_eq!(records.len(), 3);
         assert_eq!(
@@ -1445,13 +1344,9 @@ mod tests {
             },
             None,
         );
-        record_startup_terminal(
-            &telemetry,
-            StartupFinishFacts {
-                completion: CompletionFacts::completed(),
-            },
-            Some(1),
-        );
+        start_startup(&telemetry).finish(StartupFinishFacts {
+            completion: CompletionFacts::completed(),
+        });
         assert!(!sink.is_empty());
 
         control.apply(PolicySnapshot::new(TelemetryLevel::Off));
@@ -1466,13 +1361,9 @@ mod tests {
             added_lines: Some(0),
             deleted_lines: Some(0),
         });
-        record_startup_terminal(
-            &telemetry,
-            StartupFinishFacts {
-                completion: CompletionFacts::completed(),
-            },
-            Some(1),
-        );
+        start_startup(&telemetry).finish(StartupFinishFacts {
+            completion: CompletionFacts::completed(),
+        });
 
         assert!(sink.is_empty());
         assert!(!telemetry.is_enabled());

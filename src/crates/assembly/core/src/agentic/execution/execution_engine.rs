@@ -27,9 +27,7 @@ use crate::agentic::image_analysis::{
     build_multimodal_message_with_images, process_image_contexts_for_provider, ImageContextData,
     ImageLimits,
 };
-use crate::agentic::observability::{
-    agent_mode_class, completion_from_error, finish_reason_class, turn_trigger,
-};
+use crate::agentic::observability::{completion_from_error, finish_reason_class, turn_trigger};
 use crate::agentic::round_preempt::RoundInjectionKind;
 use crate::agentic::session::{
     ContextCompressor, SessionManager, TokenAnchor, TokenAnchorInput, UserContextCacheIdentity,
@@ -439,6 +437,11 @@ struct CompressionTriggerBudget {
     safety_reserve_tokens: usize,
 }
 
+struct ResolvedPrimaryModelContext {
+    facts: PrimaryModelFacts,
+    telemetry_model_class: bitfun_observability::domains::ModelClass,
+}
+
 // Fields are declared in reverse parameter order so dropping an unconsumed
 // input preserves the previous function-parameter drop order. Call sites keep
 // struct literal fields in the original evaluation order.
@@ -460,6 +463,7 @@ struct FinalizeRoundInput<'a> {
     messages: &'a [Message],
     prepended_reminders: &'a [&'a str],
     primary_model_facts: &'a PrimaryModelFacts,
+    telemetry_model_class: bitfun_observability::domains::ModelClass,
     execution_context_vars: &'a HashMap<String, String>,
     round_group_id: Option<String>,
     round_number: usize,
@@ -1050,7 +1054,7 @@ impl ExecutionEngine {
         ai_client_model: &str,
         ai_client_api_format: &str,
         unavailable_log_message: &str,
-    ) -> PrimaryModelFacts {
+    ) -> ResolvedPrimaryModelContext {
         let config_service = get_global_config_service().await.ok();
         if let Some(service) = config_service {
             let ai_config: crate::service::config::types::AIConfig =
@@ -1075,10 +1079,29 @@ impl ExecutionEngine {
                     || matches!(m.category, ModelCategory::Multimodal)
             });
 
-            PrimaryModelFacts::new(resolved_id, ai_client_model, ai_client_api_format, supports)
+            let telemetry_model_class = crate::agentic::observability::model_class_from_category(
+                model_cfg.map(|model| &model.category),
+            );
+            ResolvedPrimaryModelContext {
+                facts: PrimaryModelFacts::new(
+                    resolved_id,
+                    ai_client_model,
+                    ai_client_api_format,
+                    supports,
+                ),
+                telemetry_model_class,
+            }
         } else {
             warn!("{}", unavailable_log_message);
-            PrimaryModelFacts::new(model_id, ai_client_model, ai_client_api_format, false)
+            ResolvedPrimaryModelContext {
+                facts: PrimaryModelFacts::new(
+                    model_id,
+                    ai_client_model,
+                    ai_client_api_format,
+                    false,
+                ),
+                telemetry_model_class: bitfun_observability::domains::ModelClass::Other,
+            }
         }
     }
 
@@ -1683,6 +1706,7 @@ impl ExecutionEngine {
             model_config_id: input.primary_model_facts.model_id.clone(),
             effective_model_name: input.ai_client.config.model.clone(),
             primary_model_facts: input.primary_model_facts.clone(),
+            telemetry_model_class: input.telemetry_model_class,
             agent_type: input.agent_type,
             context_vars: input.execution_context_vars.clone(),
             permission_constraints: input.permission_constraints,
@@ -2254,6 +2278,7 @@ impl ExecutionEngine {
             "Config service unavailable, assuming compression model is text-only for image input gating",
         )
         .await;
+        let primary_model_facts = primary_model_facts.facts;
         let resolved_primary_model_id = primary_model_facts.model_id.clone();
         let primary_supports_image_understanding = primary_model_facts.supports_image_inputs;
 
@@ -3094,10 +3119,26 @@ impl ExecutionEngine {
             .workspace
             .as_ref()
             .is_some_and(|workspace| workspace.is_remote());
+        let agent_registry = get_agent_registry();
+        agent_registry
+            .load_custom_agents(
+                context
+                    .workspace
+                    .as_ref()
+                    .map(|workspace| workspace.root_path()),
+            )
+            .await;
+        let mode_class = agent_registry.observability_mode_class(
+            &agent_type,
+            context
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.root_path()),
+        );
         let turn_observation = start_turn_with_relation(
             &self.telemetry,
             TurnStartFacts {
-                mode_class: agent_mode_class(&agent_type),
+                mode_class,
                 trigger: turn_trigger(is_subagent, is_remote),
                 remote: is_remote,
                 subagent: is_subagent,
@@ -3180,14 +3221,6 @@ impl ExecutionEngine {
         // Things that remain constant in a dialog turn: 1.agent, 2.system prompt, 3.tools, 4.ai client
         // 1. Get current agent
         let agent_registry = get_agent_registry();
-        agent_registry
-            .load_custom_agents(
-                context
-                    .workspace
-                    .as_ref()
-                    .map(|workspace| workspace.root_path()),
-            )
-            .await;
         let current_agent = agent_registry
             .get_agent(
                 &agent_type,
@@ -3309,6 +3342,8 @@ impl ExecutionEngine {
             "Config service unavailable, assuming primary model is text-only for image input gating",
         )
         .await;
+        let telemetry_model_class = primary_model_facts.telemetry_model_class;
+        let primary_model_facts = primary_model_facts.facts;
         let resolved_primary_model_id = primary_model_facts.model_id.clone();
         let primary_supports_image_understanding = primary_model_facts.supports_image_inputs;
 
@@ -3864,6 +3899,7 @@ impl ExecutionEngine {
                 model_config_id: model_id.clone(),
                 effective_model_name: ai_client.config.model.clone(),
                 primary_model_facts: primary_model_facts.clone(),
+                telemetry_model_class,
                 agent_type: agent_type.clone(),
                 context_vars: round_context_vars,
                 permission_constraints: tool_policy.permission_constraints.clone(),
@@ -4598,6 +4634,7 @@ impl ExecutionEngine {
                         round_group_id: finalize_round_group_id.clone(),
                         execution_context_vars: &execution_context_vars,
                         primary_model_facts: &primary_model_facts,
+                        telemetry_model_class,
                         prepended_reminders: &finalize_prepended_reminders,
                         messages: &messages,
                         reminder_text: finalize_reminder,
@@ -4634,6 +4671,7 @@ impl ExecutionEngine {
                             round_group_id: finalize_round_group_id.clone(),
                             execution_context_vars: &execution_context_vars,
                             primary_model_facts: &primary_model_facts,
+                            telemetry_model_class,
                             prepended_reminders: &finalize_prepended_reminders,
                             messages: &messages,
                             reminder_text: finalize_reminder,

@@ -767,7 +767,6 @@ dependencies = [
  "bitfun-core-types",
  "bitfun-events",
  "bitfun-harness",
- "bitfun-observability",
  "bitfun-runtime-ports",
  "bitfun-runtime-services",
  "dashmap",

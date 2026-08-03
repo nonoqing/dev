@@ -261,12 +261,12 @@ impl Telemetry {
         }
         let policy = self.policy_snapshot();
         if policy.level != TelemetryLevel::Diagnostic || !policy.signals.traces {
-            return TelemetrySpan::disabled(self.clone(), kind, revision);
+            return TelemetrySpan::terminal_only(self.clone(), kind, revision, attributes());
         }
         let (context, parent_span_id, links, budget) = match relation {
             TraceRelation::Root => {
                 let Some(budget) = self.inner.admission.new_operation() else {
-                    return self.rejected_span(kind, revision);
+                    return self.rejected_span(kind, revision, attributes());
                 };
                 let span = crate::SpanContext::root(policy.trace_sample_ratio);
                 (
@@ -282,7 +282,7 @@ impl Telemetry {
                     .clone()
                     .or_else(|| self.inner.admission.new_operation())
                 else {
-                    return self.rejected_span(kind, revision);
+                    return self.rejected_span(kind, revision, attributes());
                 };
                 let parent_span = parent.span_context();
                 let span = crate::SpanContext::child(parent_span);
@@ -295,7 +295,7 @@ impl Telemetry {
             }
             TraceRelation::Link(link) => {
                 let Some(budget) = self.inner.admission.new_operation() else {
-                    return self.rejected_span(kind, revision);
+                    return self.rejected_span(kind, revision, attributes());
                 };
                 let span = crate::SpanContext::root(policy.trace_sample_ratio);
                 (
@@ -307,7 +307,7 @@ impl Telemetry {
             }
         };
         if !context.span_context().is_sampled() || !self.inner.admission.admit_span(&budget) {
-            return TelemetrySpan::disabled(self.clone(), kind, revision);
+            return TelemetrySpan::terminal_only(self.clone(), kind, revision, attributes());
         }
         TelemetrySpan {
             telemetry: self.clone(),
@@ -323,16 +323,22 @@ impl Telemetry {
             budget: Some(budget),
             span_slot_active: true,
             active: true,
+            terminal_active: kind != OperationKind::InferenceAttempt,
             closed: false,
         }
     }
 
-    fn rejected_span(&self, kind: OperationKind, revision: u64) -> TelemetrySpan {
+    fn rejected_span(
+        &self,
+        kind: OperationKind,
+        revision: u64,
+        attributes: Vec<Attribute>,
+    ) -> TelemetrySpan {
         self.inner
             .diagnostics
             .rejected
             .fetch_add(1, Ordering::Relaxed);
-        TelemetrySpan::disabled(self.clone(), kind, revision)
+        TelemetrySpan::terminal_only(self.clone(), kind, revision, attributes)
     }
 
     pub(crate) fn accepts_terminal_projection(&self) -> bool {
@@ -343,15 +349,15 @@ impl Telemetry {
         policy.signals.metrics || policy.signals.logs
     }
 
-    pub(crate) fn record_terminal_projection(
+    fn record_terminal_projection_at_revision(
         &self,
         kind: OperationKind,
         attributes: Vec<Attribute>,
         duration_ms: Option<u64>,
         severity: Severity,
         span_context: Option<ObservationContext>,
+        revision: u64,
     ) {
-        let revision = self.inner.policy_revision.load(Ordering::Acquire);
         let schema = operation_schema(kind);
         let metric_attributes = metric_attributes(kind, &attributes);
         self.emit_if_allowed(
@@ -601,6 +607,7 @@ pub struct TelemetrySpan {
     budget: Option<Arc<OperationBudget>>,
     span_slot_active: bool,
     active: bool,
+    terminal_active: bool,
     closed: bool,
 }
 
@@ -632,6 +639,32 @@ impl TelemetrySpan {
             budget: None,
             span_slot_active: false,
             active: false,
+            terminal_active: false,
+            closed: false,
+        }
+    }
+
+    fn terminal_only(
+        telemetry: Telemetry,
+        kind: OperationKind,
+        policy_revision: u64,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            telemetry,
+            kind,
+            schema: operation_schema(kind),
+            policy_revision,
+            started_at: Instant::now(),
+            started_unix_nanos: 0,
+            context: None,
+            parent_span_id: None,
+            links: Vec::new(),
+            attributes,
+            budget: None,
+            span_slot_active: false,
+            active: false,
+            terminal_active: kind != OperationKind::InferenceAttempt,
             closed: false,
         }
     }
@@ -640,9 +673,41 @@ impl TelemetrySpan {
         self.context.clone()
     }
 
-    pub(crate) fn finish(mut self, attributes: Vec<Attribute>, status: SpanStatus) {
+    pub(crate) fn finish_terminal(
+        mut self,
+        finish_attributes: Vec<Attribute>,
+        status: SpanStatus,
+        severity: Severity,
+    ) {
+        if self.closed {
+            return;
+        }
+
+        let duration_ms = self
+            .started_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let mut terminal_attributes = self.attributes.clone();
+        terminal_attributes.extend(finish_attributes.clone());
+        terminal_attributes.push(Attribute::u64(duration_key(self.kind), duration_ms));
+        let span_context = self.context.clone();
         let telemetry = self.telemetry.clone();
-        telemetry.finish_span(&mut self, attributes, status);
+        let revision = self.policy_revision;
+        let terminal_active = self.terminal_active;
+
+        telemetry.finish_span(&mut self, finish_attributes, status);
+        if terminal_active {
+            telemetry.record_terminal_projection_at_revision(
+                self.kind,
+                terminal_attributes,
+                Some(duration_ms),
+                severity,
+                span_context,
+                revision,
+            );
+        }
+        self.closed = true;
     }
 
     fn release_span_slot(&mut self) {
@@ -659,12 +724,37 @@ impl TelemetrySpan {
 impl Drop for TelemetrySpan {
     fn drop(&mut self) {
         if self.active && !self.closed {
+            let attributes = vec![Attribute::enumeration(outcome_key(self.kind), "incomplete")];
+            let mut terminal_attributes = self.attributes.clone();
+            terminal_attributes.extend(attributes.clone());
+            let span_context = self.context.clone();
+            let revision = self.policy_revision;
+            let terminal_active = self.terminal_active;
             let telemetry = self.telemetry.clone();
-            telemetry.finish_span(
-                self,
-                vec![Attribute::enumeration(outcome_key(self.kind), "incomplete")],
-                SpanStatus::Unset,
+            telemetry.finish_span(self, attributes, SpanStatus::Unset);
+            if terminal_active {
+                telemetry.record_terminal_projection_at_revision(
+                    self.kind,
+                    terminal_attributes,
+                    None,
+                    Severity::Warn,
+                    span_context,
+                    revision,
+                );
+            }
+        } else if self.terminal_active && !self.closed {
+            let telemetry = self.telemetry.clone();
+            let mut attributes = self.attributes.clone();
+            attributes.push(Attribute::enumeration(outcome_key(self.kind), "incomplete"));
+            telemetry.record_terminal_projection_at_revision(
+                self.kind,
+                attributes,
+                None,
+                Severity::Warn,
+                self.context.clone(),
+                self.policy_revision,
             );
+            self.closed = true;
         } else {
             self.release_span_slot();
         }

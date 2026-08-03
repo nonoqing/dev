@@ -187,7 +187,7 @@ const ERROR_TYPES: &[&str] = &[
     "internal",
     "other",
 ];
-const MODE_CLASSES: &[&str] = &["agentic", "chat", "review", "goal", "custom"];
+const MODE_CLASSES: &[&str] = &["agentic", "chat", "review", "goal", "custom", "other"];
 const TURN_TRIGGERS: &[&str] = &["user", "continuation", "scheduled", "remote", "system"];
 const FINISH_REASONS: &[&str] = &[
     "completed",
@@ -486,12 +486,10 @@ const COMPRESSION_FIELDS: &[FieldView] = &[
     enum_field("error.type", false, ERROR_TYPES, true),
 ];
 
-const STARTUP_METRIC_FIELDS: &[FieldView] = &[enum_field(
-    "bitfun.app.startup.outcome",
-    true,
-    OUTCOMES,
-    true,
-)];
+const STARTUP_METRIC_FIELDS: &[FieldView] = &[
+    enum_field("bitfun.app.startup.outcome", true, OUTCOMES, true),
+    enum_field("error.type", false, ERROR_TYPES, true),
+];
 const SESSION_METRIC_FIELDS: &[FieldView] = &[
     enum_field(
         "bitfun.agent.session.operation",
@@ -502,12 +500,14 @@ const SESSION_METRIC_FIELDS: &[FieldView] = &[
     enum_field("bitfun.agent.session.class", true, SESSION_CLASSES, true),
     bool_field("bitfun.agent.session.remote", true, true),
     enum_field("bitfun.agent.session.outcome", true, OUTCOMES, true),
+    enum_field("error.type", false, ERROR_TYPES, true),
 ];
 const TURN_METRIC_FIELDS: &[FieldView] = &[
     enum_field("bitfun.agent.turn.outcome", true, OUTCOMES, true),
     enum_field("bitfun.agent.turn.mode_class", false, MODE_CLASSES, true),
     bool_field("bitfun.agent.turn.remote", false, true),
     bool_field("bitfun.agent.turn.subagent", false, true),
+    enum_field("error.type", false, ERROR_TYPES, true),
 ];
 const ROUND_METRIC_FIELDS: &[FieldView] = &[
     enum_field("bitfun.agent.round.outcome", true, OUTCOMES, true),
@@ -518,6 +518,7 @@ const ROUND_METRIC_FIELDS: &[FieldView] = &[
         ATTEMPT_BUCKETS,
         true,
     ),
+    enum_field("error.type", false, ERROR_TYPES, true),
 ];
 const INFERENCE_METRIC_FIELDS: &[FieldView] = &[
     enum_field("bitfun.inference.request.outcome", true, OUTCOMES, true),
@@ -534,6 +535,7 @@ const INFERENCE_METRIC_FIELDS: &[FieldView] = &[
         STATUS_CLASSES,
         true,
     ),
+    enum_field("error.type", false, ERROR_TYPES, true),
 ];
 const INFERENCE_ATTEMPT_METRIC_FIELDS: &[FieldView] = &[
     enum_field(
@@ -558,6 +560,19 @@ const TOOL_METRIC_FIELDS: &[FieldView] = &[
     bool_field("bitfun.tool.execute.parallel", false, true),
     bool_field("bitfun.tool.execute.remote", false, true),
     bool_field("bitfun.tool.execute.background", false, true),
+    enum_field(
+        "bitfun.tool.execute.failure_source",
+        false,
+        TOOL_FAILURE_SOURCES,
+        true,
+    ),
+    enum_field(
+        "bitfun.tool.execute.exit_status_class",
+        false,
+        EXIT_STATUS_CLASSES,
+        true,
+    ),
+    enum_field("error.type", false, ERROR_TYPES, true),
 ];
 const PERMISSION_EVALUATE_METRIC_FIELDS: &[FieldView] = &[
     enum_field(
@@ -574,6 +589,7 @@ const PERMISSION_EVALUATE_METRIC_FIELDS: &[FieldView] = &[
     ),
     enum_field("bitfun.permission.evaluate.outcome", true, OUTCOMES, true),
     bool_field("bitfun.permission.evaluate.delegated", true, true),
+    enum_field("error.type", false, ERROR_TYPES, true),
 ];
 const PERMISSION_CONFIRMATION_METRIC_FIELDS: &[FieldView] = &[
     enum_field(
@@ -595,6 +611,7 @@ const PERMISSION_CONFIRMATION_METRIC_FIELDS: &[FieldView] = &[
         true,
     ),
     bool_field("bitfun.permission.confirmation.auto_approve", true, true),
+    enum_field("error.type", false, ERROR_TYPES, true),
 ];
 const COMPRESSION_METRIC_FIELDS: &[FieldView] = &[
     enum_field(
@@ -610,6 +627,7 @@ const COMPRESSION_METRIC_FIELDS: &[FieldView] = &[
         true,
     ),
     enum_field("bitfun.agent.compression.outcome", true, OUTCOMES, true),
+    enum_field("error.type", false, ERROR_TYPES, true),
 ];
 const TOKEN_METRIC_FIELDS: &[FieldView] = &[
     enum_field(
@@ -1230,5 +1248,14 @@ mod tests {
         ] {
             assert!(exclusions.contains(&Value::String(required.to_string())));
         }
+
+        let exit_status =
+            &snapshot["reserved_enum_values"]["bitfun.tool.execute.exit_status_class"];
+        assert_eq!(
+            exit_status["values"],
+            serde_json::json!(["nonzero", "signal"]),
+            "structured process exit metadata is required before these values can be produced"
+        );
+        assert_eq!(exit_status["status"], "reserved_unproduced");
     }
 }

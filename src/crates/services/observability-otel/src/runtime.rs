@@ -6,8 +6,7 @@ use crate::settings::{validate_enabled_config, TelemetryCapabilities, TelemetryD
 use crate::TelemetryRuntimeError;
 use bitfun_observability::{
     domains::{
-        record_startup_terminal, start_startup, CompletionFacts, SafeErrorType, StartupFinishFacts,
-        StartupObservation,
+        start_startup, CompletionFacts, SafeErrorType, StartupFinishFacts, StartupObservation,
     },
     DeploymentEnvironment, PolicySnapshot, Telemetry, TelemetryControl, TelemetryEntrypoint,
     TelemetryLevel, TelemetryResource, TelemetrySink, TelemetryUserConfig, ValidatedRecord,
@@ -131,9 +130,7 @@ pub struct TelemetryRuntimeHandle {
 }
 
 pub struct TelemetryStartupGuard {
-    telemetry: Telemetry,
     observation: Option<StartupObservation>,
-    started_at: std::time::Instant,
 }
 
 impl TelemetryStartupGuard {
@@ -150,7 +147,6 @@ impl TelemetryStartupGuard {
         if let Some(observation) = self.observation.take() {
             observation.finish(facts);
         }
-        record_startup_terminal(&self.telemetry, facts, Some(elapsed_ms(self.started_at)));
     }
 }
 
@@ -231,9 +227,7 @@ impl TelemetryRuntimeHandle {
 
     pub fn startup_guard(&self) -> TelemetryStartupGuard {
         TelemetryStartupGuard {
-            telemetry: self.telemetry(),
             observation: Some(start_startup(&self.inner.telemetry)),
-            started_at: std::time::Instant::now(),
         }
     }
 
@@ -505,10 +499,6 @@ fn config_fingerprint(user: &TelemetryUserConfig, deployment: &TelemetryDeployme
         .unwrap_or_default()
         .hash(&mut hasher);
     hasher.finish()
-}
-
-fn elapsed_ms(started_at: std::time::Instant) -> u64 {
-    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

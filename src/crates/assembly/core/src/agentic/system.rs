@@ -113,11 +113,6 @@ async fn init_agentic_system_inner(
         "thread_goal_tokens".to_string(),
         Arc::new(ThreadGoalTokenSubscriber),
     );
-    event_router.subscribe_internal(
-        "agent_telemetry".to_string(),
-        Arc::new(bitfun_agent_runtime::telemetry::AgentTelemetrySubscriber::new(telemetry.clone())),
-    );
-
     let context_store = Arc::new(session::SessionContextStore::new());
     let context_compressor = Arc::new(session::ContextCompressor::new(Default::default()));
 

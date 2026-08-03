@@ -8,6 +8,7 @@ use crate::agentic::workspace::WorkspaceServices;
 use crate::agentic::WorkspaceBinding;
 pub use bitfun_agent_runtime::events::FinishReason;
 use bitfun_agent_tools::LoadedDeferredToolSpec;
+use bitfun_observability::domains::ModelClass;
 use bitfun_observability::{ObservationContext, TraceRelation};
 use bitfun_runtime_ports::{
     DelegationPolicy, PermissionConstraintLayer, PermissionDelegationContext,
@@ -82,6 +83,8 @@ pub struct RoundContext {
     /// Provider model name sent in the request.
     pub effective_model_name: String,
     pub primary_model_facts: PrimaryModelFacts,
+    /// Privacy-safe model capability class resolved from typed configuration.
+    pub telemetry_model_class: ModelClass,
     pub agent_type: String,
     pub context_vars: HashMap<String, String>,
     pub permission_constraints: PermissionConstraintLayer,

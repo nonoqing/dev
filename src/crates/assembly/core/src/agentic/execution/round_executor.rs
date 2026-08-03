@@ -44,9 +44,10 @@ use bitfun_ai_adapters::{
 };
 use bitfun_core_types::errors::{AiProviderError, ErrorCategory};
 use bitfun_observability::domains::{
-    attempt_bucket, index_bucket, start_inference, start_inference_attempt, start_round,
-    CompletionFacts, InferenceAttemptFinishFacts, InferenceAttemptStartFacts, InferenceFinishFacts,
-    InferenceStartFacts, RoundFinishFacts, RoundStartFacts, SafeErrorType, StatusClass,
+    attempt_bucket, index_bucket, record_inference_usage, start_inference, start_inference_attempt,
+    start_round, CompletionFacts, InferenceAttemptFinishFacts, InferenceAttemptStartFacts,
+    InferenceFinishFacts, InferenceStartFacts, InferenceUsageFacts, RoundFinishFacts,
+    RoundStartFacts, SafeErrorType, StatusClass,
 };
 use bitfun_observability::Telemetry;
 use bitfun_runtime_ports::PermissionRule;
@@ -382,7 +383,7 @@ impl RoundExecutor {
             };
         let allow_normal_tool_json_repair = global_config.ai.allow_tool_json_repair;
         let (provider_class, model_class, protocol_class) =
-            inference_classes(&ai_client.config.format, &context.effective_model_name);
+            inference_classes(&ai_client.config.format, context.telemetry_model_class);
         let inference_observation = start_inference(
             &self.telemetry,
             InferenceStartFacts {
@@ -1574,6 +1575,23 @@ impl RoundExecutor {
             is_subagent
         );
 
+        let (provider_class, model_class, _) = inference_classes(
+            &context.primary_model_facts.api_format,
+            context.telemetry_model_class,
+        );
+        record_inference_usage(
+            &self.telemetry,
+            InferenceUsageFacts {
+                provider_class,
+                model_class,
+                subagent: is_subagent,
+                input_tokens: usage.prompt_token_count as u64,
+                output_tokens: Some(usage.candidates_token_count as u64),
+                reasoning_tokens: usage.reasoning_token_count.map(u64::from),
+                cache_read_tokens: usage.cached_content_token_count.map(u64::from),
+            },
+        );
+
         self.emit_event(
             AgenticEvent::TokenUsageUpdated {
                 session_id: context.session_id.clone(),
@@ -1999,6 +2017,7 @@ mod tests {
             primary_model_facts: tool_runtime::context::PrimaryModelFacts::new(
                 "model-1", "model-1", "openai", true,
             ),
+            telemetry_model_class: bitfun_observability::domains::ModelClass::Other,
             agent_type: "agentic".to_string(),
             context_vars: HashMap::new(),
             permission_constraints: Default::default(),

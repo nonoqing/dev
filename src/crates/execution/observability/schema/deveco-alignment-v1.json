@@ -71,6 +71,13 @@
     ["bitfun.tool.execute", "bitfun.permission.confirmation"],
     ["bitfun.agent.turn", "bitfun.agent.compression"]
   ],
+  "reserved_enum_values": {
+    "bitfun.tool.execute.exit_status_class": {
+      "values": ["nonzero", "signal"],
+      "status": "reserved_unproduced",
+      "reason": "The generic tool boundary has no typed process-exit metadata; tool result and error content are never parsed."
+    }
+  },
   "privacy_exclusions": [
     "api_request",
     "api_response",

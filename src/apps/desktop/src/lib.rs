@@ -1992,11 +1992,6 @@ async fn init_agentic_system(
         "thread_goal_tokens".to_string(),
         Arc::new(bitfun_core::agentic::goal_mode::ThreadGoalTokenSubscriber),
     );
-    event_router.subscribe_internal(
-        "agent_telemetry".to_string(),
-        Arc::new(bitfun_agent_runtime::telemetry::AgentTelemetrySubscriber::new(telemetry)),
-    );
-
     log::info!("Token usage service initialized and subscriber registered");
 
     // Create the DialogScheduler and wire up the outcome notification channel
