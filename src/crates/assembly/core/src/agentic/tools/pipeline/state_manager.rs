@@ -6,6 +6,7 @@ use super::types::ToolTask;
 use crate::agentic::core::ToolExecutionState;
 use crate::agentic::events::AgenticEvent;
 use bitfun_agent_stream::StreamEventSink;
+use bitfun_observability::domains::{CompletionFacts, ToolFailureSource};
 use bitfun_observability::domains::{ToolKind, ToolSourceClass};
 use bitfun_observability::ObservationContext;
 use dashmap::DashMap;
@@ -130,6 +131,17 @@ impl ToolStateManager {
     ) {
         if let Some(mut task) = self.tasks.get_mut(tool_id) {
             task.context.observation_context = observation_context;
+        }
+    }
+
+    pub fn set_telemetry_terminal_failure(
+        &self,
+        tool_id: &str,
+        completion: CompletionFacts,
+        source: ToolFailureSource,
+    ) {
+        if let Some(mut task) = self.tasks.get_mut(tool_id) {
+            task.telemetry_terminal_failure = Some((completion, source));
         }
     }
 

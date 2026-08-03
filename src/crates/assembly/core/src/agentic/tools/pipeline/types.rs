@@ -7,6 +7,7 @@ use crate::agentic::tools::ToolRuntimeRestrictions;
 use crate::agentic::workspace::WorkspaceServices;
 use crate::agentic::WorkspaceBinding;
 use bitfun_agent_tools::ResolvedToolInvocation;
+use bitfun_observability::domains::{CompletionFacts, ToolFailureSource};
 use bitfun_observability::domains::{ToolKind, ToolSourceClass};
 use bitfun_observability::ObservationContext;
 use bitfun_runtime_ports::{
@@ -126,6 +127,7 @@ pub struct ToolTask {
     pub(crate) telemetry_background: bool,
     pub(crate) telemetry_source_class: ToolSourceClass,
     pub(crate) telemetry_kind: ToolKind,
+    pub(crate) telemetry_terminal_failure: Option<(CompletionFacts, ToolFailureSource)>,
     pub invocation: ResolvedToolInvocation,
     pub invocation_resolution_error: Option<String>,
     pub context: ToolExecutionContext,
@@ -171,6 +173,7 @@ impl ToolTask {
             telemetry_background,
             telemetry_source_class: ToolSourceClass::Custom,
             telemetry_kind: ToolKind::Other,
+            telemetry_terminal_failure: None,
             invocation,
             invocation_resolution_error,
             context,

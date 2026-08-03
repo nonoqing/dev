@@ -10,7 +10,7 @@ use crate::agentic::events::types::ToolEventData;
 use crate::agentic::events::AgenticEvent;
 use crate::agentic::observability::{
     completion_from_error, safe_count_bucket, safe_permission_decision, safe_permission_source,
-    safe_terminal_completion, tool_completion_from_error, tool_identity,
+    safe_terminal_completion, tool_failure_from_error, tool_identity,
 };
 use crate::agentic::tools::computer_use_host::ComputerUseHostRef;
 use crate::agentic::tools::framework::ToolResult as FrameworkToolResult;
@@ -256,6 +256,17 @@ fn tool_terminal_timings(
             *execution_ms,
         ),
         _ => (None, None, None, None),
+    }
+}
+
+/// The generic tool state owns no structured process-exit metadata. Keep this
+/// mapping deliberately state-only: tool content must never be inspected for
+/// strings such as `exit_code` or `signal`.
+fn tool_exit_status_class(state: Option<&ToolExecutionState>) -> Option<ExitStatusClass> {
+    match state {
+        Some(ToolExecutionState::Completed { .. }) => Some(ExitStatusClass::Success),
+        Some(ToolExecutionState::Failed { .. }) => Some(ExitStatusClass::Unknown),
+        _ => None,
     }
 }
 
@@ -1809,40 +1820,39 @@ impl ToolPipeline {
             .execute_single_tool_impl(tool_id.clone(), tool_context)
             .await;
         let state = self.state_manager.get_task(&tool_id).map(|task| task.state);
+        let terminal_failure = self
+            .state_manager
+            .get_task(&tool_id)
+            .and_then(|task| task.telemetry_terminal_failure);
         let (queue_ms, preflight_ms, confirmation_ms, execution_ms) =
             tool_terminal_timings(state.as_ref());
-        let completion = match (&result, state.as_ref()) {
-            (Err(error), _) => tool_completion_from_error(error),
-            (_, Some(ToolExecutionState::Rejected { .. })) => {
+        let completion = match (terminal_failure, &result, state.as_ref()) {
+            (Some((completion, _)), _, _) => completion,
+            (None, Err(error), _) => tool_failure_from_error(error).0,
+            (None, _, Some(ToolExecutionState::Rejected { .. })) => {
                 CompletionFacts::rejected(SafeErrorType::PermissionDenied)
             }
-            (_, Some(ToolExecutionState::Cancelled { .. })) => CompletionFacts::cancelled(),
-            (_, Some(ToolExecutionState::Failed { .. })) => {
+            (None, _, Some(ToolExecutionState::Cancelled { .. })) => CompletionFacts::cancelled(),
+            (None, _, Some(ToolExecutionState::Failed { .. })) => {
                 CompletionFacts::failed(SafeErrorType::Other)
             }
             _ => CompletionFacts::completed(),
         };
-        let failure_source = match (&result, state.as_ref()) {
-            (
-                Err(BitFunError::Validation(_) | BitFunError::Tool(_) | BitFunError::NotFound(_)),
-                _,
-            ) => Some(ToolFailureSource::Validation),
-            (Err(BitFunError::Timeout(_)), _) => Some(ToolFailureSource::Timeout),
-            (Err(BitFunError::Cancelled(_)), _) => Some(ToolFailureSource::Cancellation),
-            (_, Some(ToolExecutionState::Rejected { .. })) => Some(ToolFailureSource::Permission),
-            (_, Some(ToolExecutionState::Cancelled { .. })) => {
+        let failure_source = match (terminal_failure, &result, state.as_ref()) {
+            (Some((_, source)), _, _) => Some(source),
+            (None, Err(error), _) => Some(tool_failure_from_error(error).1),
+            (None, _, Some(ToolExecutionState::Rejected { .. })) => {
+                Some(ToolFailureSource::Permission)
+            }
+            (None, _, Some(ToolExecutionState::Cancelled { .. })) => {
                 Some(ToolFailureSource::Cancellation)
             }
-            (Err(_), _) | (_, Some(ToolExecutionState::Failed { .. })) => {
+            (None, _, Some(ToolExecutionState::Failed { .. })) => {
                 Some(ToolFailureSource::Execution)
             }
             _ => None,
         };
-        let exit_status_class = match state.as_ref() {
-            Some(ToolExecutionState::Completed { .. }) => Some(ExitStatusClass::Success),
-            Some(ToolExecutionState::Failed { .. }) => Some(ExitStatusClass::Unknown),
-            _ => None,
-        };
+        let exit_status_class = tool_exit_status_class(state.as_ref());
         observation.finish(ToolFinishFacts {
             completion,
             queue_ms,
@@ -2301,6 +2311,12 @@ impl ToolPipeline {
                 }
 
                 if matches!(e, BitFunError::Timeout(_)) {
+                    let terminal_failure = tool_failure_from_error(&e);
+                    self.state_manager.set_telemetry_terminal_failure(
+                        &tool_id,
+                        terminal_failure.0,
+                        terminal_failure.1,
+                    );
                     let duration_ms = elapsed_ms_u64(start_time);
                     let presentation = build_tool_execution_timeout_presentation(
                         &tool_name,
@@ -4366,6 +4382,40 @@ mod tests {
             ),
             state => panic!("expected failed task state, got {state:?}"),
         }
+    }
+
+    #[test]
+    fn exit_status_class_never_parses_tool_result_or_error_text() {
+        let completed = ToolExecutionState::Completed {
+            result: ToolResult::Result {
+                data: json!({"exit_code": 137, "signal": "SIGKILL"}),
+                result_for_assistant: Some("exit_code=137 signal=SIGKILL".to_string()),
+                image_attachments: None,
+            },
+            duration_ms: 1,
+            queue_wait_ms: None,
+            preflight_ms: None,
+            confirmation_wait_ms: None,
+            execution_ms: Some(1),
+        };
+        assert_eq!(
+            tool_exit_status_class(Some(&completed)),
+            Some(ExitStatusClass::Success)
+        );
+
+        let failed = ToolExecutionState::Failed {
+            error: "exit_code=137 signal=SIGKILL".to_string(),
+            is_retryable: false,
+            duration_ms: Some(1),
+            queue_wait_ms: None,
+            preflight_ms: None,
+            confirmation_wait_ms: None,
+            execution_ms: Some(1),
+        };
+        assert_eq!(
+            tool_exit_status_class(Some(&failed)),
+            Some(ExitStatusClass::Unknown)
+        );
     }
 
     #[test]
