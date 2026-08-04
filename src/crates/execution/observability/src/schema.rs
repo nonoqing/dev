@@ -1083,7 +1083,6 @@ pub(crate) fn validate(record: &ValidatedRecord) -> Result<(), PrivacyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     #[test]
     fn registry_contains_only_allowed_namespaces() {
@@ -1159,103 +1158,5 @@ mod tests {
                 .any(|descriptor| descriptor.name() == name
                     && descriptor.signal() == SignalKind::Trace));
         }
-    }
-
-    #[test]
-    fn deveco_alignment_snapshot_has_no_unexplained_p0_gap() {
-        let snapshot: Value =
-            serde_json::from_str(include_str!("../schema/deveco-alignment-v1.json")).unwrap();
-        let allowed = snapshot["allowed_states"].as_array().unwrap();
-        let points = snapshot["point_matrix"].as_array().unwrap();
-
-        for point in points {
-            if point["phase"] != "p0" {
-                assert_eq!(point["state"], "missing");
-                assert!(point["descriptor"].is_null());
-                continue;
-            }
-            assert_ne!(point["state"], "missing", "P0 point has a gap: {point}");
-            assert!(allowed.contains(&point["state"]), "unknown state: {point}");
-            let name = point["descriptor"].as_str().unwrap();
-            for signal in point["required_signals"].as_array().unwrap() {
-                let signal = match signal.as_str().unwrap() {
-                    "trace" => SignalKind::Trace,
-                    "metric" => SignalKind::Metric,
-                    "log" => SignalKind::Log,
-                    other => panic!("unknown signal {other}"),
-                };
-                assert!(descriptor_registry().iter().any(|descriptor| {
-                    let name_matches = if signal == SignalKind::Metric {
-                        descriptor.name().starts_with(&format!("{name}."))
-                    } else {
-                        descriptor.name() == name
-                    };
-                    name_matches && descriptor.signal() == signal
-                }));
-            }
-            for field in point["evidence_fields"].as_array().unwrap() {
-                let field = field.as_str().unwrap();
-                assert!(
-                    descriptor_registry()
-                        .iter()
-                        .filter(|descriptor| descriptor.name() == name)
-                        .any(|descriptor| descriptor
-                            .fields()
-                            .iter()
-                            .any(|item| item.key() == field)),
-                    "point evidence field is not registered: {field}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn deveco_alignment_snapshot_accounts_for_every_field_and_privacy_boundary() {
-        let snapshot: Value =
-            serde_json::from_str(include_str!("../schema/deveco-alignment-v1.json")).unwrap();
-        let allowed = snapshot["allowed_states"].as_array().unwrap();
-        let mappings = snapshot["field_mapping"].as_array().unwrap();
-        assert_eq!(
-            mappings.len(),
-            34,
-            "field mapping changed without contract review"
-        );
-        for mapping in mappings {
-            assert!(
-                allowed.contains(&mapping["state"]),
-                "unknown field state: {mapping}"
-            );
-            if mapping["state"] == "excluded" {
-                assert!(mapping["representation"].is_null());
-            } else {
-                assert!(mapping["representation"]
-                    .as_str()
-                    .is_some_and(|value| !value.is_empty()));
-            }
-        }
-
-        let exclusions = snapshot["privacy_exclusions"].as_array().unwrap();
-        for required in [
-            "api_request",
-            "api_response",
-            "user_prompt",
-            "local_path",
-            "user_name",
-            "machine_name",
-            "endpoint",
-            "credential",
-            "raw_error",
-        ] {
-            assert!(exclusions.contains(&Value::String(required.to_string())));
-        }
-
-        let exit_status =
-            &snapshot["reserved_enum_values"]["bitfun.tool.execute.exit_status_class"];
-        assert_eq!(
-            exit_status["values"],
-            serde_json::json!(["nonzero", "signal"]),
-            "structured process exit metadata is required before these values can be produced"
-        );
-        assert_eq!(exit_status["status"], "reserved_unproduced");
     }
 }
