@@ -172,6 +172,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::WorkspaceAgnostic,
     ),
     (
+        "appearance_market_submit_package",
+        RemoteWorkspacePolicy::LocalOnly,
+    ),
+    (
         "appearance_market_review_submission",
         RemoteWorkspacePolicy::WorkspaceAgnostic,
     ),
@@ -1935,6 +1939,7 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
     ("update_miniapp", RemoteWorkspacePolicy::LegacyUnaudited),
+    ("update_session_mode", RemoteWorkspacePolicy::RemoteRouted),
     (
         "update_session_model",
         RemoteWorkspacePolicy::LegacyUnaudited,

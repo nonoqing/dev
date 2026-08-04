@@ -1464,7 +1464,7 @@ describe('ExternalSourcesConfig', () => {
     const details = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('common.details'));
     await act(async () => details?.click());
-    expect(container.textContent).toContain('agents.singleRun');
+    expect(container.textContent).toContain('agents.role.subagent');
     expect(container.textContent).toContain('fast');
     expect(container.textContent).toContain('Read, Grep');
     expect(container.textContent).toContain('agents.executionDomain');
@@ -2439,8 +2439,9 @@ describe('ExternalSourcesConfig', () => {
     expect(updateIntegrationPolicyMock).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain('policy.resetConfirmTitle');
 
-    const confirm = Array.from(document.body.querySelectorAll('button')).filter((button) =>
-      button.textContent === 'policy.backupAndReset').at(-1);
+    const dialog = document.body.querySelector('[role="dialog"]');
+    const confirm = Array.from(dialog?.querySelectorAll('button') ?? []).find((button) =>
+      button.textContent === 'policy.backupAndReset');
     await act(async () => confirm?.click());
     expect(updateIntegrationPolicyMock).toHaveBeenCalledWith('D:/workspace/project', {
       expectedPreferenceRevision: 9,

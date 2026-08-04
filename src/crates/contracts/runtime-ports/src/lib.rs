@@ -1072,6 +1072,7 @@ impl<T> RemoteProjectionPort for T where
 pub trait RemoteCapabilityPort: RuntimeServicePort {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSessionCreateRequest {
     pub session_name: String,
@@ -1095,12 +1096,15 @@ pub struct AgentSessionCreateRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSessionCreateResult {
     pub session_id: String,
     #[serde(default)]
     pub session_name: String,
     pub agent_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1121,6 +1125,7 @@ impl AgentSessionCreateResult {
             session_id: session_id.into(),
             session_name: session_name.into(),
             agent_type: agent_type.into(),
+            model_id: None,
             workspace_path: None,
             workspace_id: None,
             project_workspace_path: None,
@@ -1130,6 +1135,7 @@ impl AgentSessionCreateResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSessionListRequest {
     pub workspace_path: String,
@@ -1140,6 +1146,7 @@ pub struct AgentSessionListRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSessionSummary {
     pub session_id: String,
@@ -1158,6 +1165,7 @@ pub struct AgentSessionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSessionDeleteRequest {
     pub workspace_path: String,
@@ -1529,6 +1537,7 @@ pub fn agent_workspace_references_from_metadata(
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSubmissionRequest {
     pub session_id: String,
@@ -1544,6 +1553,7 @@ pub struct AgentSubmissionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
@@ -1658,6 +1668,7 @@ pub struct AgentThreadGoalDeliveryRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum AgentSubmissionSource {
     DesktopUi,
@@ -1673,6 +1684,7 @@ pub enum AgentSubmissionSource {
 pub type DialogTriggerSource = AgentSubmissionSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum DialogQueuePriority {
     Low = 0,
@@ -1681,6 +1693,7 @@ pub enum DialogQueuePriority {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct DialogSubmissionPolicy {
     pub trigger_source: DialogTriggerSource,
@@ -2139,6 +2152,7 @@ pub struct RelatedPath {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentInputAttachment {
     pub kind: String,
@@ -2169,6 +2183,7 @@ impl AgentInputAttachment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSubmissionResult {
     pub turn_id: String,
@@ -2632,6 +2647,7 @@ pub trait AgentThreadGoalManagementPort: Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTurnCancellationRequest {
     pub session_id: String,
@@ -2655,6 +2671,7 @@ fn default_cancel_descendants() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTurnCancellationResult {
     pub session_id: String,
@@ -3204,6 +3221,7 @@ mod tests {
             serde_json::from_value(legacy.clone()).expect("deserialize legacy create result");
 
         assert_eq!(result.workspace_path, None);
+        assert_eq!(result.model_id, None);
         assert_eq!(result.workspace_id, None);
         assert_eq!(result.project_workspace_path, None);
         assert_eq!(result.execution_target, None);
@@ -3219,6 +3237,7 @@ mod tests {
             "sessionId": "session_1",
             "sessionName": "Main",
             "agentType": "agentic",
+            "modelId": "provider/model",
             "workspacePath": "/worktrees/session_1",
             "workspaceId": "workspace_1",
             "projectWorkspacePath": "/workspace/project",
@@ -3238,6 +3257,7 @@ mod tests {
             result.workspace_path.as_deref(),
             Some("/worktrees/session_1")
         );
+        assert_eq!(result.model_id.as_deref(), Some("provider/model"));
         assert_eq!(result.workspace_id.as_deref(), Some("workspace_1"));
         assert_eq!(
             result.project_workspace_path.as_deref(),
