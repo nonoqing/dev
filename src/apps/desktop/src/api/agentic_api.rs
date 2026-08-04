@@ -16,9 +16,10 @@ use crate::runtime::{
 use crate::startup_trace::DesktopStartupTrace;
 use bitfun_agent_runtime::deep_review::sanitize_focused_review_public_metadata;
 use bitfun_agent_runtime::sdk::{
-    AgentDialogTurnRequest, AgentInputAttachment, AgentSessionCreateResult,
-    AgentSessionModelUpdateRequest, AgentSubmissionSource, AgentTurnCancellationRequest,
-    PermissionAuditRecord, PermissionGrant, PermissionGrantKey, PermissionReply, PermissionRequest,
+    AgentDialogSteerRequest, AgentDialogTurnExecution, AgentDialogTurnRequest,
+    AgentInputAttachment, AgentSessionCreateResult, AgentSessionModelUpdateRequest,
+    AgentSubmissionSource, AgentTurnCancellationRequest, DialogSteerOutcome, PermissionAuditRecord,
+    PermissionGrant, PermissionGrantKey, PermissionReply, PermissionRequest,
 };
 use bitfun_core::agentic::agents::AgentSource;
 use bitfun_core::agentic::coordination::{
@@ -51,7 +52,7 @@ use bitfun_core::service::config::project_permission_store::{
 use bitfun_core::service::remote_ssh::workspace_state::resolve_workspace_session_identity;
 use bitfun_core::service::session::{
     DialogTurnData, SessionMemoryMode, SessionMetadata, SessionRelationship,
-    SessionRelationshipKind,
+    SessionRelationshipKind, SessionTurnCatalog, SessionTurnWindowResponse,
 };
 use bitfun_core::service::workspace::WorkspaceKind;
 use bitfun_core::service::workspace::{WorkspaceActivityMode, WorkspaceCreateOptions};
@@ -61,9 +62,12 @@ use bitfun_core_types::{
     WorktreeError, WorktreeErrorCode,
 };
 use bitfun_product_domains::tool_permissions::PermissionRule;
+use bitfun_runtime_ports::SessionTurnWindowRequest;
 
 const SESSION_VIEW_TOOL_RESULT_TOTAL_CHAR_BUDGET: usize = 512 * 1024;
 const SESSION_VIEW_TOOL_RESULT_STRING_CHAR_LIMIT: usize = 16 * 1024;
+const SESSION_TURN_WINDOW_DEFAULT_BEFORE: usize = 4;
+const SESSION_TURN_WINDOW_DEFAULT_AFTER: usize = 12;
 const SESSION_VIEW_TRUNCATED_MARKER: &str = "\n... Output truncated for session preview";
 const SESSION_VIEW_OMITTED_MARKER: &str = "Output omitted from session preview";
 
@@ -259,6 +263,8 @@ pub struct StartDialogTurnRequest {
     pub remote_connection_id: Option<String>,
     pub remote_ssh_host: Option<String>,
     pub turn_id: Option<String>,
+    #[serde(default)]
+    pub execution: AgentDialogTurnExecution,
     #[serde(default)]
     pub image_contexts: Option<Vec<ImageContextData>>,
     #[serde(default)]
@@ -463,6 +469,7 @@ pub struct RestoreSessionWithTurnsResponse {
 pub struct RestoreSessionViewResponse {
     pub session: SessionResponse,
     pub turns: Vec<DialogTurnData>,
+    pub turn_catalog: SessionTurnCatalog,
     pub context_restore_state: String,
     pub is_partial: bool,
     pub loaded_turn_count: usize,
@@ -729,6 +736,13 @@ impl From<ControlDeepReviewQueueActionDTO> for DeepReviewQueueControlAction {
 #[serde(rename_all = "camelCase")]
 pub struct CancelSessionRequest {
     pub session_id: String,
+    /// Tree cancellation opts out so a parent session does not stop its children.
+    #[serde(default = "default_cancel_descendants")]
+    pub cancel_descendants: bool,
+}
+
+fn default_cancel_descendants() -> bool {
+    true
 }
 
 fn sanitize_create_session_review_metadata(request: &mut CreateSessionRequest) {
@@ -777,6 +791,28 @@ pub struct RestoreSessionRequest {
     pub trace_id: Option<String>,
     #[serde(default)]
     pub tail_turn_count: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadSessionTurnWindowRequest {
+    pub session_id: String,
+    pub workspace_path: String,
+    #[serde(default)]
+    pub include_internal: bool,
+    pub target_storage_turn_index: usize,
+    #[serde(default)]
+    pub expected_turn_id: Option<String>,
+    #[serde(default)]
+    pub expected_catalog_revision: Option<String>,
+    #[serde(default)]
+    pub before: Option<usize>,
+    #[serde(default)]
+    pub after: Option<usize>,
+    #[serde(default)]
+    pub remote_connection_id: Option<String>,
+    #[serde(default)]
+    pub remote_ssh_host: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1323,6 +1359,9 @@ pub async fn create_session(
                 source_workspace_path: Some(source_workspace_path.clone()),
                 base_ref,
                 copy_local_changes,
+                // A user-created worktree is claimed by the sessions bound to
+                // it, which already block automatic removal.
+                claimed_by: None,
             })
             .await
             .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
@@ -1797,6 +1836,7 @@ fn desktop_dialog_turn_request(
         remote_connection_id,
         remote_ssh_host,
         turn_id,
+        execution,
         image_contexts,
         user_message_metadata,
     } = request;
@@ -1816,6 +1856,7 @@ fn desktop_dialog_turn_request(
         message: user_input,
         original_message: original_user_input,
         turn_id,
+        execution,
         agent_type,
         workspace_path: project_workspace_path.or(workspace_path),
         remote_connection_id,
@@ -2481,6 +2522,7 @@ pub async fn cancel_dialog_turn(
             requester_session_id: None,
             reason: None,
             wait_timeout_ms: None,
+            cancel_descendants: true,
         })
         .await
         .map_err(|e| {
@@ -2497,7 +2539,7 @@ pub async fn cancel_dialog_turn(
 
 #[tauri::command]
 pub async fn steer_dialog_turn(
-    scheduler: State<'_, Arc<DialogScheduler>>,
+    runtime: State<'_, DesktopRuntimeContext>,
     request: SteerDialogTurnRequest,
 ) -> Result<SteerDialogTurnResponse, String> {
     let SteerDialogTurnRequest {
@@ -2512,15 +2554,19 @@ pub async fn steer_dialog_turn(
         return Err("Steering content cannot be empty".to_string());
     }
 
-    let outcome = scheduler
-        .submit_steering(session_id, dialog_turn_id, content, display_content)
+    let outcome = runtime
+        .agent_runtime()
+        .steer_dialog_turn(AgentDialogSteerRequest {
+            session_id,
+            turn_id: dialog_turn_id,
+            content,
+            display_content,
+        })
         .await
-        .map_err(|e| format!("Failed to steer dialog turn: {}", e))?;
+        .map_err(|error| format!("Failed to steer dialog turn: {}", error.into_message()))?;
 
     let steering_id = match outcome {
-        bitfun_core::agentic::coordination::DialogSteerOutcome::Buffered {
-            steering_id, ..
-        } => steering_id,
+        DialogSteerOutcome::Buffered { steering_id, .. } => steering_id,
     };
 
     Ok(SteerDialogTurnResponse {
@@ -2553,11 +2599,20 @@ pub async fn control_deep_review_queue(
 
 #[tauri::command]
 pub async fn cancel_session(
-    coordinator: State<'_, Arc<ConversationCoordinator>>,
+    runtime: State<'_, DesktopRuntimeContext>,
     request: CancelSessionRequest,
 ) -> Result<CancelSessionResponse, String> {
-    let dialog_turn_id = coordinator
-        .cancel_active_turn_for_session(&request.session_id, std::time::Duration::from_secs(5))
+    let result = runtime
+        .agent_runtime()
+        .cancel_turn(AgentTurnCancellationRequest {
+            session_id: request.session_id.clone(),
+            turn_id: None,
+            source: Some(AgentSubmissionSource::DesktopUi),
+            requester_session_id: None,
+            reason: Some("user_cancelled".to_string()),
+            wait_timeout_ms: Some(5_000),
+            cancel_descendants: request.cancel_descendants,
+        })
         .await
         .map_err(|e| {
             log::error!(
@@ -2565,12 +2620,12 @@ pub async fn cancel_session(
                 request.session_id,
                 e
             );
-            format!("Failed to cancel session: {}", e)
+            format!("Failed to cancel session: {}", e.into_message())
         })?;
 
     Ok(CancelSessionResponse {
-        cancelled: dialog_turn_id.is_some(),
-        dialog_turn_id,
+        cancelled: result.requested,
+        dialog_turn_id: result.turn_id,
     })
 }
 
@@ -2914,9 +2969,16 @@ pub async fn restore_session_view(
         let session = restored.session;
         let mut turns = restored.turns;
         let total_turn_count = restored.total_turn_count;
+        let turn_catalog = restored.turn_catalog;
         let timings = restored.timings;
         let loaded_turn_count = turns.len();
         let is_partial = loaded_turn_count < total_turn_count;
+        let turn_catalog_preview_chars = turn_catalog
+            .entries
+            .iter()
+            .filter_map(|entry| entry.preview.as_deref())
+            .map(|preview| preview.chars().count())
+            .sum::<usize>();
 
         if log::log_enabled!(log::Level::Debug) {
             let payload_stats = restore_turn_payload_stats(&turns);
@@ -2943,18 +3005,22 @@ pub async fn restore_session_view(
         compact_tool_results_for_session_view(&mut turns);
 
         debug!(
-            "restore_session_view completed: trace_id={}, session_id={}, turn_count={}, total_turn_count={}, is_partial={}, context_restore_state=pending, duration_ms={}",
+            "restore_session_view completed: trace_id={}, session_id={}, turn_count={}, total_turn_count={}, is_partial={}, turn_catalog_complete={}, turn_catalog_entry_count={}, turn_catalog_preview_chars={}, context_restore_state=pending, duration_ms={}",
             trace_id,
             request.session_id,
             turns.len(),
             total_turn_count,
             is_partial,
+            turn_catalog.complete,
+            turn_catalog.entries.len(),
+            turn_catalog_preview_chars,
             started_at.elapsed().as_millis()
         );
 
         Ok(RestoreSessionViewResponse {
             session: session_to_response_with_turn_count(session, total_turn_count),
             turns,
+            turn_catalog,
             context_restore_state: "pending".to_string(),
             is_partial,
             loaded_turn_count,
@@ -2964,6 +3030,85 @@ pub async fn restore_session_view(
     }
     .await;
     startup_trace.record_tauri_command_elapsed("restore_session_view", None, started_at);
+    result
+}
+
+#[tauri::command]
+pub async fn load_session_turn_window(
+    runtime: State<'_, DesktopRuntimeContext>,
+    startup_trace: State<'_, DesktopStartupTrace>,
+    request: LoadSessionTurnWindowRequest,
+) -> Result<SessionTurnWindowResponse, String> {
+    let started_at = Instant::now();
+    let result = async {
+        debug!(
+            "load_session_turn_window request received: session_id={} target_storage_turn_index={} before={} after={}",
+            request.session_id,
+            request.target_storage_turn_index,
+            request.before.unwrap_or(SESSION_TURN_WINDOW_DEFAULT_BEFORE),
+            request.after.unwrap_or(SESSION_TURN_WINDOW_DEFAULT_AFTER)
+        );
+        let mut response = runtime
+            .session_application()
+            .load_session_turn_window(
+                desktop_session_scope(
+                    request.workspace_path.clone(),
+                    request.remote_connection_id.clone(),
+                    request.remote_ssh_host.clone(),
+                ),
+                SessionTurnWindowRequest {
+                    workspace_path: PathBuf::from(&request.workspace_path),
+                    session_id: request.session_id.clone(),
+                    include_internal: request.include_internal,
+                    target_storage_turn_index: request.target_storage_turn_index,
+                    expected_turn_id: request.expected_turn_id.clone(),
+                    expected_catalog_revision: request.expected_catalog_revision.clone(),
+                    before: request.before.unwrap_or(SESSION_TURN_WINDOW_DEFAULT_BEFORE),
+                    after: request.after.unwrap_or(SESSION_TURN_WINDOW_DEFAULT_AFTER),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        if let Some(turns) = response.ready_turns_mut() {
+            compact_tool_results_for_session_view(turns);
+        }
+        match &response {
+            SessionTurnWindowResponse::Ready {
+                total_turn_count,
+                start_ordinal,
+                end_ordinal_exclusive,
+                turns,
+                ..
+            } => debug!(
+                "load_session_turn_window completed: session_id={} status=ready target_storage_turn_index={} turn_count={} total_turn_count={} start_ordinal={} end_ordinal_exclusive={} duration_ms={}",
+                request.session_id,
+                request.target_storage_turn_index,
+                turns.len(),
+                total_turn_count,
+                start_ordinal,
+                end_ordinal_exclusive,
+                started_at.elapsed().as_millis()
+            ),
+            SessionTurnWindowResponse::Stale { catalog } => debug!(
+                "load_session_turn_window completed: session_id={} status=stale target_storage_turn_index={} total_turn_count={} duration_ms={}",
+                request.session_id,
+                request.target_storage_turn_index,
+                catalog.total_turn_count,
+                started_at.elapsed().as_millis()
+            ),
+            SessionTurnWindowResponse::NotFound { catalog } => debug!(
+                "load_session_turn_window completed: session_id={} status=not-found target_storage_turn_index={} total_turn_count={} duration_ms={}",
+                request.session_id,
+                request.target_storage_turn_index,
+                catalog.total_turn_count,
+                started_at.elapsed().as_millis()
+            ),
+        }
+        Ok(response)
+    }
+    .await;
+    startup_trace.record_tauri_command_elapsed("load_session_turn_window", None, started_at);
     result
 }
 
@@ -3239,6 +3384,24 @@ mod tests {
     };
     use bitfun_product_domains::tool_permissions::{PermissionEffect, PermissionRule};
     use serde_json::json;
+
+    #[test]
+    fn desktop_steering_uses_the_same_agent_runtime_port_as_other_surfaces() {
+        let source = include_str!("agentic_api.rs").replace("\r\n", "\n");
+        let steering = source
+            .split_once("pub async fn steer_dialog_turn(")
+            .expect("steering command")
+            .1
+            .split_once("pub async fn control_deep_review_queue(")
+            .expect("steering command boundary")
+            .0;
+
+        assert!(steering.contains("State<'_, DesktopRuntimeContext>"));
+        assert!(steering.contains(".agent_runtime()"));
+        assert!(steering.contains(".steer_dialog_turn(AgentDialogSteerRequest"));
+        assert!(!steering.contains("State<'_, Arc<DialogScheduler>>"));
+        assert!(!steering.contains(".submit_steering("));
+    }
 
     #[test]
     fn unknown_title_outcomes_reach_the_frontend_with_a_stable_code() {

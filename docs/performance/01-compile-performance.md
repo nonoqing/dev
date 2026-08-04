@@ -20,9 +20,9 @@
 | F7 | CI:`rust-build-check` 串行等待 `frontend-build`(含大量 lint/audit/test)完成才开始 | CI | 中 | `.github/workflows/ci.yml:72` |
 | F8 | 每次 `desktop:dev` 无条件重建 mobile-web(先删 target 内产物 + pnpm install + vite build) | 脚本 | 中 | `scripts/dev.cjs:704-714`、`scripts/mobile-web-build.cjs:75-133` |
 | F9 | 依赖树重复严重:1177 个包中 112 个名字存在多版本(image、thiserror、rand×3、getrandom×4、windows-sys×6、phf×6 等) | Rust | 中 | Cargo.lock 解析;`src/apps/desktop/Cargo.toml:85`(image 0.24 vs workspace 0.25) |
-| F10 | reqwest 同时启用 native-tls + rustls,双 TLS 栈都参与编译 | Rust | 中 | `Cargo.toml:121` |
+| F10 | reqwest TLS 单栈治理（已完成） | Rust | 已兑现 | workspace transport-only + 客户端 owner 显式 Rustls；见 F10 治理结果 |
 | F11 | Vite dev watcher 强制 usePolling + 100ms 轮询,Windows 上 CPU 高、拖慢 HMR | 前端 | 中 | `src/web-ui/vite.config.ts:68-74` |
-| F12 | prompts/公告 md 内嵌进 bitfun-core 的 build.rs 生成代码,改一个提示词 = 重编 202k 行 core + 下游 | Rust | 中 | `src/crates/assembly/core/build.rs:110-183,343-401` |
+| F12 | Agent prompts 已抽到无依赖内容 owner；Cargo 指纹仍会让 Core 重检，公告仍由 Core 按 feature 生成 | Rust | 中（部分治理） | `src/crates/assembly/agent-content`、`src/crates/assembly/core/build.rs` |
 | F13 | beforeBuildCommand 内 web 构建与 mobile-web 构建纯串行;dev.cjs 准备步骤也全串行 | 脚本 | 中 | `src/apps/desktop/tauri.conf.json`(build 块)、`scripts/dev.cjs:668-737` |
 | F14 | tokio 全 workspace 开 `full` feature;tauri 开 `unstable`;个别重依赖(oxc、rquickjs、git2 vendored、sherpa-onnx)集中于少数 feature | Rust | 低-中 | `Cargo.toml:72,149,178-180,183,248` |
 | F15 | tsconfig(web-ui/mobile-web)未启用 incremental;type-check 每次冷启动 | 前端 | 低-中 | `src/web-ui/tsconfig.json`(全文无 incremental) |
@@ -30,6 +30,7 @@
 | F17 | pnpm 结构小问题:tests/e2e 已在 workspace 内仍单独 install;installer 独立 Rust workspace 导致 Tauri 栈本地编译两份 | 结构 | 低 | `pnpm-workspace.yaml`、`package.json:92`、`Cargo.toml:40-42` |
 | F18 | build.rs 生成代码遍历 HashMap,输出字节序不确定 → 不可复现构建,削弱 sccache/远端缓存效果 | Rust | 低 | `src/crates/assembly/core/build.rs:303,429`、`src/apps/cli/build.rs` |
 | F19 | `[profile.dev] incremental = true` 为默认值,冗余;dev profile 无任何针对性调优 | Rust | 低 | `Cargo.toml:279-280` |
+| F20 | `bitfun-agent-runtime` 的 28 个 integration targets 已收敛为 5 个显式目标，同时保留 Unix 进程测试隔离 | Rust/Test | 已兑现 | `src/crates/execution/agent-runtime/Cargo.toml`、`tests/agent_*_contracts.rs` |
 
 ---
 
@@ -149,15 +150,15 @@ Cargo.lock 共 1177 个包,其中 112 个名字存在 2 个以上版本(解析�
 2. 运行 `cargo tree -d -e normal --workspace`(建议加 `--target x86_64-pc-windows-msvc` 过滤无关平台)输出清单,针对 top 传递源头(如 pull 出 rand 0.7 的 crate)评估升级;`russh 0.45`、`screenshots 0.8`、`syntect-tui` 等旧版是主要嫌疑。
 3. 将该清单纳入 nightly CI 做趋势看护(非阻断)。
 
-### F10(中)reqwest 同时启用 native-tls 与 rustls
+### F10(已治理)reqwest TLS 单栈
 
-**问题描述**
-`Cargo.toml:121`:`reqwest = { ..., features = ["native-tls", "rustls", ...] }`。两套 TLS 栈(schannel/native-tls + rustls/ring)全部参与编译;workspace 另有独立 `rustls`(267 行)与 `tokio-tungstenite rustls-tls-native-roots`(245 行),说明 rustls 反正逃不掉,native-tls 则额外拖上 openssl-sys 相关生态(Windows 上还催生了 `ensure-openssl-windows.mjs` 整套预编译 OpenSSL bootstrap)。
+**治理结果（2026-08-03）**
+- workspace 级 `reqwest` 只保留 HTTP/序列化能力，URL-only 消费者不再被动加载 TLS；CLI、Desktop、AI Adapter、MiniApp Market 与 Services 的各 Reqwest owner feature 显式选择 Rustls。
+- Reqwest 0.13 的 `rustls` feature 使用平台证书验证器，保留系统信任根行为；三处显式 Client Builder 统一使用 `tls_backend_rustls()`，不再混用默认后端或弃用 API。
+- `Cargo.lock` 已移除 `native-tls`、`hyper-tls`、`tokio-native-tls`、`openssl` 与 `openssl-macros`；`openssl-sys` 只剩非 Windows 的 Git/libgit2 目标路径。Windows 产品图、本地开发、常规构建和三个既有 workflow 不再下载或配置预编译 OpenSSL。
+- 边界检查约束 TLS 必须由真实客户端 owner 选择，避免未来把后端重新提升为 workspace 全局 feature；没有新增 CI job 或测试步骤。
 
-**预期收益**:中(冷构建时间;若能移除 native-tls,Windows 构建可望摆脱 OpenSSL bootstrap 依赖链)。
-
-**优化方案**
-- 审计运行时实际选用的 TLS(代码中 `Client::builder().use_native_tls/use_rustls` 调用点),统一到 rustls(`rustls-tls-native-roots` 以保留系统根证书行为),移除 `native-tls` feature;git2 侧确认 `https` feature 的 TLS 来源后同步评估。风险:企业代理/自签证书环境行为差异,需回归远端连接类功能。
+**收益与风险**:Windows CI 每个受影响 job 省去约 6.6 秒 OpenSSL bootstrap（以 PR #1991 的 Windows job 步骤时间戳为基线），并减少一套 TLS 依赖闭包。显式代理配置仍由 Reqwest 处理；未受系统信任的自签证书仍会按安全默认值拒绝。仓库没有 Reqwest client identity 或自定义 native connector 用法，因此未保留第二后端兼容层。
 
 ### F11(中)Vite dev 强制 100ms 轮询 watch
 
@@ -169,16 +170,30 @@ Cargo.lock 共 1177 个包,其中 112 个名字存在 2 个以上版本(解析�
 **优化方案**
 - 默认关闭 `usePolling`(删除该配置),仅当 `process.env.VITE_USE_POLLING` 显式设置时启用轮询作为逃生口;若必须保留轮询,interval 提到 ≥1000ms。
 
-### F12(中)提示词/公告内容内嵌进 bitfun-core,内容改动触发核心重编
+### F12(中，部分治理)内置 Agent 内容已独立归属，Core 失效链仍存在
 
-**问题描述**
-`src/crates/assembly/core/build.rs` 把 `src/agentic/**/prompts` 与 announcement 的 md/txt 全文生成为巨型 `map.insert(r###"..."###, ...)` Rust 源码(110-183、343-401 行),并对目录逐文件 `rerun-if-changed`。改动任何一个提示词 md → build.rs 重跑 → 生成文件变化 → **202k 行的 bitfun-core 全量重编 + 下游 desktop 重编重链**。提示词是高频改动内容,与代码逻辑无关。
+**2026-08-03 治理结果**
 
-**预期收益**:中(提示词迭代场景的编译时间从"分钟级"降到"秒级")。
+- 35 个内置 Agent prompt 移到无第三方依赖、无 feature 的 `bitfun-agent-content`；Core 只在
+  `product-full` 组装中依赖它，窄 `announcement` feature 不加载该 crate。
+- 26 个 catalog prompt 保留旧 build.rs 生成 Rust 源码时的换行归一化；Memory phase-1 的生产常量与 9 个
+  Insights 常量继续保留旧 `include_str!` 字节行为。Core 继续持有选择、渲染、Memory/Insights 工作流与错误语义。
+- Core build script 不再扫描 Agent prompt；内置 Skill metadata 仅在 `product-full` 生成，announcement
+  内容仅在 `announcement` feature 生成。
+- 未采用 debug 运行时读文件方案。它会使 debug/release 的内容来源、错误时机与自包含行为不同，不符合本轮
+  功能规格完全一致的约束。
 
-**优化方案**
-1. 首选:改用 `include_dir!`(workspace 已有 `include_dir = "0.7"` 依赖,Cargo.toml:112)直接内嵌目录,删除 build.rs 的代码生成路径——虽然内容变化仍触发重编,但可把提示词嵌入下沉到一个**只包含内嵌资源的叶子 crate**,注意:Rust 中依赖变更仍会传递重编下游,所以真正的解法是第 2 条。
-2. dev 构建从文件系统运行时读取(以 `CARGO_MANIFEST_DIR` 定位,debug_assertions 下启用),release 才走内嵌;这样日常提示词调优完全不触发 Rust 重编。风险:dev/release 行为差异,需保留 CI 中 release 路径的冒烟验证。
+**同机热缓存实测**（Windows，`cargo check -p bitfun-core --features product-full`）：
+
+| 场景 | Cargo 失效路径 | 耗时 |
+|---|---|---:|
+| 无改动热检查 | 全部 fresh | 0.92s |
+| 迁移前修改 `init_agents_md.md` | Core build script + `bitfun-core` | 11.38s |
+| 迁移后修改同一 prompt | `bitfun-agent-content` + 依赖它的 `bitfun-core` | 10.02s |
+
+当前收益约 12%，主要来自移除 Core prompt codegen 工作；Rust/Cargo 仍会因直接依赖重建而检查 Core，因此这不是
+“下游完全隔离”。若后续要消除 Core 重检，必须先以独立设计评审 prompt provider 注入或资源打包路径，并证明
+Desktop、CLI、ACP、Server 与 SDK Host 的内容、错误和生命周期完全等价，不能用运行时 fallback 换取表面指标。
 
 ### F13(中)构建/启动编排中的串行步骤
 
@@ -229,6 +244,27 @@ Cargo.lock 共 1177 个包,其中 112 个名字存在 2 个以上版本(解析�
 
 `Cargo.toml:279-280` 的 `incremental = true` 是 dev 默认值,可删;该段落是放置 F5 建议(`debug = "line-tables-only"`)的天然位置。
 
+### F20（已治理）agent-runtime integration test 重复链接
+
+`bitfun-agent-runtime` 没有可选 feature，原 28 个 integration test target 中的 27 个跨平台契约使用相同的依赖闭包，
+却在每次 `cargo test -p bitfun-agent-runtime` 时分别编译和链接。当前通过 `autotests = false` 将它们按定义、会话、
+交互和 long-horizon 职责归入 4 个 target；另保留 1 个 Unix-only 原生进程 target，避免为了减少数量而跨平台或进程
+边界合并。246 个 Unix integration tests、224 个 Windows integration tests 及原有 lib tests 均保留。现有 CI 命令和
+覆盖范围不变，未新增测试、feature、依赖或 workflow；现有边界检查会拒绝未注册入口和未被引用的叶测试文件。
+
+以下是本机观察值，不作为其他机器的固定收益承诺。测量日期 2026-08-03，基线
+`53c8c029a8b6245e810cbee0707c820bc74fb7b8`，Windows 10.0.19045、i7-10700、rustc/cargo 1.97.1；依赖预热后按
+原布局/现布局交错执行 A/B/A/B/A/B，每次运行
+`cargo clean -p bitfun-agent-runtime` 和 `cargo test -p bitfun-agent-runtime --no-run --locked --quiet`：
+
+| 布局 | 三次有效样本 | 中位数 | integration PDB |
+|---|---|---:|---:|
+| 原 28 targets | 12.48s / 15.01s / 13.63s | 13.63s | 312.3 MiB |
+| 现 5 targets | 11.90s / 11.04s / 11.31s | 11.31s | 77.4 MiB |
+
+本机包级 test 编译/链接中位数降低约 17.0%，PDB 体积降低约 75.2%。这是测试可执行目标治理，不代表第三方依赖
+或 feature 数量减少；有独立 feature、平台、进程或外部系统边界的测试仍必须保持独立 target。
+
 ---
 
 ## 三、实施建议清单(可直接派发给实施 agent)
@@ -247,10 +283,11 @@ Cargo.lock 共 1177 个包,其中 112 个名字存在 2 个以上版本(解析�
 | T8 | 提交 Cargo.lock(F6):从 `.gitignore:26` 移除并提交根与 installer 两份 lockfile;CI 删除 `cargo generate-lockfile` 步骤;建立定期依赖更新流程后逐步解除 `Cargo.toml:98-107` 的 `=` 钉版。验收:rust-cache 命中率上升,CI 不再因上游发版突然变慢/失败。 | `.gitignore`、`.github/workflows/*.yml`、`Cargo.toml` | 中(流程变更,需团队确认依赖更新策略) |
 | T9 | Vite watch 去轮询(F11):删除 `src/web-ui/vite.config.ts:68-74` 的 `usePolling/interval`,保留 ignored 列表;以 `VITE_USE_POLLING=1` 环境变量作为网络盘用户逃生口。验收:dev server 空闲 CPU 占用明显下降,HMR 正常。 | `src/web-ui/vite.config.ts` | 低(个别特殊文件系统需逃生口) |
 | T10 | build.rs 确定性输出(F18):`assembly/core/build.rs` 与 `src/apps/cli/build.rs` 生成代码前对 key 排序(HashMap→BTreeMap)。验收:连续两次 clean build 生成的 OUT_DIR 文件字节一致。 | `src/crates/assembly/core/build.rs`、`src/apps/cli/build.rs` | 低 |
-| T11 | reqwest TLS 单栈(F10):审计 `use_native_tls/use_rustls` 调用点后,从 `Cargo.toml:121` 移除 `native-tls` feature,统一 rustls-tls-native-roots;回归远端连接/订阅鉴权/代理场景;评估 Windows OpenSSL bootstrap 链能否随之精简。验收:Cargo.lock 无 native-tls/openssl-sys(git2 除外),网络功能回归通过。 | `Cargo.toml:121`、相关调用点 | 高(TLS 行为变化,企业代理/自签证书场景需重点回归;可放最后) |
+| T11（已完成） | reqwest TLS 单栈(F10):workspace 保持 transport-only，由真实客户端 owner 显式选择 Rustls；删除 native-tls 与无消费者的 Windows OpenSSL bootstrap，保留平台证书验证。验收:Cargo.lock 无 native-tls；Windows 产品图无 openssl-sys，非 Windows 的 Git/libgit2 路径不变；相关最小 feature 与产品入口编译通过。 | 根与客户端 owner `Cargo.toml`、相关调用点、既有 workflow | 已完成；平台信任根行为保留，无第二后端兼容层 |
 | T12 | beforeBuildCommand 并行(F13):新增 `scripts/frontend-build-all.mjs` 并行跑 build:web 与 prepare:mobile-web,tauri.conf.json / tauri.dev.conf.json 的 beforeBuildCommand 指向它;dev.cjs 准备步骤改 Promise.all。验收:desktop:build 前端阶段时长≈max(两者) 而非 sum。 | `src/apps/desktop/tauri.conf.json`、`tauri.dev.conf.json`、`scripts/dev.cjs`、新脚本 | 低 |
 | T13 | bitfun-core 拆分启动(F3,长期):先跑 `cargo build --timings` 与 `cargo tree -d` 存档基线;选 1-2 个低耦合子域(如 announcement、debug-log server)试点拆出独立 crate 并保留 re-export;结合 F12 的"dev 运行时读取提示词"改造。验收:改动试点子域后 `cargo build -p bitfun-desktop` 的重编 crate 数与耗时下降。 | `src/crates/assembly/core/**`、根 `Cargo.toml` members | 中-高(架构改动,分多个 PR 渐进) |
 | T14 | 可选工具链增强(F5):提交 `.cargo/config.toml` 模板(注释形式提供 rust-lld 与 sccache 配置,默认不启用),团队自选开启;CI 冷构建可评估 sccache-action。验收:提供文档,默认行为不变。 | 新增 `.cargo/config.toml`、文档 | 低(默认关闭) |
+| T15（已完成） | agent-runtime integration target 收敛(F20):保持全部 contract test 源与现有 CI 命令不变，将 27 个跨平台契约按定义、会话、交互、long-horizon 职责归为 4 个 target，Unix 原生进程测试保持独立；focused test 使用 `--test <target> <module>::<filter>`。 | `agent-runtime/Cargo.toml`、`agent-runtime/tests/**`、现有 boundary rule 路径 | 已完成；总体 28→5，只减少重复编译/链接，不改变 feature 或依赖闭包 |
 
 ### 快速收益组合(建议第一批实施)
 T2 + T4 + T5 + T6 + T9 + T10 + T12:全部低风险,合计可显著改善日常 dev 循环(启动省 20-60s、增量链接提速、dev CPU 下降)与 build:web 时长;随后再做 T1(最大单项前端收益)、T3(打包 CI)、T7/T8(CI 结构)。
@@ -263,4 +300,4 @@ T2 + T4 + T5 + T6 + T9 + T10 + T12:全部低风险,合计可显著改善日常 d
 - `BitFun-Installer/src-tauri/Cargo.toml:61-65` 的 release profile 同样是 `lto=true + codegen-units=1`(opt-level="z"),T3 的 thin LTO 评估可一并覆盖。
 - Cargo.lock:1177 个包,112 个存在多版本(windows-sys ×6、phf ×6、getrandom ×4、nix ×4、rand ×3、quick-xml ×4 等)。
 - 前端:web-ui 1676 个 TS/TSX、366,580 行;dist 共 872 个 asset,JS 总量 14.3MB,入口 chunk 5.4MB(含 Monaco 内核);public/monaco-editor 14MB/103 文件。
-- 现有良好实践(保持):release-fast profile(Cargo.toml:288-293)、cargo-target-gc 缓存清理、Windows 预编译 OpenSSL、sherpa-onnx prebuilt、CI CARGO_INCREMENTAL=0 + debug=0(ci.yml:74-77)、swatinem/rust-cache、pnpm store 缓存、workspace.dependencies 统一版本声明。
+- 现有良好实践(保持):release-fast profile(Cargo.toml:288-293)、cargo-target-gc 缓存清理、Reqwest Rustls 单栈与平台证书验证、sherpa-onnx prebuilt、CI CARGO_INCREMENTAL=0 + debug=0(ci.yml:74-77)、swatinem/rust-cache、pnpm store 缓存、workspace.dependencies 统一版本声明。

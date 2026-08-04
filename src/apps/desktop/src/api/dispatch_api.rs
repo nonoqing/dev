@@ -10,19 +10,19 @@ use async_trait::async_trait;
 use bitfun_core::infrastructure::PathManager;
 use bitfun_core::service::dispatch::{
     answer_device_dispatch, answer_dispatch, append_device_dispatch, append_dispatch,
-    apply_dispatch_result, DispatchApplyResultRequest, WorkspaceResultApplyOutcome,
     cancel_device_dispatch, cancel_dispatch, cancel_dispatch_cli_install,
-    get_device_dispatch_status, get_dispatch_status, list_device_dispatch_jobs, list_dispatch_jobs,
-    list_dispatch_targets, poll_dispatch_cli_install, probe_device_dispatch_target,
-    probe_dispatch_target, pull_device_dispatch_result, pull_dispatch_result,
-    start_dispatch_cli_install,
-    start_dispatch_cli_source_build, submit_device_dispatch, submit_dispatch,
-    sync_dispatch_model_config,
+    continue_device_dispatch_job, continue_dispatch_job, get_device_dispatch_status,
+    get_dispatch_status, list_device_dispatch_jobs, list_dispatch_jobs, list_dispatch_targets,
+    poll_dispatch_cli_install, probe_device_dispatch_target, probe_dispatch_target,
+    query_device_dispatch_job, query_dispatch_job, start_dispatch_cli_install,
+    submit_device_dispatch, submit_dispatch,
+    sync_device_dispatch_result, sync_dispatch_model_config, sync_dispatch_result,
     DeviceDispatchRpc, DispatchAnswerRequest, DispatchAppendRequest, DispatchConnectionRequest,
-    DispatchInstallPollRequest, DispatchInstallStartRequest, DispatchJobRequest,
-    DispatchListJobsRequest, DispatchListTargetsRequest, DispatchProbeTargetRequest,
-    DispatchStatusRequest, DispatchSubmitRequest, DispatchTarget, DispatchTargetOption,
-    DispatchTargetRequest, OutboundDispatchStore,
+    DispatchContinueRequest, DispatchInstallPollRequest, DispatchInstallStartRequest,
+    DispatchJobRequest, DispatchListJobsRequest, DispatchListTargetsRequest,
+    DispatchProbeTargetRequest, DispatchQueryJobRequest, DispatchSaveTranscriptRequest,
+    DispatchStatusRequest, DispatchSubmitRequest, DispatchSyncResultRequest, DispatchTarget,
+    DispatchTargetOption, DispatchTargetRequest, DispatchTranscriptRequest, OutboundDispatchStore,
 };
 use bitfun_core::service::remote_ssh::dispatch_ssh::{
     DispatchInstallPoll, DispatchInstallStart, DispatchSshProbe,
@@ -107,7 +107,6 @@ pub async fn dispatch_list_targets(
                 device_id: Some(device.device_id),
                 display_name: device.device_name,
                 description: None,
-                default_workspace: None,
                 online: Some(device.online),
             })
         }));
@@ -144,22 +143,6 @@ pub async fn dispatch_install_cli_start(
         .await
         .map_err(|error| error.to_string())?;
     start_dispatch_cli_install(&manager, request)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-/// Build the CLI from source on the target. Offered when no published binary
-/// can run there.
-#[tauri::command]
-pub async fn dispatch_install_cli_source_start(
-    state: State<'_, AppState>,
-    request: DispatchConnectionRequest,
-) -> Result<DispatchInstallStart, String> {
-    let manager = state
-        .get_ssh_manager_async()
-        .await
-        .map_err(|error| error.to_string())?;
-    start_dispatch_cli_source_build(&manager, request)
         .await
         .map_err(|error| error.to_string())
 }
@@ -267,19 +250,19 @@ pub async fn dispatch_status(
         .map_err(|error| error.to_string())
 }
 
-/// Download what a finished snapshot job changed on its target.
+/// Bring a job's work back into the controller's baseline worktree.
 ///
-/// Fetch and report only — the caller shows the diff and the user decides
-/// whether any of it reaches their workspace.
+/// One operation on purpose: the target commits and bundles, then this
+/// controller fast-forwards its baseline onto the result. There is no separate
+/// apply step because there is nothing to reconcile — both sides branched from
+/// the same commit.
 #[tauri::command]
-pub async fn dispatch_pull_result(
+pub async fn dispatch_sync_result(
     state: State<'_, AppState>,
     path_manager: State<'_, Arc<PathManager>>,
-    request: DispatchJobRequest,
+    request: DispatchSyncResultRequest,
 ) -> Result<Value, String> {
     let store = OutboundDispatchStore::new(path_manager.as_ref());
-    // Both transports stage the bundle and its summary identically, so the
-    // apply step below is transport-blind.
     if matches!(
         store
             .get(&request.job_id)
@@ -288,7 +271,7 @@ pub async fn dispatch_pull_result(
             .map(|record| record.target),
         Some(DispatchTarget::Device { .. })
     ) {
-        return pull_device_dispatch_result(&AccountDeviceDispatchRpc, &store, request)
+        return sync_device_dispatch_result(&AccountDeviceDispatchRpc, &store, request)
             .await
             .map_err(|error| error.to_string());
     }
@@ -296,22 +279,68 @@ pub async fn dispatch_pull_result(
         .get_ssh_manager_async()
         .await
         .map_err(|error| error.to_string())?;
-    pull_dispatch_result(&manager, &store, request)
+    sync_dispatch_result(&manager, &store, request)
         .await
         .map_err(|error| error.to_string())
 }
 
-/// Apply a pulled result bundle to a local workspace.
+/// Start the next turn of a dispatch session.
 ///
-/// Aborts without writing when a path changed on both sides, unless the user
-/// explicitly chose to take the target's version.
+/// A dispatch session is a conversation, not a single exchange: this reuses the
+/// target's session, worktree, and event log, so the projection keeps growing
+/// as one transcript.
 #[tauri::command]
-pub async fn dispatch_apply_result(
+pub async fn dispatch_continue(
+    state: State<'_, AppState>,
     path_manager: State<'_, Arc<PathManager>>,
-    request: DispatchApplyResultRequest,
-) -> Result<WorkspaceResultApplyOutcome, String> {
+    request: DispatchContinueRequest,
+) -> Result<Value, String> {
     let store = OutboundDispatchStore::new(path_manager.as_ref());
-    apply_dispatch_result(&store, request)
+    if matches!(
+        store
+            .get(&request.job_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .map(|record| record.target),
+        Some(DispatchTarget::Device { .. })
+    ) {
+        return continue_device_dispatch_job(&AccountDeviceDispatchRpc, &store, request)
+            .await
+            .map_err(|error| error.to_string());
+    }
+    let manager = state
+        .get_ssh_manager_async()
+        .await
+        .map_err(|error| error.to_string())?;
+    continue_dispatch_job(&manager, &store, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn dispatch_query(
+    state: State<'_, AppState>,
+    path_manager: State<'_, Arc<PathManager>>,
+    request: DispatchQueryJobRequest,
+) -> Result<Value, String> {
+    let store = OutboundDispatchStore::new(path_manager.as_ref());
+    if matches!(
+        store
+            .get(&request.job_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .map(|record| record.target),
+        Some(DispatchTarget::Device { .. })
+    ) {
+        return query_device_dispatch_job(&AccountDeviceDispatchRpc, &store, request)
+            .await
+            .map_err(|error| error.to_string());
+    }
+    let manager = state
+        .get_ssh_manager_async()
+        .await
+        .map_err(|error| error.to_string())?;
+    query_dispatch_job(&manager, &store, request)
         .await
         .map_err(|error| error.to_string())
 }
@@ -429,6 +458,48 @@ pub async fn dispatch_append(
         .await
         .map_err(|error| error.to_string())?;
     append_dispatch(&manager, &store, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Read this controller's cached observer transcript for one dispatch job.
+///
+/// Purely local: it touches neither the target nor any local session runtime.
+/// A missing or unreadable cache returns `null` and the observer replays the
+/// job from the beginning.
+#[tauri::command]
+pub async fn dispatch_load_transcript(
+    path_manager: State<'_, Arc<PathManager>>,
+    request: DispatchTranscriptRequest,
+) -> Result<Option<Value>, String> {
+    OutboundDispatchStore::new(path_manager.as_ref())
+        .read_transcript(&request.job_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Persist this controller's observer transcript for one dispatch job.
+///
+/// A `null` transcript erases the cache instead, which is how deleting a
+/// projection drops its cached content right away.
+///
+/// Returns `false` when the transcript exceeds the cache ceiling, in which case
+/// the previous entry is kept and the renderer keeps polling as before.
+#[tauri::command]
+pub async fn dispatch_save_transcript(
+    path_manager: State<'_, Arc<PathManager>>,
+    request: DispatchSaveTranscriptRequest,
+) -> Result<bool, String> {
+    let store = OutboundDispatchStore::new(path_manager.as_ref());
+    let Some(transcript) = request.transcript else {
+        return store
+            .remove_transcript(&request.job_id)
+            .await
+            .map(|()| true)
+            .map_err(|error| error.to_string());
+    };
+    store
+        .write_transcript(&request.job_id, &transcript)
         .await
         .map_err(|error| error.to_string())
 }

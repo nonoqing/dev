@@ -16,6 +16,7 @@ copy long rule bodies back into this entry.
 2. Desktop: prefer `pnpm run desktop:dev`. Use `pnpm run desktop:preview:debug` only for faster frontend-only cold start (no Rust auto-rebuild). See [`docs/development/common-commands.md`](docs/development/common-commands.md).
 3. After Rust edits: `pnpm run fmt:rs` (changed/staged `.rs` only). Use `cargo fmt` only when you intentionally want broader formatting coverage.
 4. Use **Route by task** / **Standards map**, then pick checks from [`docs/development/verification.md`](docs/development/verification.md).
+5. Root workspace dependencies own compatible versions; consuming crates select only the features they use. Keep test-only features in `dev-dependencies`, attach feature-gated service capabilities to the owning crate feature, and do not use `tokio/full` to bypass dependency boundaries.
 
 ## How to use this file
 
@@ -58,7 +59,7 @@ When the task hits a row below, open that authority. Do not stop at the STD-01 m
 
 | Topic | Open when | Authority |
 |---|---|---|
-| Product architecture | `bitfun-core` split, feature/dependency boundaries, build-speed refactors | [`docs/architecture/product-architecture.md`](docs/architecture/product-architecture.md) (see §1.1); topic map [`docs/architecture/README.md`](docs/architecture/README.md) |
+| Product architecture | `bitfun-core` split, feature/dependency boundaries, build-speed refactors | [`docs/architecture/product-architecture.md`](docs/architecture/product-architecture.md) (see §1.1); Rust build dependencies: [`docs/architecture/rust-build-dependency-boundaries.md`](docs/architecture/rust-build-dependency-boundaries.md); topic map [`docs/architecture/README.md`](docs/architecture/README.md) |
 | Agent Runtime deployment | Multi-GUI/TUI/Remote instances, shared Session control, process topology | [`docs/architecture/agent-runtime-deployment-design.md`](docs/architecture/agent-runtime-deployment-design.md) |
 | Agent hooks | Native Codex-compatible hooks, BitFun deviations / gates | [`docs/specs/agent-hooks.md`](docs/specs/agent-hooks.md) ([中文](docs/specs/agent-hooks.zh-CN.md)); do not fork the Codex hook contract |
 | Physical layers | Where a crate/app belongs, dependency direction | **Layered Module Index** in this file |
@@ -104,7 +105,7 @@ Dependencies flow top to bottom. This table is the **physical** crate layout, no
 | # | Layer | Path | Owns | Modules / entries | Layer doc |
 |---|---|---|---|---|---|
 | 1 | Interfaces and entrypoints | `src/apps/*`, `src/web-ui`, `src/mobile-web`, `BitFun-Installer`, `tests/e2e`, `src/crates/interfaces` | Product hosts, commands, UI entrypoints, protocol interfaces, and cross-surface tests | desktop, CLI, server, relay, Web UI, mobile web, installer, E2E, `acp`, `sdk-host` | nearest local `AGENTS.md`; [interfaces](src/crates/interfaces/AGENTS.md) |
-| 2 | Product assembly | `src/crates/assembly` | Compatibility exports, product capability selection, product-full wiring, adapter/service registration, and ecosystem-neutral source coordination | `core`, `external-sources`, `product-capabilities` | [AGENTS.md](src/crates/assembly/AGENTS.md) |
+| 2 | Product assembly | `src/crates/assembly` | Compatibility exports, product capability selection, product-full wiring, immutable built-in Agent content, adapter/service registration, and ecosystem-neutral source coordination | `agent-content`, `core`, `external-sources`, `product-capabilities` | [AGENTS.md](src/crates/assembly/AGENTS.md) |
 | 3 | Adapters | `src/crates/adapters` | AI/transport/WebDriver protocol adapters, external AI work source adapters (OpenCode/Claude Code/Codex), and external-provider translation | `agent-runtime-ipc`, `ai-adapters`, `opencode-adapter`, `claude-code-adapter`, `codex-adapter`, `static-hook-support`, `transport`, `webdriver` | [AGENTS.md](src/crates/adapters/AGENTS.md) |
 | 4 | Services | `src/crates/services` | Reusable OS, filesystem, terminal, MCP, remote, git, watch, process, LSP plugin registry, session persistence primitives, MiniApp runtime IO, and network implementations | `services-core`, `services-integrations`, `miniapp-market-service`, `relay-service`, `page-function-runtime`, `terminal` | [AGENTS.md](src/crates/services/AGENTS.md) |
 | 5 | Execution primitives | `src/crates/execution` | Portable agent, harness, stream, DeepReview policy/report, plugin runtime client, typed-service, tool-contract, tool-group, and tool-execution building blocks | `agent-runtime`, `agent-stream`, `tool-contracts`, `harness`, `plugin-runtime-client`, `runtime-services`, `tool-provider-groups`, `tool-execution`, `tool-call-jsonrepair` | [AGENTS.md](src/crates/execution/AGENTS.md) |

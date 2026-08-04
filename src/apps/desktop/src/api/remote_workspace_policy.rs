@@ -148,6 +148,38 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::LocalOnly,
     ),
     (
+        "appearance_market_browse",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
+        "appearance_market_download_release",
+        RemoteWorkspacePolicy::LocalOnly,
+    ),
+    (
+        "appearance_market_get_listing",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
+        "appearance_market_get_review_submission",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
+        "appearance_market_list_review_submissions",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
+        "appearance_market_list_submissions",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
+        "appearance_market_review_submission",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
+        "appearance_market_withdraw_submission",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
         "account_token_expired",
         RemoteWorkspacePolicy::WorkspaceAgnostic,
     ),
@@ -350,10 +382,6 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::WorkspaceAgnostic,
     ),
     (
-        "dispatch_install_cli_source_start",
-        RemoteWorkspacePolicy::WorkspaceAgnostic,
-    ),
-    (
         "dispatch_install_cli_start",
         RemoteWorkspacePolicy::WorkspaceAgnostic,
     ),
@@ -362,11 +390,7 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::WorkspaceAgnostic,
     ),
     (
-        "dispatch_apply_result",
-        RemoteWorkspacePolicy::WorkspaceAgnostic,
-    ),
-    (
-        "dispatch_pull_result",
+        "dispatch_sync_result",
         RemoteWorkspacePolicy::WorkspaceAgnostic,
     ),
     (
@@ -383,7 +407,20 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     ),
     ("dispatch_answer", RemoteWorkspacePolicy::WorkspaceAgnostic),
     ("dispatch_append", RemoteWorkspacePolicy::WorkspaceAgnostic),
+    (
+        "dispatch_continue",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
+        "dispatch_load_transcript",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
+        "dispatch_save_transcript",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
     ("dispatch_status", RemoteWorkspacePolicy::WorkspaceAgnostic),
+    ("dispatch_query", RemoteWorkspacePolicy::WorkspaceAgnostic),
     ("dispatch_submit", RemoteWorkspacePolicy::WorkspaceAgnostic),
     (
         "dismiss_announcement",
@@ -542,6 +579,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::RemoteUnsupported,
     ),
     (
+        "get_workspace_reference_snapshot",
+        RemoteWorkspacePolicy::RemoteUnsupported,
+    ),
+    (
         "get_native_prompt_command_conflicts_command",
         RemoteWorkspacePolicy::RemoteUnsupported,
     ),
@@ -651,6 +692,7 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         "get_session_file_diff_stats",
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
+    ("get_session_lineage", RemoteWorkspacePolicy::RemoteRouted),
     ("get_session_files", RemoteWorkspacePolicy::LegacyUnaudited),
     (
         "get_session_operations",
@@ -907,6 +949,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         "load_persisted_session_metadata",
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
+    (
+        "load_session_turn_window",
+        RemoteWorkspacePolicy::RemoteRouted,
+    ),
     ("load_session_turns", RemoteWorkspacePolicy::LegacyUnaudited),
     (
         "logout_subscription_account",
@@ -1142,6 +1188,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     ),
     ("miniapp_market_install", RemoteWorkspacePolicy::LocalOnly),
     (
+        "miniapp_market_installed_origins",
+        RemoteWorkspacePolicy::LocalOnly,
+    ),
+    (
         "miniapp_market_installed_status",
         RemoteWorkspacePolicy::LocalOnly,
     ),
@@ -1298,6 +1348,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     ("read_file_content", RemoteWorkspacePolicy::LegacyUnaudited),
     ("read_mcp_resource", RemoteWorkspacePolicy::LegacyUnaudited),
     ("record_file_change", RemoteWorkspacePolicy::LegacyUnaudited),
+    (
+        "record_local_command_turn",
+        RemoteWorkspacePolicy::RemoteRouted,
+    ),
     (
         "refresh_model_client",
         RemoteWorkspacePolicy::LegacyUnaudited,
@@ -1664,6 +1718,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::RemoteUnsupported,
     ),
     (
+        "set_external_subagent_model_binding_command",
+        RemoteWorkspacePolicy::RemoteUnsupported,
+    ),
+    (
         "set_global_skill_disabled",
         RemoteWorkspacePolicy::WorkspaceAgnostic,
     ),
@@ -2019,6 +2077,15 @@ mod tests {
                 "{command} must never fall back to the controller's local MCP config"
             );
         }
+    }
+
+    #[test]
+    fn workspace_reference_snapshot_explicitly_rejects_remote_workspaces() {
+        assert_eq!(
+            remote_workspace_policy("get_workspace_reference_snapshot"),
+            Some(RemoteWorkspacePolicy::RemoteUnsupported),
+            "workspace references must never scan controller-local OpenCode config for a remote workspace"
+        );
     }
 
     #[test]

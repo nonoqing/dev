@@ -65,7 +65,7 @@ SessionManager -> Session -> DialogTurn -> ModelRound
   concrete managed-package discovery and trust persistence stay in
   `services-integrations`, while ecosystem parsing and PluginRuntimeClient
   behavior remain in their adapter and execution owners.
-- `plugin_runtime` and `external_sources` are the reviewed product-full
+- `plugin_runtime`, `external_sources`, and `instruction_sources` are the reviewed product-full
   composition files allowed to select ecosystem adapters for their respective
   capability contracts. Product surfaces consume product-level views and must
   not import adapter or raw plugin runtime client types.
@@ -79,6 +79,21 @@ SessionManager -> Session -> DialogTurn -> ModelRound
 - Feature work must keep `product-full` as the compatibility product assembly
   boundary unless a separate product matrix review changes default capability
   selection.
+- Keep the light compatibility features independently compilable. Local service
+  profiles are `dispatch-store`, `lsp`, `terminal`, `workspace-runtime`, and
+  `workspace-watch`; `remote-workspace` adds only the remote workspace facade,
+  while `ssh-remote` adds concrete SSH transport. Integration facades
+  `announcement`, `file-watch`, `git`, and `review-platform` remain independent,
+  with `service-integrations` only their compatibility aggregate. None of these
+  narrow features may enable `product-full` directly or transitively.
+- `product-full` must explicitly compose every capability it consumes, including
+  product-only `services-core` features such as `permission`, `session-git`, and
+  `runtime-ownership`. Do not put those features on the dependency declaration,
+  because Cargo feature union would force them into every core consumer.
+- Keep `cargo check -p bitfun-core --no-default-features` viable. Gate
+  product-only modules at their owner feature; if a light facade operation
+  cannot safely complete without a product owner, fail closed and preserve any
+  durable recovery state instead of enabling `product-full` implicitly.
 
 ## Owner References
 
@@ -107,7 +122,11 @@ Use the smallest check that matches the touched behavior:
 
 ```bash
 cargo check --workspace
-cargo test -p bitfun-core <test_name> -- --nocapture
+cargo check -p bitfun-core --no-default-features
+cargo check -p bitfun-core --no-default-features --features workspace-runtime
+cargo check -p bitfun-core --no-default-features --features remote-workspace
+cargo check -p bitfun-core --no-default-features --features ssh-remote
+cargo test -p bitfun-core --lib <test_name> -- --nocapture
 node scripts/check-core-boundaries.mjs
 ```
 

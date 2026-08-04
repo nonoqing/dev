@@ -1,12 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { shouldConfirmDispatchAutoApproval } from './dispatchPreflight';
+import {
+  BASE_DISPATCH_CAPABILITIES,
+  DISPATCH_PROTOCOL_VERSION,
+} from './dispatchPreflight';
 
 describe('dispatch preflight', () => {
-  it('confirms auto approval only for submit and ambiguous submit retry', () => {
-    expect(shouldConfirmDispatchAutoApproval('auto', 'submitting')).toBe(true);
-    expect(shouldConfirmDispatchAutoApproval('auto', 'submission_unknown')).toBe(true);
-    expect(shouldConfirmDispatchAutoApproval('auto', 'queued')).toBe(false);
-    expect(shouldConfirmDispatchAutoApproval('auto', 'running')).toBe(false);
-    expect(shouldConfirmDispatchAutoApproval('remote', 'submitting')).toBe(false);
+  it('requires protocol v4 Git worktree delivery without a snapshot fallback', () => {
+    expect(DISPATCH_PROTOCOL_VERSION).toBe(4);
+    expect(BASE_DISPATCH_CAPABILITIES).toEqual(expect.arrayContaining([
+      'workspace_git_worktree',
+      'workspace_git_bundle_upload',
+      'workspace_git_sync',
+    ]));
+    expect(BASE_DISPATCH_CAPABILITIES).not.toEqual(expect.arrayContaining([
+      'workspace_snapshot_exact',
+      'workspace_snapshot_chunked',
+      'workspace_snapshot_cache',
+      'workspace_result_bundle',
+    ]));
   });
 });

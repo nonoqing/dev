@@ -27,15 +27,14 @@ use bitfun_agent_tools::{
     build_tool_execution_timeout_presentation,
     build_user_rejected_tool_presentation_with_instruction,
     build_user_steering_interrupted_presentation, build_write_tail_closure_notice,
-    render_tool_result_for_assistant, truncate_raw_tool_arguments_preview,
-    truncate_tool_arguments_preview, validate_tool_execution_admission, PermissionIntent,
+    render_tool_result_for_assistant, validate_tool_execution_admission, PermissionIntent,
     ResolvedToolInvocation, ToolExecutionAdmissionRejection, ToolExecutionAdmissionRequest,
     ToolExecutionErrorPresentation, GET_TOOL_SPEC_TOOL_NAME, USER_STEERING_INTERRUPTED_MESSAGE,
 };
 use bitfun_runtime_ports::{
     wildcard_matches, PermissionEffect, PermissionGrant, PermissionReply, PermissionRequest,
     PermissionRequestSource, PermissionRequestSourceKind, PermissionResourceCaseSensitivity,
-    PermissionRule, RoundInjectionToolPreemption,
+    ResolvedPermissionPolicy, RoundInjectionToolPreemption,
 };
 use futures::future::join_all;
 use log::{debug, error, info, warn};
@@ -202,23 +201,24 @@ fn build_error_execution_result(
     task: Option<ToolTask>,
     error: &BitFunError,
 ) -> ToolExecutionResult {
+    let error_message = error.to_string();
+    let category = classify_tool_error(error);
     let (tool_id, wire_tool_name, effective_tool_name, execution_time_ms, provided_arguments) =
         if let Some(task) = task {
-            let preview = if task.invocation.is_deferred() {
-                truncate_tool_arguments_preview(task.effective_arguments())
-            } else {
-                task.tool_call
-                    .raw_arguments
-                    .as_deref()
-                    .map(truncate_raw_tool_arguments_preview)
-                    .unwrap_or_else(|| truncate_tool_arguments_preview(task.effective_arguments()))
-            };
+            // Parsed arguments are already present on the preceding tool call.
+            // Preserve the complete provider output only when it could not be
+            // parsed into that structured call.
+            let provided_arguments = task
+                .tool_call
+                .is_error
+                .then(|| task.tool_call.raw_arguments.clone())
+                .flatten();
             (
                 task.tool_call.tool_id,
                 task.tool_call.tool_name,
                 task.invocation.effective_tool_name,
                 elapsed_ms_since(task.created_at),
-                Some(preview),
+                provided_arguments,
             )
         } else {
             warn!("Task not found in state manager: {}", task_id);
@@ -230,8 +230,6 @@ fn build_error_execution_result(
                 None,
             )
         };
-    let error_message = error.to_string();
-    let category = classify_tool_error(error);
     let presentation = build_tool_execution_error_presentation(
         &effective_tool_name,
         category,
@@ -550,7 +548,7 @@ fn permission_resource_case_sensitivity(
 
 fn permission_intent_effect(
     intent: &PermissionIntent,
-    rules: &[PermissionRule],
+    policy: &ResolvedPermissionPolicy,
     grants: &[PermissionGrant],
     case_sensitivity: PermissionResourceCaseSensitivity,
 ) -> PermissionEffect {
@@ -559,7 +557,8 @@ fn permission_intent_effect(
 
     for resource in &intent.resources {
         let configured_effect = if intent.action == "bash" {
-            rules
+            policy
+                .rules()
                 .iter()
                 .rev()
                 .find(|rule| {
@@ -580,8 +579,19 @@ fn permission_intent_effect(
                 .map(|rule| rule.effect)
                 .unwrap_or(PermissionEffect::Ask)
         } else {
-            evaluator.evaluate_resource(&intent.action, resource, rules)
+            evaluator.evaluate_resource(&intent.action, resource, policy.rules())
         };
+        let configured_effect =
+            policy
+                .constraint_layers()
+                .iter()
+                .fold(configured_effect, |effect, layer| {
+                    effect.most_restrictive(evaluator.evaluate_constraint_resource(
+                        &intent.action,
+                        resource,
+                        layer,
+                    ))
+                });
 
         match configured_effect {
             PermissionEffect::Deny => return PermissionEffect::Deny,
@@ -701,7 +711,7 @@ impl ToolPipeline {
         }
 
         let (project_id, project_path) = permission_scope(&context, &intents)?;
-        let permission_rules = task.options.permission_rules.clone();
+        let permission_policy = task.options.permission_policy.clone();
         let case_sensitivity = permission_resource_case_sensitivity(&context);
         let round_id = task.context.round_id.clone();
         let tool_call_id = task.tool_call.tool_id.clone();
@@ -724,7 +734,7 @@ impl ToolPipeline {
         let mut asks = Vec::new();
 
         for intent in intents {
-            match permission_intent_effect(&intent, &permission_rules, &grants, case_sensitivity) {
+            match permission_intent_effect(&intent, &permission_policy, &grants, case_sensitivity) {
                 PermissionEffect::Allow => {}
                 PermissionEffect::Ask => asks.push(intent),
                 PermissionEffect::Deny => {
@@ -1639,16 +1649,11 @@ impl ToolPipeline {
         let invalid_call_error = if let Some(error) = task.invocation_resolution_error.clone() {
             Some(error)
         } else if wire_tool_name.is_empty() || tool_is_error {
-            let raw_arguments_preview = task
-                .tool_call
-                .raw_arguments
-                .as_deref()
-                .map(truncate_raw_tool_arguments_preview);
             Some(build_invalid_tool_call_error_message(
                 &wire_tool_name,
                 tool_is_error,
                 recovered_from_truncation,
-                raw_arguments_preview,
+                None,
             ))
         } else if recovered_write_has_potentially_truncated_marked_path(
             &tool_name,
@@ -1749,7 +1754,30 @@ impl ToolPipeline {
             BitFunError::tool(error_msg)
         })?;
 
-        let cancellation_token = CancellationToken::new();
+        let cancellation_token = task
+            .options
+            .parent_cancellation_token
+            .as_ref()
+            .map(CancellationToken::child_token)
+            .unwrap_or_default();
+        if cancellation_token.is_cancelled() {
+            self.state_manager
+                .update_state(
+                    &tool_id,
+                    ToolExecutionState::Cancelled {
+                        reason: "Tool was cancelled before validation".to_string(),
+                        duration_ms: Some(elapsed_ms_u64(start_time)),
+                        queue_wait_ms: Some(queue_wait_ms),
+                        preflight_ms: Some(elapsed_ms_u64(start_time)),
+                        confirmation_wait_ms: Some(0),
+                        execution_ms: None,
+                    },
+                )
+                .await;
+            return Err(BitFunError::Cancelled(
+                "Tool was cancelled before validation".to_string(),
+            ));
+        }
         let tool_context = self.build_tool_use_context(&task, cancellation_token.clone());
         // Keep the registered mux in the execution path. It rechecks the
         // persisted conflict choice immediately before dispatch and applies
@@ -1789,6 +1817,26 @@ impl ToolPipeline {
         // Register cancellation only after deterministic validation and registry lookup succeed.
         self.cancellation_tokens
             .insert(tool_id.clone(), cancellation_token.clone());
+
+        if cancellation_token.is_cancelled() {
+            self.state_manager
+                .update_state(
+                    &tool_id,
+                    ToolExecutionState::Cancelled {
+                        reason: "Tool was cancelled during validation".to_string(),
+                        duration_ms: Some(elapsed_ms_u64(start_time)),
+                        queue_wait_ms: Some(queue_wait_ms),
+                        preflight_ms: Some(elapsed_ms_u64(start_time)),
+                        confirmation_wait_ms: Some(0),
+                        execution_ms: None,
+                    },
+                )
+                .await;
+            self.cancellation_tokens.remove(&tool_id);
+            return Err(BitFunError::Cancelled(
+                "Tool was cancelled during validation".to_string(),
+            ));
+        }
 
         let has_prepared_plan = self.permission_plans.lock().await.contains_key(&tool_id);
         let permission_authorization = if has_prepared_plan {
@@ -2377,6 +2425,18 @@ impl ToolPipeline {
         );
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_tool_task_for_test(&self, task: ToolTask) {
+        self.state_manager.create_task(task).await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tool_task_is_cancelled_for_test(&self, tool_id: &str) -> bool {
+        self.state_manager
+            .get_task(tool_id)
+            .is_some_and(|task| matches!(task.state, ToolExecutionState::Cancelled { .. }))
+    }
 }
 
 #[cfg(test)]
@@ -2398,10 +2458,10 @@ mod tests {
     };
     use bitfun_runtime_ports::{
         ClockPort, PermissionAuditEvent, PermissionAuditRecord, PermissionAuditStorePort,
-        PermissionGrant, PermissionGrantKey, PermissionGrantStorePort, PermissionPolicyPreset,
-        PermissionReplyStorePort, PortResult, RoundInjection, RoundInjectionExecutionPolicy,
-        RoundInjectionKind, RoundInjectionTarget, RoundInjectionToolPreemption,
-        RuntimeServiceCapability, RuntimeServicePort,
+        PermissionConstraintLayer, PermissionGrant, PermissionGrantKey, PermissionGrantStorePort,
+        PermissionPolicyPreset, PermissionReplyStorePort, PermissionRule, PortResult,
+        RoundInjection, RoundInjectionExecutionPolicy, RoundInjectionKind, RoundInjectionTarget,
+        RoundInjectionToolPreemption, RuntimeServiceCapability, RuntimeServicePort,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2463,11 +2523,14 @@ mod tests {
     #[test]
     fn bash_permission_allows_only_exact_command_grants() {
         let intent = PermissionIntent::new("bash", vec!["git status && rm -rf build".to_string()]);
-        let wildcard_allow = vec![PermissionRule::new(
-            "bash",
-            "git *",
-            PermissionEffect::Allow,
-        )];
+        let wildcard_allow = ResolvedPermissionPolicy::new(
+            vec![PermissionRule::new(
+                "bash",
+                "git *",
+                PermissionEffect::Allow,
+            )],
+            Vec::new(),
+        );
         assert_eq!(
             permission_intent_effect(
                 &intent,
@@ -2478,11 +2541,14 @@ mod tests {
             PermissionEffect::Ask
         );
 
-        let exact_allow = vec![PermissionRule::new(
-            "bash",
-            "git status && rm -rf build",
-            PermissionEffect::Allow,
-        )];
+        let exact_allow = ResolvedPermissionPolicy::new(
+            vec![PermissionRule::new(
+                "bash",
+                "git status && rm -rf build",
+                PermissionEffect::Allow,
+            )],
+            Vec::new(),
+        );
         assert_eq!(
             permission_intent_effect(
                 &intent,
@@ -2493,7 +2559,10 @@ mod tests {
             PermissionEffect::Allow
         );
 
-        let wildcard_deny = vec![PermissionRule::new("bash", "*", PermissionEffect::Deny)];
+        let wildcard_deny = ResolvedPermissionPolicy::new(
+            vec![PermissionRule::new("bash", "*", PermissionEffect::Deny)],
+            Vec::new(),
+        );
         assert_eq!(
             permission_intent_effect(
                 &intent,
@@ -2508,7 +2577,10 @@ mod tests {
     #[test]
     fn full_access_baseline_allows_bash_commands() {
         let intent = PermissionIntent::new("bash", vec!["git status && rm -rf build".to_string()]);
-        let full_access_rules = PermissionPolicyPreset::FullAccess.baseline_rules();
+        let full_access_rules = ResolvedPermissionPolicy::new(
+            PermissionPolicyPreset::FullAccess.baseline_rules(),
+            Vec::new(),
+        );
 
         assert_eq!(
             permission_intent_effect(
@@ -2543,11 +2615,14 @@ mod tests {
             )
         );
 
-        let allow = vec![PermissionRule::new(
-            "page_publish",
-            "*",
-            PermissionEffect::Allow,
-        )];
+        let allow = ResolvedPermissionPolicy::new(
+            vec![PermissionRule::new(
+                "page_publish",
+                "*",
+                PermissionEffect::Allow,
+            )],
+            Vec::new(),
+        );
         assert_eq!(
             permission_intent_effect(
                 &intent,
@@ -2557,11 +2632,14 @@ mod tests {
             ),
             PermissionEffect::Ask
         );
-        let deny = vec![PermissionRule::new(
-            "page_publish",
-            "*",
-            PermissionEffect::Deny,
-        )];
+        let deny = ResolvedPermissionPolicy::new(
+            vec![PermissionRule::new(
+                "page_publish",
+                "*",
+                PermissionEffect::Deny,
+            )],
+            Vec::new(),
+        );
         assert_eq!(
             permission_intent_effect(
                 &intent,
@@ -3053,11 +3131,14 @@ mod tests {
                 readonly: false,
             }));
         let mut options = ToolExecutionOptions::default();
-        options.permission_rules = vec![PermissionRule::new(
-            "custom_tool",
-            "UnclassifiedMutation",
-            PermissionEffect::Deny,
-        )];
+        options.permission_policy = ResolvedPermissionPolicy::new(
+            vec![PermissionRule::new(
+                "custom_tool",
+                "UnclassifiedMutation",
+                PermissionEffect::Deny,
+            )],
+            Vec::new(),
+        );
 
         let results = pipeline
             .execute_tools(
@@ -3135,11 +3216,14 @@ mod tests {
         .await;
 
         let mut allow_options = ToolExecutionOptions::default();
-        allow_options.permission_rules = vec![PermissionRule::new(
-            "edit",
-            "src/*",
-            PermissionEffect::Allow,
-        )];
+        allow_options.permission_policy = ResolvedPermissionPolicy::new(
+            vec![PermissionRule::new(
+                "edit",
+                "src/*",
+                PermissionEffect::Allow,
+            )],
+            Vec::new(),
+        );
         let results = pipeline
             .execute_tools(
                 vec![test_tool_call("allow", "Write")],
@@ -3153,10 +3237,13 @@ mod tests {
 
         let mut deny_options = ToolExecutionOptions::default();
         deny_options.auto_approve_ask = true;
-        deny_options.permission_rules = vec![
-            PermissionRule::new("edit", "src/*", PermissionEffect::Allow),
-            PermissionRule::new("edit", "src/private/*", PermissionEffect::Deny),
-        ];
+        deny_options.permission_policy = ResolvedPermissionPolicy::new(
+            vec![
+                PermissionRule::new("edit", "src/*", PermissionEffect::Allow),
+                PermissionRule::new("edit", "src/private/*", PermissionEffect::Deny),
+            ],
+            Vec::new(),
+        );
         let results = pipeline
             .execute_tools(
                 vec![test_tool_call("deny", "Write")],
@@ -3175,6 +3262,74 @@ mod tests {
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(results[0].result.result["category"], "permission_denied");
+    }
+
+    #[tokio::test]
+    async fn independent_permission_constraints_tighten_but_never_widen_host_policy() {
+        let pipeline = test_tool_pipeline();
+        let calls = Arc::new(AtomicUsize::new(0));
+        register_v2_file_test_tool(
+            &pipeline,
+            vec![PermissionIntent::new(
+                "edit",
+                vec!["src/generated/output.rs".to_string()],
+            )],
+            Arc::clone(&calls),
+        )
+        .await;
+
+        let mut host_deny = ToolExecutionOptions::default();
+        host_deny.auto_approve_ask = true;
+        host_deny.permission_policy = ResolvedPermissionPolicy::new(
+            vec![PermissionRule::new(
+                "edit",
+                "src/generated/*",
+                PermissionEffect::Deny,
+            )],
+            vec![PermissionConstraintLayer::new(vec![PermissionRule::new(
+                "edit",
+                "*",
+                PermissionEffect::Allow,
+            )])],
+        );
+        pipeline
+            .execute_tools(
+                vec![test_tool_call("host-deny", "Write")],
+                permission_test_context(),
+                host_deny,
+            )
+            .await
+            .expect("constraint allow must not widen host denial");
+
+        let mut external_deny = ToolExecutionOptions::default();
+        external_deny.auto_approve_ask = true;
+        external_deny.permission_policy = ResolvedPermissionPolicy::new(
+            vec![PermissionRule::new("edit", "*", PermissionEffect::Allow)],
+            vec![PermissionConstraintLayer::new(vec![PermissionRule::new(
+                "edit",
+                "src/generated/*",
+                PermissionEffect::Deny,
+            )])],
+        );
+        pipeline
+            .execute_tools(
+                vec![test_tool_call("external-deny", "Write")],
+                permission_test_context(),
+                external_deny,
+            )
+            .await
+            .expect("constraint denial should tighten host allow");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        for tool_id in ["host-deny", "external-deny"] {
+            assert!(matches!(
+                pipeline
+                    .state_manager
+                    .get_task(tool_id)
+                    .map(|task| task.state),
+                Some(ToolExecutionState::Rejected { .. })
+            ));
+        }
     }
 
     /// A PreToolUse hook approval waives the interactive permission prompt.
@@ -3202,11 +3357,14 @@ mod tests {
             .insert("hook-approved".to_string());
 
         let mut deny_options = ToolExecutionOptions::default();
-        deny_options.permission_rules = vec![PermissionRule::new(
-            "edit",
-            "src/private/*",
-            PermissionEffect::Deny,
-        )];
+        deny_options.permission_policy = ResolvedPermissionPolicy::new(
+            vec![PermissionRule::new(
+                "edit",
+                "src/private/*",
+                PermissionEffect::Deny,
+            )],
+            Vec::new(),
+        );
         let results = pipeline
             .execute_tools(
                 vec![test_tool_call("hook-approved", "Write")],
@@ -3723,10 +3881,13 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 3);
 
         let mut deny_options = ToolExecutionOptions::default();
-        deny_options.permission_rules = vec![
-            PermissionRule::new("edit", "src/*", PermissionEffect::Allow),
-            PermissionRule::new("edit", "src/private/*", PermissionEffect::Deny),
-        ];
+        deny_options.permission_policy = ResolvedPermissionPolicy::new(
+            vec![
+                PermissionRule::new("edit", "src/*", PermissionEffect::Allow),
+                PermissionRule::new("edit", "src/private/*", PermissionEffect::Deny),
+            ],
+            Vec::new(),
+        );
         pipeline
             .execute_tools(
                 vec![test_tool_call("deny-after-grant", "Write")],
@@ -4088,10 +4249,12 @@ mod tests {
     }
 
     #[test]
-    fn error_result_prefers_raw_arguments_preview_when_available() {
+    fn error_result_preserves_full_raw_arguments_for_unparseable_calls() {
         let mut task = test_tool_task("tool_1", "Git");
         task.tool_call.arguments = json!({});
-        task.tool_call.raw_arguments = Some("{\"operation\":\"log\"".to_string());
+        task.tool_call.is_error = true;
+        let raw_arguments = format!("{{\"operation\":\"{}", "log".repeat(512));
+        task.tool_call.raw_arguments = Some(raw_arguments.clone());
 
         let result = build_error_execution_result(
             "tool_1",
@@ -4101,20 +4264,38 @@ mod tests {
 
         assert_eq!(
             result.result.result["provided_arguments"],
-            serde_json::Value::String("{\"operation\":\"log\"".to_string())
+            serde_json::Value::String(raw_arguments.clone())
         );
         assert!(result
             .result
             .result_for_assistant
             .as_deref()
             .unwrap_or_default()
-            .contains("Provided arguments: {\"operation\":\"log\""));
+            .ends_with(&raw_arguments));
         assert!(!result
             .result
             .result_for_assistant
             .as_deref()
             .unwrap_or_default()
-            .contains("Raw arguments:"));
+            .contains("[truncated"));
+    }
+
+    #[test]
+    fn error_result_omits_arguments_for_parsed_validation_errors() {
+        let mut task = test_tool_task("tool_1", "Git");
+        task.tool_call.raw_arguments = Some(r#"{\"operation\":\"log\"}"#.to_string());
+
+        let result = build_error_execution_result(
+            "tool_1",
+            Some(task),
+            &BitFunError::Validation("operation is not supported".to_string()),
+        );
+
+        assert!(result.result.result["provided_arguments"].is_null());
+        assert_eq!(
+            result.result.result_for_assistant.as_deref(),
+            Some("Tool 'Git' failed (invalid_arguments): Validation error: operation is not supported")
+        );
     }
 
     #[tokio::test]

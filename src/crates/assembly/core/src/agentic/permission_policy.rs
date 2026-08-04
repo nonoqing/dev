@@ -1,7 +1,10 @@
+use crate::service::config::global::GlobalConfigManager;
 use crate::service::config::types::{AgentProfileConfig, GlobalConfig};
+use crate::util::errors::BitFunResult;
 use bitfun_runtime_ports::{
     resolve_child_permission_policy, resolve_permission_policy, ChildPermissionPolicyLayers,
-    PermissionEffect, PermissionPolicyLayers, PermissionRule, PermissionRuntimeCeiling,
+    PermissionConstraintLayer, PermissionEffect, PermissionPolicyLayers, PermissionRule,
+    PermissionRuntimeCeiling, ResolvedPermissionPolicy,
 };
 
 pub(crate) fn derive_parent_permission_runtime_ceiling(
@@ -21,18 +24,31 @@ pub(crate) fn derive_parent_permission_runtime_ceiling(
         .expect("parent permission ceiling extraction must exclude allow rules")
 }
 
-pub(crate) fn resolve_effective_permission_rules(
+pub(crate) async fn load_parent_permission_runtime_ceiling(
+    agent_type: Option<&str>,
+) -> BitFunResult<PermissionRuntimeCeiling> {
+    let service = GlobalConfigManager::get_service().await?;
+    let global: GlobalConfig = service.get_config(None).await?;
+    let profile = agent_type.and_then(|agent_type| {
+        let profile_id = crate::agentic::agents::resolve_mode_config_profile_id(agent_type);
+        global.ai.agent_profiles.get(profile_id.as_ref())
+    });
+    Ok(derive_parent_permission_runtime_ceiling(profile))
+}
+
+pub(crate) fn resolve_effective_permission_policy(
     global: &GlobalConfig,
     project_rules: &[PermissionRule],
     agent_profile: Option<&AgentProfileConfig>,
+    agent_definition_constraints: Option<&PermissionConstraintLayer>,
     parent_runtime_ceiling: Option<&PermissionRuntimeCeiling>,
     enforced: &[PermissionRule],
-) -> Vec<PermissionRule> {
+) -> ResolvedPermissionPolicy {
     let agent_rules = agent_profile
         .map(|profile| profile.tool_permission_rules.as_slice())
         .unwrap_or(&[]);
 
-    match parent_runtime_ceiling {
+    let resolved = match parent_runtime_ceiling {
         Some(parent_runtime_ceiling) => {
             resolve_child_permission_policy(ChildPermissionPolicyLayers {
                 product_defaults: &[],
@@ -50,7 +66,15 @@ pub(crate) fn resolve_effective_permission_rules(
             agent: agent_rules,
             enforced,
         }),
-    }
+    };
+    let Some(agent_definition_constraints) =
+        agent_definition_constraints.filter(|constraints| !constraints.is_empty())
+    else {
+        return resolved;
+    };
+    let (rules, mut constraint_layers) = resolved.into_parts();
+    constraint_layers.insert(0, agent_definition_constraints.clone());
+    ResolvedPermissionPolicy::new(rules, constraint_layers)
 }
 
 #[cfg(test)]
@@ -108,10 +132,10 @@ mod tests {
         };
 
         let resolved =
-            resolve_effective_permission_rules(&global, &project, Some(&profile), None, &[]);
+            resolve_effective_permission_policy(&global, &project, Some(&profile), None, None, &[]);
 
         assert_eq!(
-            PermissionEvaluator::case_sensitive().evaluate_resource(
+            PermissionEvaluator::case_sensitive().evaluate_policy_resource(
                 "edit",
                 "generated/review.md",
                 &resolved,
@@ -119,7 +143,7 @@ mod tests {
             PermissionEffect::Allow
         );
         assert_eq!(
-            PermissionEvaluator::case_sensitive().evaluate_resource(
+            PermissionEvaluator::case_sensitive().evaluate_policy_resource(
                 "edit",
                 "generated/api.rs",
                 &resolved,
@@ -145,21 +169,22 @@ mod tests {
         ])
         .expect("test ceiling should be valid");
 
-        let resolved = resolve_effective_permission_rules(
+        let resolved = resolve_effective_permission_policy(
             &global,
             &[],
             Some(&child_profile),
+            None,
             Some(&ceiling),
             &[],
         );
         let evaluator = PermissionEvaluator::case_sensitive();
 
         assert_eq!(
-            evaluator.evaluate_resource("bash", "rm -rf target", &resolved),
+            evaluator.evaluate_policy_resource("bash", "rm -rf target", &resolved),
             PermissionEffect::Deny
         );
         assert_eq!(
-            evaluator.evaluate_resource("external_directory", "C:/outside", &resolved),
+            evaluator.evaluate_policy_resource("external_directory", "C:/outside", &resolved),
             PermissionEffect::Ask
         );
     }

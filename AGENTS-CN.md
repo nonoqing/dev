@@ -15,6 +15,7 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 2. 桌面端日常开发用 `pnpm run desktop:dev`；只改前端、想更快冷启动时再用 `pnpm run desktop:preview:debug`。常用命令见 [`docs/development/common-commands-CN.md`](docs/development/common-commands-CN.md)。
 3. 改完 Rust 优先跑 `pnpm run fmt:rs`（只格式化已改或已暂存的 `.rs`）。只有刻意做更大范围格式化时才用 `cargo fmt`。
 4. 先看下方 **按任务路由** / **规范类型地图**，再按 [`docs/development/verification-CN.md`](docs/development/verification-CN.md) 选最小检查。
+5. Rust workspace 依赖在根清单中统一版本，消费 crate 只声明自身所需 feature；测试专用 feature 放入 `dev-dependencies`，受 crate feature 控制的服务能力只在对应 feature 中启用。禁止使用 `tokio/full` 绕过依赖边界。
 
 ## 如何使用本文件
 
@@ -57,7 +58,7 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 
 | 专题 | 何时打开 | 权威文档 |
 |---|---|---|
-| 产品架构 | `bitfun-core` 拆解、feature/依赖边界、构建提速类重构 | [`docs/architecture/product-architecture.md`](docs/architecture/product-architecture.md)（见 §1.1）；专题地图 [`docs/architecture/README.md`](docs/architecture/README.md) |
+| 产品架构 | `bitfun-core` 拆解、feature/依赖边界、构建提速类重构 | [`docs/architecture/product-architecture.md`](docs/architecture/product-architecture.md)（见 §1.1）；Rust 构建依赖边界：[`docs/architecture/rust-build-dependency-boundaries.md`](docs/architecture/rust-build-dependency-boundaries.md)；专题地图 [`docs/architecture/README.md`](docs/architecture/README.md) |
 | Agent Runtime 部署 | 多 GUI/TUI/Remote 实例、共享 Session 控制、进程拓扑 | [`docs/architecture/agent-runtime-deployment-design.md`](docs/architecture/agent-runtime-deployment-design.md) |
 | Agent hooks | 原生 Codex 兼容 hooks、BitFun 差异与门控 | [`docs/specs/agent-hooks.md`](docs/specs/agent-hooks.md)（[中文](docs/specs/agent-hooks.zh-CN.md)）；不要另起一套 Codex hook 契约 |
 | 物理分层 | 代码应落在哪一层、依赖方向是否正确 | 本文件 **分层模块索引** |
@@ -103,7 +104,7 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 | # | 层级 | 路径 | 职责 | 模块 / 入口 | 层级文档 |
 |---|---|---|---|---|---|
 | 1 | 接口与入口层 | `src/apps/*`, `src/web-ui`, `src/mobile-web`, `BitFun-Installer`, `tests/e2e`, `src/crates/interfaces` | 产品宿主、命令、UI 入口、协议接口、跨产品面测试 | desktop、CLI、server、relay、Web UI、mobile web、installer、E2E、`acp`、`sdk-host` | 就近 `AGENTS.md`；[interfaces](src/crates/interfaces/AGENTS.md) |
-| 2 | 产品组装层 | `src/crates/assembly` | 兼容导出、产品能力选择、product-full 接线、adapter/service 注册、生态中立源协调 | `core`, `external-sources`, `product-capabilities` | [AGENTS.md](src/crates/assembly/AGENTS.md) |
+| 2 | 产品组装层 | `src/crates/assembly` | 兼容导出、产品能力选择、product-full 接线、不可变内置 Agent 内容、adapter/service 注册、生态中立源协调 | `agent-content`, `core`, `external-sources`, `product-capabilities` | [AGENTS.md](src/crates/assembly/AGENTS.md) |
 | 3 | 适配层 | `src/crates/adapters` | AI / transport / WebDriver 协议适配、外部 AI work source 适配（OpenCode / Claude Code / Codex）及外部 provider 形态转换 | `agent-runtime-ipc`, `ai-adapters`, `opencode-adapter`, `claude-code-adapter`, `codex-adapter`, `static-hook-support`, `transport`, `webdriver` | [AGENTS.md](src/crates/adapters/AGENTS.md) |
 | 4 | 服务实现层 | `src/crates/services` | 可复用的 OS、文件系统、终端、MCP、remote、git、watch、process、LSP 插件注册、会话持久化、网络、MiniApp runtime IO | `services-core`, `services-integrations`, `miniapp-market-service`, `relay-service`, `page-function-runtime`, `terminal` | [AGENTS.md](src/crates/services/AGENTS.md) |
 | 5 | 执行原语层 | `src/crates/execution` | 可移植的 agent、harness、stream、DeepReview、插件运行时客户端、typed-service、tool 契约与执行 | `agent-runtime`, `agent-stream`, `tool-contracts`, `harness`, `plugin-runtime-client`, `runtime-services`, `tool-provider-groups`, `tool-execution`, `tool-call-jsonrepair` | [AGENTS.md](src/crates/execution/AGENTS.md) |

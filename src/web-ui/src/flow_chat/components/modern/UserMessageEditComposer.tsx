@@ -24,6 +24,7 @@ interface UserMessageEditComposerProps {
   onCancel: () => void;
   presentation?: ComposerPresentation | null;
   workspacePath?: string;
+  workspaceId?: string;
   excludeSessionId?: string;
 }
 
@@ -42,6 +43,7 @@ const RichUserMessageEditComposer: React.FC<RichUserMessageEditComposerProps> = 
   onCancel,
   presentation,
   workspacePath,
+  workspaceId,
   excludeSessionId,
 }) => {
   const editorRef = useRef<RichTextInputElement>(null);
@@ -112,8 +114,8 @@ const RichUserMessageEditComposer: React.FC<RichUserMessageEditComposerProps> = 
   }, []);
 
   return (
-    <div className="user-message-edit-composer">
-      <div className="user-message-edit-composer__rich-input">
+    <div className="user-message-edit-composer" data-bf-component="user-message-edit-composer" data-bf-part="root" data-bf-mode="rich" data-bf-state={isSubmitting ? 'submitting' : undefined}>
+      <div className="user-message-edit-composer__rich-input" data-bf-component="user-message-edit-composer" data-bf-part="input">
         <RichTextInput
           ref={editorRef}
           value={value}
@@ -129,13 +131,17 @@ const RichUserMessageEditComposer: React.FC<RichUserMessageEditComposerProps> = 
           isOpen={mentionState.isActive}
           searchQuery={mentionState.query}
           workspacePath={workspacePath}
+          workspaceId={workspaceId}
           excludeSessionId={excludeSessionId}
           onSelect={handleSelectContext}
           onClose={() => editorRef.current?.closeMention?.()}
         />
       </div>
-      <div className="user-message-edit-composer__actions">
+      <div className="user-message-edit-composer__actions" data-bf-component="user-message-edit-composer" data-bf-part="actions">
         <button
+          data-bf-component="user-message-edit-composer"
+          data-bf-part="action"
+          data-bf-action="cancel"
           type="button"
           onClick={onCancel}
           disabled={isSubmitting}
@@ -146,6 +152,9 @@ const RichUserMessageEditComposer: React.FC<RichUserMessageEditComposerProps> = 
           <X size={14} />
         </button>
         <button
+          data-bf-component="user-message-edit-composer"
+          data-bf-part="action"
+          data-bf-action="submit"
           type="button"
           onClick={handleSubmit}
           disabled={!canSubmit}
@@ -153,7 +162,7 @@ const RichUserMessageEditComposer: React.FC<RichUserMessageEditComposerProps> = 
           title={submitLabel}
           aria-label={submitLabel}
         >
-          {isSubmitting ? <Loader2 size={14} className="user-message-edit-composer__spinner" /> : <Check size={14} />}
+          {isSubmitting ? <Loader2 size={14} className="user-message-edit-composer__spinner" data-bf-component="user-message-edit-composer" data-bf-part="spinner" /> : <Check size={14} />}
         </button>
       </div>
     </div>
@@ -171,6 +180,7 @@ export const UserMessageEditComposer: React.FC<UserMessageEditComposerProps> = (
   onCancel,
   presentation,
   workspacePath,
+  workspaceId,
   excludeSessionId,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -216,14 +226,17 @@ export const UserMessageEditComposer: React.FC<UserMessageEditComposerProps> = (
         onCancel={onCancel}
         presentation={presentation}
         workspacePath={workspacePath}
+        workspaceId={workspaceId}
         excludeSessionId={excludeSessionId}
       />
     );
   }
 
   return (
-    <div className="user-message-edit-composer">
+    <div className="user-message-edit-composer" data-bf-component="user-message-edit-composer" data-bf-part="root" data-bf-mode="plain" data-bf-state={isSubmitting ? 'submitting' : undefined}>
       <Textarea
+        data-bf-component="user-message-edit-composer"
+        data-bf-part="input"
         ref={textareaRef}
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -233,8 +246,11 @@ export const UserMessageEditComposer: React.FC<UserMessageEditComposerProps> = (
         disabled={isSubmitting}
         className="user-message-edit-composer__textarea"
       />
-      <div className="user-message-edit-composer__actions">
+      <div className="user-message-edit-composer__actions" data-bf-component="user-message-edit-composer" data-bf-part="actions">
         <button
+          data-bf-component="user-message-edit-composer"
+          data-bf-part="action"
+          data-bf-action="cancel"
           type="button"
           onClick={onCancel}
           disabled={isSubmitting}
@@ -245,6 +261,9 @@ export const UserMessageEditComposer: React.FC<UserMessageEditComposerProps> = (
           <X size={14} />
         </button>
         <button
+          data-bf-component="user-message-edit-composer"
+          data-bf-part="action"
+          data-bf-action="submit"
           type="button"
           onClick={handleSubmit}
           disabled={!canSubmit}
@@ -252,7 +271,7 @@ export const UserMessageEditComposer: React.FC<UserMessageEditComposerProps> = (
           title={submitLabel}
           aria-label={submitLabel}
         >
-          {isSubmitting ? <Loader2 size={14} className="user-message-edit-composer__spinner" /> : <Check size={14} />}
+          {isSubmitting ? <Loader2 size={14} className="user-message-edit-composer__spinner" data-bf-component="user-message-edit-composer" data-bf-part="spinner" /> : <Check size={14} />}
         </button>
       </div>
     </div>

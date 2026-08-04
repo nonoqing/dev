@@ -100,11 +100,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup OpenSSL (Windows, prebuilt)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/ci/setup-openssl-windows.ps1
-
       - name: Install Linux system dependencies (Tauri bundler)
         if: runner.os == 'Linux'
         shell: bash
@@ -318,9 +313,6 @@ jobs:
             --tag "${{ env.NIGHTLY_TAG }}" \
             --repo "GCWing/BitFun" \
             --out linux-release-assets/linux-binaries.json
-
-      - name: Setup Rust toolchain (minisign fallback)
-        uses: dtolnay/rust-toolchain@stable
 
       # The Tauri bundler signs the five updater artifacts during `tauri build`,
       # but the installers people download by hand from the release page — dmg,

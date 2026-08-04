@@ -17,8 +17,11 @@ use bitfun_services_integrations::miniapp_market::{
 use serde_json::{json, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_MIN_BITFUN_VERSION: &str = "0.1.0";
 const DEFAULT_LICENSE: &str = "MIT";
+
+fn default_min_bitfun_version() -> &'static str {
+    crate::VERSION
+}
 
 pub struct PublishMiniAppTool;
 
@@ -76,7 +79,7 @@ Publishing is an outward-facing action: only call this when the user explicitly 
                     "items": { "type": "string" },
                     "minItems": 1,
                     "maxItems": 5,
-                    "description": "1-5 absolute paths to PNG/JPEG/WebP screenshots of the running app, each <= 5 MiB"
+                    "description": "1-5 absolute paths to PNG/JPEG/WebP screenshots of the running app, each <= 5 MiB. Use a 16:9 aspect ratio (1920x1080 recommended, 2560x1440 max useful): both the web market and the BitFun desktop client crop screenshots to 16:9, so other ratios lose their edges. The first screenshot is the listing card cover — pick the one that best shows what the app does, and keep key content away from the edges."
                 },
                 "changelog": {
                     "type": "string",
@@ -377,7 +380,7 @@ Publishing is an outward-facing action: only call this when the user explicitly 
             icon: app.icon.clone(),
             category,
             tags,
-            min_bitfun_version: DEFAULT_MIN_BITFUN_VERSION.to_string(),
+            min_bitfun_version: default_min_bitfun_version().to_string(),
             changelog,
             license: MarketLicense {
                 spdx_expression: Some(DEFAULT_LICENSE.to_string()),
@@ -504,7 +507,7 @@ fn unix_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_apps_by_name, PublishMiniAppTool};
+    use super::{default_min_bitfun_version, find_apps_by_name, PublishMiniAppTool};
     use crate::agentic::tools::framework::{Tool, ToolExposure, ToolUseContext};
     use bitfun_product_domains::miniapp::types::MiniAppMeta;
     use serde_json::json;
@@ -513,6 +516,11 @@ mod tests {
     fn publish_miniapp_stays_expanded_for_assistant_use() {
         let tool = PublishMiniAppTool::new();
         assert_eq!(tool.default_exposure(), ToolExposure::Direct);
+    }
+
+    #[test]
+    fn publish_miniapp_defaults_to_current_client_version() {
+        assert_eq!(default_min_bitfun_version(), crate::VERSION);
     }
 
     #[test]

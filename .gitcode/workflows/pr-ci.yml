@@ -1,0 +1,25 @@
+name: GitCode PR checks
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  repository: read
+  pr: read
+
+jobs:
+  governance:
+    runs-on: [ubuntu-latest, x64, small]
+    steps:
+      - uses: checkout
+      - name: Set up Node.js
+        uses: setup-node
+        with:
+          node-version: "22.14.0"
+      - name: Check repository governance
+        run: |
+          node scripts/check-repo-hygiene.mjs
+          node --test scripts/check-core-boundaries.test.mjs
+          BITFUN_I18N_CONTRACT_TEST_PROFILE=ci node --test scripts/i18n-contract.test.mjs

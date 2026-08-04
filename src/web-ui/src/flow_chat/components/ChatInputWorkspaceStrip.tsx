@@ -7,9 +7,9 @@ import { useTranslation } from 'react-i18next';
 import {
   Activity,
   Check,
-  Download,
   EyeOff,
   GitBranch,
+  RefreshCw,
   Shield,
   ShieldAlert,
   ShieldCheck,
@@ -22,8 +22,8 @@ import { Tooltip, IconButton } from '@/component-library';
 import { useGitState } from '@/tools/git/hooks/useGitState';
 import type { SessionExecutionTarget } from '@/infrastructure/api/service-api/WorktreeAPI';
 import { useI18n } from '@/infrastructure/i18n';
-import { DispatchTargetPicker } from '@/features/dispatch/DispatchTargetPicker';
 import { DispatchResultDialog } from '@/features/dispatch/DispatchResultDialog';
+import { DispatchTargetPicker } from '@/features/dispatch/DispatchTargetPicker';
 import type { DispatchSelection, DispatchTarget } from '@/features/dispatch/types';
 import './ChatInputWorkspaceStrip.scss';
 
@@ -47,6 +47,9 @@ export interface ChatInputWorkspaceStripProps {
   permissionControl?: {
     mode: ChatInputPermissionMode;
     saving?: boolean;
+    disabled?: boolean;
+    options?: Array<Exclude<ChatInputPermissionMode, 'acp'>>;
+    scopeLabel?: string;
     onChange?: (mode: Exclude<ChatInputPermissionMode, 'acp'>) => void | Promise<void>;
     onHide?: () => void | Promise<void>;
   };
@@ -63,6 +66,8 @@ export interface ChatInputWorkspaceStripProps {
     enabled: boolean;
     /** Locked once the session has a transcript — its history describes one directory. */
     locked: boolean;
+    /** Why the control is locked, when a transcript is not the reason. */
+    lockedReason?: 'dispatch';
     onChange: (enabled: boolean) => void;
   };
   /** Immutable per-session dispatch destination. Hidden on embedded/mini composers. */
@@ -72,18 +77,17 @@ export interface ChatInputWorkspaceStripProps {
     locked: boolean;
     onSelectLocal?: () => void;
     onSelectTarget: (selection: DispatchSelection) => void;
-    /**
-     * Set once a snapshot-delivered job has finished, so its results can be
-     * reviewed. Absent for local, non-snapshot, or still-running sessions —
-     * there is nothing to pull in those cases.
-     */
-    completedSnapshotJobId?: string;
+    /** Target worktree can be committed and synced from running onward. */
+    syncableJobId?: string;
+    branch?: string;
+    baselineWorktreePath?: string;
+    baselineMissing?: boolean;
   };
 }
 
-export type ChatInputPermissionMode = 'ask' | 'auto' | 'full_access' | 'acp';
+export type ChatInputPermissionMode = 'ask' | 'auto' | 'full_access' | 'reject' | 'acp';
 
-const NATIVE_PERMISSION_MODES: Array<Exclude<ChatInputPermissionMode, 'acp'>> = [
+const NATIVE_PERMISSION_MODES: Array<Exclude<ChatInputPermissionMode, 'acp' | 'reject'>> = [
   'ask',
   'auto',
   'full_access',
@@ -133,14 +137,19 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
   const showUsage = usageReport?.visible && !!usageReport.onOpen;
   const showGoal = threadGoal?.visible && !!threadGoal.onOpen;
   const showPermission = !!permissionControl;
-  const showDispatch = !!dispatchControl;
-  const showRightActions = showDispatch || showPermission || showUsage || showGoal;
+  const showDispatchResult = !!dispatchControl?.syncableJobId;
   const isWorktree = !!executionTarget?.worktreeId;
   const worktreeEnabled = worktreeControl?.enabled ?? isWorktree;
   const worktreeEnabledRef = useRef(worktreeEnabled);
   worktreeEnabledRef.current = worktreeEnabled;
-  const showWorktreeToggle =
-    !!worktreeControl && (isRepository || isWorktree || worktreeEnabled);
+  // Dispatch delivers work as a Git worktree of the controller's repository, so
+  // it is only meaningful where a worktree itself is — the same condition the
+  // isolation toggle uses, evaluated from the same Git probe.
+  const isGitWorkspace = isRepository || isWorktree || worktreeEnabled;
+  const showWorktreeToggle = !!worktreeControl && isGitWorkspace;
+  const showDispatchPicker = !!dispatchControl && isGitWorkspace;
+  const showRightActions =
+    showDispatchPicker || showDispatchResult || showPermission || showUsage || showGoal;
   const permissionCopy = {
     ask: {
       label: t('chatInput.permissionMode.ask.label'),
@@ -153,6 +162,10 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
     full_access: {
       label: t('chatInput.permissionMode.fullAccess.label'),
       description: t('chatInput.permissionMode.fullAccess.description'),
+    },
+    reject: {
+      label: t('chatInput.permissionMode.reject.label'),
+      description: t('chatInput.permissionMode.reject.description'),
     },
     acp: {
       label: t('chatInput.permissionMode.acp.label'),
@@ -182,19 +195,25 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
     };
   }, [permissionMenuOpen]);
 
+  const dispatchBranch = dispatchControl?.locked
+    && worktreeControl?.lockedReason === 'dispatch'
+    ? dispatchControl?.branch?.trim()
+    : undefined;
   const branchTooltipContent = useMemo(
     () =>
-      isRepository && currentBranch?.trim()
+      dispatchBranch
+        || (isRepository && currentBranch?.trim()
         ? currentBranch.trim()
-        : t('workspaceStrip.branchTooltipUnavailable'),
-    [currentBranch, isRepository, t],
+        : t('workspaceStrip.branchTooltipUnavailable')),
+    [currentBranch, dispatchBranch, isRepository, t],
   );
 
   if (!label && !showRightActions) {
     return null;
   }
 
-  const branchLabel = executionTarget?.branch?.trim()
+  const branchLabel = dispatchBranch
+    || executionTarget?.branch?.trim()
     || (isWorktree && currentBranch?.trim())
     || (isWorktree && executionTarget?.baseCommit
       ? tWorktrees('labels.detached', { commit: executionTarget.baseCommit.slice(0, 9) })
@@ -205,7 +224,9 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
   const workspaceTooltipContent = trimmedPath || label;
   const worktreeToggleDisabled = !!worktreeControl?.locked;
   let worktreeTooltip = tWorktrees('strip.toggleOffDescription');
-  if (worktreeControl?.locked) {
+  if (worktreeControl?.lockedReason === 'dispatch') {
+    worktreeTooltip = tWorktrees('strip.dispatchBaseline');
+  } else if (worktreeControl?.locked) {
     worktreeTooltip = tWorktrees('strip.toggleLocked');
   } else if (worktreeEnabled && !isWorktree) {
     worktreeTooltip = tWorktrees('strip.togglePendingOnDescription');
@@ -215,6 +236,11 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
     worktreeTooltip = tWorktrees('strip.toggleOnDescription', { path: trimmedPath });
   }
   const permissionMode = permissionControl?.mode ?? 'ask';
+  const permissionModes = permissionControl?.options ?? NATIVE_PERMISSION_MODES;
+  const permissionDisabled =
+    permissionControl?.disabled
+    || permissionControl?.saving
+    || permissionMode === 'acp';
   const permissionModeLabel = permissionCopy[permissionMode].label;
   const permissionTooltip = permissionMode === 'acp'
     ? t('chatInput.permissionMode.acp.tooltip')
@@ -239,7 +265,7 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
   const actionsOnly = !label && showRightActions;
 
   return (
-    <div
+    <div data-bf-component="chat-input-workspace-strip" data-bf-part="root"
       className={[
         'bitfun-chat-input-workspace-strip',
         split && 'bitfun-chat-input-workspace-strip--split',
@@ -250,10 +276,10 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
       data-testid="chat-input-workspace-strip"
     >
       {label ? (
-        <div className="bitfun-chat-input-workspace-strip__main">
+        <div data-bf-component="chat-input-workspace-strip" data-bf-part="main" className="bitfun-chat-input-workspace-strip__main">
           <Tooltip content={workspaceTooltipContent} placement="top">
             <span className="bitfun-chat-input-workspace-strip__chip bitfun-chat-input-workspace-strip__chip--workspace">
-              <span className="bitfun-chat-input-workspace-strip__workspace">{label}</span>
+              <span data-bf-component="chat-input-workspace-strip" data-bf-part="workspace" className="bitfun-chat-input-workspace-strip__workspace">{label}</span>
             </span>
           </Tooltip>
           <span className="bitfun-chat-input-workspace-strip__sep" aria-hidden>
@@ -267,7 +293,7 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
                 strokeWidth={2}
                 aria-hidden
               />
-              <span className="bitfun-chat-input-workspace-strip__branch">{branchLabel}</span>
+              <span data-bf-component="chat-input-workspace-strip" data-bf-part="branch" className="bitfun-chat-input-workspace-strip__branch">{branchLabel}</span>
             </span>
           </Tooltip>
           {showWorktreeToggle ? (
@@ -313,8 +339,12 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
       ) : null}
 
       {showRightActions ? (
-        <div className="bitfun-chat-input-workspace-strip__actions">
-          {dispatchControl ? (
+        <div
+          className="bitfun-chat-input-workspace-strip__actions"
+          data-bf-component="chat-input-workspace-strip"
+          data-bf-part="actions"
+        >
+          {showDispatchPicker && dispatchControl ? (
             <DispatchTargetPicker
               target={dispatchControl.target}
               sourceWorkspacePath={dispatchControl.sourceWorkspacePath}
@@ -323,23 +353,25 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
               onSelectTarget={dispatchControl.onSelectTarget}
             />
           ) : null}
-          {dispatchControl?.completedSnapshotJobId ? (
+          {dispatchControl?.syncableJobId ? (
             <>
-              <Tooltip content={tCommon('dispatch.resultTitle')} placement="top">
+              <Tooltip content={tCommon('dispatch.syncTitle')} placement="top">
                 <button
                   type="button"
                   className="bitfun-chat-input-workspace-strip__dispatch-result"
                   onClick={() => setResultDialogOpen(true)}
-                  data-testid="dispatch-result-trigger"
+                  data-testid="dispatch-sync-trigger"
                 >
-                  <Download size={11} strokeWidth={2} aria-hidden />
-                  <span>{tCommon('dispatch.resultApply')}</span>
+                  <RefreshCw size={11} strokeWidth={2} aria-hidden />
+                  <span>{tCommon('dispatch.syncAction')}</span>
                 </button>
               </Tooltip>
               <DispatchResultDialog
                 open={resultDialogOpen}
-                jobId={dispatchControl.completedSnapshotJobId}
-                workspacePath={dispatchControl.sourceWorkspacePath ?? ''}
+                jobId={dispatchControl.syncableJobId}
+                branch={dispatchControl.branch}
+                baselineWorktreePath={dispatchControl.baselineWorktreePath}
+                baselineMissing={dispatchControl.baselineMissing}
                 targetLabel={dispatchControl.target.kind !== 'local'
                   ? dispatchControl.target.displayName
                   : undefined}
@@ -350,6 +382,8 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
           {showPermission ? (
             <div
               ref={permissionRootRef}
+              data-bf-component="chat-input-workspace-strip"
+              data-bf-part="permission"
               className="bitfun-chat-input-workspace-strip__permission"
             >
               <Tooltip content={permissionTooltip} placement="top">
@@ -363,14 +397,16 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
                     .filter(Boolean)
                     .join(' ')}
                   aria-label={permissionTooltip}
-                  aria-haspopup={permissionMode === 'acp' ? undefined : 'menu'}
-                  aria-expanded={permissionMode === 'acp' ? undefined : permissionMenuOpen}
-                  disabled={permissionControl.saving || permissionMode === 'acp'}
+                  aria-haspopup={permissionDisabled ? undefined : 'menu'}
+                  aria-expanded={permissionDisabled ? undefined : permissionMenuOpen}
+                  disabled={permissionDisabled}
                   data-testid="chat-input-permission-trigger"
                   data-permission-mode={permissionMode}
                   onClick={event => {
                     event.stopPropagation();
-                    setPermissionMenuOpen(open => !open);
+                    if (!permissionDisabled) {
+                      setPermissionMenuOpen(open => !open);
+                    }
                   }}
                 >
                   <PermissionIcon size={12} strokeWidth={2} aria-hidden />
@@ -384,6 +420,9 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
 
               {permissionMenuOpen && permissionMode !== 'acp' ? (
                 <div
+                  data-bf-component="chat-input-workspace-strip"
+                  data-bf-part="permissionMenu"
+                  data-bf-state="open"
                   className="bitfun-chat-input-workspace-strip__permission-menu"
                   role="menu"
                   aria-label={t('chatInput.permissionMode.menuLabel')}
@@ -391,14 +430,17 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
                 >
                   <div className="bitfun-chat-input-workspace-strip__permission-menu-header">
                     <span>{t('chatInput.permissionMode.menuLabel')}</span>
-                    <span>{t('chatInput.permissionMode.globalScope')}</span>
+                    <span>
+                      {permissionControl.scopeLabel ?? t('chatInput.permissionMode.globalScope')}
+                    </span>
                   </div>
-                  <div className="bitfun-chat-input-workspace-strip__permission-options">
-                    {NATIVE_PERMISSION_MODES.map(mode => {
+                  <div data-bf-component="chat-input-workspace-strip" data-bf-part="permissionOptions" className="bitfun-chat-input-workspace-strip__permission-options">
+                    {permissionModes.map(mode => {
                       const selected = permissionMode === mode;
                       const copy = permissionCopy[mode];
                       return (
-                        <button
+                        <button data-bf-component="chat-input-workspace-strip" data-bf-part="permissionOption"
+                          data-bf-state={selected ? 'selected' : undefined}
                           key={mode}
                           type="button"
                           role="menuitemradio"
@@ -464,6 +506,8 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
           {showUsage ? (
             <Tooltip content={t('usage.runtime.tooltip')}>
               <IconButton
+                data-bf-component="chat-input-workspace-strip"
+                data-bf-part="usageAction"
                 className="bitfun-chat-input-workspace-strip__usage-btn"
                 variant="ghost"
                 size="xs"

@@ -38,6 +38,12 @@ vi.mock('@/tools/git/hooks/useGitState', () => ({
   useGitState: mocks.useGitState,
 }));
 
+// The real picker pulls in account state, SSH dialogs and a lazy remote-connect
+// route. This suite only asserts whether the strip mounts it at all.
+vi.mock('@/features/dispatch/DispatchTargetPicker', () => ({
+  DispatchTargetPicker: () => <div data-testid="chat-input-dispatch-trigger" />,
+}));
+
 describe('ChatInputWorkspaceStrip git refresh behavior', () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -158,6 +164,43 @@ describe('ChatInputWorkspaceStrip git refresh behavior', () => {
     expect(trigger?.disabled).toBe(true);
     expect(trigger?.dataset.permissionMode).toBe('acp');
     expect(container.querySelector('[data-testid="chat-input-permission-menu"]')).toBeNull();
+  });
+
+  it('reuses the permission control with dispatch-scoped choices', async () => {
+    const onChange = vi.fn();
+    await act(async () => {
+      root.render(
+        <ChatInputWorkspaceStrip
+          repositoryPath="/repo"
+          workspaceLabel="repo"
+          permissionControl={{
+            mode: 'reject',
+            options: ['ask', 'auto', 'reject'],
+            scopeLabel: 'This dispatched session',
+            onChange,
+          }}
+        />
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-input-permission-trigger"]',
+    );
+    expect(trigger?.dataset.permissionMode).toBe('reject');
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(container.textContent).toContain('This dispatched session');
+    expect(container.querySelector(
+      '[data-testid="chat-input-permission-option-full_access"]',
+    )).toBeNull();
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="chat-input-permission-option-auto"]',
+      )?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenCalledWith('auto');
   });
 
   it('offers the worktree toggle for a Git workspace and reports the new state', async () => {
@@ -315,5 +358,82 @@ describe('ChatInputWorkspaceStrip git refresh behavior', () => {
     });
 
     expect(container.querySelector('[data-testid="chat-input-worktree-toggle"]')).toBeNull();
+  });
+
+  it('shows the dispatch picker and the worktree toggle together in a Git workspace', async () => {
+    await act(async () => {
+      root.render(
+        <ChatInputWorkspaceStrip
+          repositoryPath="/repo"
+          workspaceLabel="repo"
+          worktreeControl={{ enabled: false, locked: false, onChange: vi.fn() }}
+          dispatchControl={{
+            target: { kind: 'local' },
+            locked: false,
+            onSelectTarget: vi.fn(),
+          }}
+        />
+      );
+    });
+
+    expect(container.querySelector('[data-testid="chat-input-worktree-toggle"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-input-dispatch-trigger"]')).not.toBeNull();
+  });
+
+  it('shows the dispatched branch instead of the source branch once dispatch is locked', async () => {
+    await act(async () => {
+      root.render(
+        <ChatInputWorkspaceStrip
+          repositoryPath="/repo"
+          workspaceLabel="repo"
+          worktreeControl={{
+            enabled: true,
+            locked: true,
+            lockedReason: 'dispatch',
+            onChange: vi.fn(),
+          }}
+          dispatchControl={{
+            target: {
+              kind: 'ssh',
+              connectionId: 'ssh-1',
+              workspacePath: '',
+              displayName: 'build-host',
+            },
+            locked: true,
+            branch: 'bitfun/dispatch/job-1',
+            onSelectTarget: vi.fn(),
+          }}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain('bitfun/dispatch/job-1');
+    expect(container.textContent).not.toContain('main');
+  });
+
+  it('hides the dispatch picker outside a Git workspace, like the worktree toggle', async () => {
+    mocks.useGitState.mockReturnValue({
+      currentBranch: '',
+      isRepository: false,
+      refreshBasic: mocks.refreshBasic,
+    });
+
+    await act(async () => {
+      root.render(
+        <ChatInputWorkspaceStrip
+          repositoryPath="/plain-folder"
+          workspaceLabel="plain-folder"
+          worktreeControl={{ enabled: false, locked: false, onChange: vi.fn() }}
+          dispatchControl={{
+            target: { kind: 'local' },
+            locked: false,
+            onSelectTarget: vi.fn(),
+          }}
+        />
+      );
+    });
+
+    expect(container.querySelector('[data-testid="chat-input-worktree-toggle"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-input-dispatch-trigger"]')).toBeNull();
   });
 });

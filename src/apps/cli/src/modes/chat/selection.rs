@@ -374,8 +374,10 @@ impl ChatMode {
             (false, EffectiveColorScheme::Truecolor) => Theme::dark(),
         };
 
-        self.config.ui.theme_id = theme.id.clone();
-        if let Err(e) = self.config.save() {
+        if let Err(e) = self
+            .config
+            .update(|config| config.ui.theme_id = theme.id.clone())
+        {
             chat_view.set_status(Some(format!("Failed to save config: {}", e)));
         }
 
@@ -781,6 +783,7 @@ impl ChatMode {
             let (remove_item, status) = session_delete_feedback(session_name, &outcome);
             if remove_item {
                 chat_view.session_selector_remove_item(&pending.session_id);
+                chat_view.forget_session_composer(&pending.session_id);
                 tracing::info!("Deleted session: {}", pending.session_id);
             } else {
                 tracing::error!(

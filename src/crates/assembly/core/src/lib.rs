@@ -21,12 +21,15 @@ pub mod external_mcp_import;
 mod external_mcp_tests;
 #[cfg(feature = "product-full")]
 pub mod external_sources;
+#[cfg(feature = "product-full")]
 mod external_subagents;
 #[cfg(feature = "product-full")]
 mod external_tools;
 #[cfg(feature = "product-domains")]
 pub mod function_agents; // Function-based agents
 pub mod infrastructure; // AI clients, storage, logging, events
+#[cfg(feature = "product-full")]
+mod instruction_sources;
 #[cfg(feature = "product-domains")]
 pub mod miniapp; // AI-generated instant apps (Zero-Dialect Runtime)
 #[cfg(feature = "product-full")]
@@ -39,6 +42,8 @@ pub mod plugin_runtime;
 pub mod plugin_source;
 #[cfg(feature = "product-full")]
 pub mod product_assembly;
+#[cfg(all(test, feature = "product-full"))]
+mod product_assembly_tests;
 #[cfg(feature = "product-domains")]
 pub(crate) mod product_domain_runtime;
 #[cfg(feature = "product-full")]
@@ -48,7 +53,7 @@ pub mod runtime_ownership;
 #[cfg(all(test, feature = "product-full"))]
 mod runtime_ownership_tests;
 pub mod service; // Workspace, Config, FileSystem, Terminal, Git
-#[cfg(feature = "service-integrations")]
+#[cfg(feature = "product-full")]
 pub(crate) mod service_agent_runtime;
 pub mod util; // General types, errors, helper functions
 
@@ -62,14 +67,14 @@ pub use util::errors::*;
 pub use util::types::*;
 
 // Export service layer components
-pub use service::{
-    config::{ConfigManager, ConfigService},
-    workspace::{WorkspaceManager, WorkspaceProvider, WorkspaceService},
-};
+pub use service::config::{ConfigManager, ConfigService};
+#[cfg(feature = "workspace-runtime")]
+pub use service::workspace::{WorkspaceManager, WorkspaceProvider, WorkspaceService};
 
 // Export infrastructure components
 #[cfg(feature = "ai-adapter-runtime")]
 pub use infrastructure::ai::AIClient;
+#[cfg(feature = "runtime-services")]
 pub use infrastructure::events::BackendEventManager;
 
 // Export Agentic service core types

@@ -25,18 +25,24 @@ function effectiveWorkspaceSshHost(
  * We must never treat "same host" as sufficient: two tabs to the same server at `/a` vs `/b` are distinct.
  */
 export function sessionBelongsToWorkspaceNavRow(
-  session: Pick<Session, 'workspacePath' | 'projectWorkspacePath' | 'remoteConnectionId' | 'remoteSshHost'> & {
-    workspaceHostname?: string | null;
-  },
+  session: Pick<
+    Session,
+    'workspacePath' | 'projectWorkspacePath' | 'remoteConnectionId' | 'remoteSshHost' | 'workspaceHostname'
+  >,
   workspacePath: string,
   remoteConnectionId?: string | null,
   remoteSshHost?: string | null
 ): boolean {
-  const sessionRoot = session.workspacePath || workspacePath;
-  const projectRoot = session.projectWorkspacePath;
+  const sessionRoot = session.workspacePath?.trim();
+  const projectRoot = session.projectWorkspacePath?.trim();
   const pathsMatch =
-    isSamePath(sessionRoot, workspacePath) ||
-    normalizeRemoteWorkspacePath(sessionRoot) === normalizeRemoteWorkspacePath(workspacePath) ||
+    Boolean(
+      sessionRoot &&
+      (
+        isSamePath(sessionRoot, workspacePath) ||
+        normalizeRemoteWorkspacePath(sessionRoot) === normalizeRemoteWorkspacePath(workspacePath)
+      )
+    ) ||
     Boolean(
       projectRoot &&
       (
