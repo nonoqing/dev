@@ -1015,6 +1015,21 @@ fn is_dispatch_command(command: &Option<Commands>) -> bool {
     matches!(command, Some(Commands::Dispatch { .. }))
 }
 
+fn delivery_profile_for_command(
+    command: &Option<Commands>,
+) -> bitfun_core::product_assembly::DeliveryProfile {
+    if matches!(
+        command,
+        Some(Commands::Acp {
+            action: None | Some(AcpAction::Serve),
+        })
+    ) {
+        bitfun_core::product_assembly::DeliveryProfile::Acp
+    } else {
+        bitfun_core::product_assembly::DeliveryProfile::Cli
+    }
+}
+
 async fn run_cli() -> Result<()> {
     let raw_args = std::env::args_os().collect::<Vec<_>>();
     let product_binary_name = option_env!("BITFUN_PRODUCT_BINARY_NAME").unwrap_or("bitfun");
@@ -1047,6 +1062,13 @@ async fn run_cli() -> Result<()> {
         }
         Err(error) => error.exit(),
     };
+
+    // Configuration canonicalization can initialize the process-wide tool
+    // registry. Select the owning product profile before telemetry initializes
+    // configuration so ACP cannot be claimed by the CLI/product-full profile.
+    agent::agentic_system::select_agentic_system_profile(delivery_profile_for_command(
+        &cli.command,
+    ))?;
 
     let is_tui_mode = matches!(cli.command, None | Some(Commands::Chat { .. }));
     let is_shared_service = matches!(cli.command, Some(Commands::SharedRuntime { .. }));
