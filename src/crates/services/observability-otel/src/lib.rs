@@ -5,6 +5,7 @@
 //! reconfiguration, and health reporting.
 
 mod diagnostics;
+mod environment;
 mod error;
 mod identity;
 mod pipeline;
@@ -15,6 +16,7 @@ mod settings;
 mod transport;
 
 pub use diagnostics::{TelemetryHealthSnapshot, TelemetryHealthState};
+pub use environment::{telemetry_level_from_env, telemetry_secret_dir_from_env};
 pub use error::TelemetryRuntimeError;
 pub use identity::InstallationIdentityStore;
 pub use runtime::{

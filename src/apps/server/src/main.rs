@@ -101,13 +101,13 @@ async fn main() -> Result<()> {
             telemetry_data_dir,
         ),
         Arc::new(bitfun_observability_otel::ReadOnlySecretFileProvider::new(
-            std::env::var_os("BITFUN_TELEMETRY_SECRET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/run/secrets/bitfun")),
+            bitfun_observability_otel::telemetry_secret_dir_from_env(),
         )),
     );
     let _telemetry_shutdown = telemetry_runtime.shutdown_guard();
-    let user_telemetry = bitfun_observability::TelemetryUserConfig::new(telemetry_level_from_env());
+    let user_telemetry = bitfun_observability::TelemetryUserConfig::new(
+        bitfun_observability_otel::telemetry_level_from_env(),
+    );
     if let Err(error) = telemetry_runtime.apply_config(
         &user_telemetry,
         &bitfun_observability_otel::TelemetryDeploymentConfig::from_deployment_env(),
@@ -243,18 +243,6 @@ async fn main() -> Result<()> {
         .await?;
 
     Ok(())
-}
-
-fn telemetry_level_from_env() -> bitfun_observability::TelemetryLevel {
-    match std::env::var("BITFUN_TELEMETRY_LEVEL")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "basic" => bitfun_observability::TelemetryLevel::Basic,
-        "diagnostic" => bitfun_observability::TelemetryLevel::Diagnostic,
-        _ => bitfun_observability::TelemetryLevel::Off,
-    }
 }
 
 async fn shutdown_signal() {

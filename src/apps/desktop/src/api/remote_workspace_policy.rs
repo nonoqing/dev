@@ -538,10 +538,7 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     ),
     ("get_config", RemoteWorkspacePolicy::LegacyUnaudited),
     ("get_configs", RemoteWorkspacePolicy::LegacyUnaudited),
-    (
-        "get_telemetry_state",
-        RemoteWorkspacePolicy::WorkspaceAgnostic,
-    ),
+    ("telemetry_state", RemoteWorkspacePolicy::WorkspaceAgnostic),
     (
         "get_current_workspace",
         RemoteWorkspacePolicy::LegacyUnaudited,

@@ -1,3 +1,4 @@
+use crate::environment;
 use crate::secrets::{OtlpHeaders, TelemetrySecretProvider};
 use crate::TelemetryRuntimeError;
 use bitfun_observability::{
@@ -144,18 +145,17 @@ impl TelemetryDeploymentConfig {
     /// are compiled into the product build rather than read from user config.
     pub fn from_product_build() -> Self {
         let mut config = Self {
-            endpoint: option_env!("BITFUN_TELEMETRY_OTLP_ENDPOINT").map(ToOwned::to_owned),
-            credential_namespace: option_env!("BITFUN_TELEMETRY_CREDENTIAL_NAMESPACE")
+            endpoint: environment::product_otlp_endpoint().map(ToOwned::to_owned),
+            credential_namespace: environment::product_credential_namespace()
                 .unwrap_or("bitfun-product")
                 .to_string(),
-            headers_secret_ref: option_env!("BITFUN_TELEMETRY_HEADERS_SECRET_REF")
-                .map(ToOwned::to_owned),
+            headers_secret_ref: environment::product_headers_secret_ref().map(ToOwned::to_owned),
             environment: if cfg!(debug_assertions) {
                 DeploymentEnvironment::Development
             } else {
                 DeploymentEnvironment::Production
             },
-            release_channel: release_channel(option_env!("BITFUN_RELEASE_CHANNEL").unwrap_or(
+            release_channel: release_channel(environment::product_release_channel().unwrap_or(
                 if cfg!(debug_assertions) {
                     "development"
                 } else {
@@ -174,21 +174,14 @@ impl TelemetryDeploymentConfig {
     /// process deployment, not to user-importable BitFun configuration.
     pub fn from_deployment_env() -> Self {
         let mut config = Self {
-            endpoint: std::env::var("BITFUN_TELEMETRY_OTLP_ENDPOINT").ok(),
-            credential_namespace: std::env::var("BITFUN_TELEMETRY_CREDENTIAL_NAMESPACE")
-                .unwrap_or_else(|_| "bitfun-service".to_string()),
-            headers_secret_ref: std::env::var("BITFUN_TELEMETRY_HEADERS_SECRET_REF").ok(),
-            environment: deployment_environment(
-                &std::env::var("BITFUN_TELEMETRY_ENVIRONMENT")
-                    .unwrap_or_else(|_| "production".to_string()),
-            ),
-            release_channel: release_channel(
-                &std::env::var("BITFUN_RELEASE_CHANNEL").unwrap_or_else(|_| "stable".to_string()),
-            ),
+            endpoint: environment::deployment_otlp_endpoint(),
+            credential_namespace: environment::deployment_credential_namespace(),
+            headers_secret_ref: environment::deployment_headers_secret_ref(),
+            environment: deployment_environment(&environment::deployment_environment_name()),
+            release_channel: release_channel(&environment::deployment_release_channel()),
             ..Self::default()
         };
-        config.allow_insecure_loopback = std::env::var("BITFUN_TELEMETRY_ALLOW_LOOPBACK_HTTP")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        config.allow_insecure_loopback = environment::deployment_allows_loopback_http();
         config
     }
 }

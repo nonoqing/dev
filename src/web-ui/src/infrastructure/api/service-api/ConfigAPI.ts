@@ -72,11 +72,11 @@ export interface DownloadSkillMarketParams {
 export class ConfigAPI {
   async getTelemetryState(): Promise<TelemetryState> {
     try {
-      return await api.invoke<TelemetryState>('get_telemetry_state', {
+      return await api.invoke<TelemetryState>('telemetry_state', {
         request: {},
       });
     } catch (error) {
-      throw createTauriCommandError('get_telemetry_state', error);
+      throw createTauriCommandError('telemetry_state', error);
     }
   }
 

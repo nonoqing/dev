@@ -8,8 +8,10 @@ use bitfun_observability_otel::{
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+const TELEMETRY_CONFIG_PATH: &str = "app.telemetry";
+
 #[derive(Debug, Default, Deserialize)]
-pub struct GetTelemetryStateRequest {}
+pub struct TelemetryStateRequest {}
 
 #[derive(Debug, Deserialize)]
 pub struct SetTelemetryLevelRequest {
@@ -26,14 +28,14 @@ pub struct TelemetryStateResponse {
 }
 
 #[tauri::command]
-pub async fn get_telemetry_state(
+pub async fn telemetry_state(
     state: State<'_, AppState>,
     runtime: State<'_, TelemetryRuntimeHandle>,
-    _request: GetTelemetryStateRequest,
+    _request: TelemetryStateRequest,
 ) -> Result<TelemetryStateResponse, String> {
     let config = state
         .config_service
-        .get_config::<TelemetryUserConfig>(Some("app.telemetry"))
+        .get_config::<TelemetryUserConfig>(Some(TELEMETRY_CONFIG_PATH))
         .await
         .map_err(|error| format!("Failed to read telemetry preference: {error}"))?;
     Ok(TelemetryStateResponse {
@@ -51,7 +53,7 @@ pub async fn set_telemetry_level(
     let config = TelemetryUserConfig::new(request.level);
     state
         .config_service
-        .set_config("app.telemetry", &config)
+        .set_config(TELEMETRY_CONFIG_PATH, &config)
         .await
         .map_err(|error| format!("Failed to save telemetry preference: {error}"))?;
 

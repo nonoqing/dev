@@ -13079,6 +13079,7 @@ mod tests {
                     round_id: "round-1".to_string(),
                     attempt_id: None,
                     attempt_index: None,
+                    observation_context: None,
                     agent_type: "agentic".to_string(),
                     workspace: None,
                     primary_model_facts: Default::default(),

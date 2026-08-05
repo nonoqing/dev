@@ -477,7 +477,17 @@ pub async fn run() {
             error
         );
     }
-    let _ = DESKTOP_TELEMETRY_RUNTIME.set(telemetry_runtime.clone());
+    if DESKTOP_TELEMETRY_RUNTIME
+        .set(telemetry_runtime.clone())
+        .is_err()
+    {
+        log::error!(
+            "Failed to register desktop telemetry runtime: \
+             operation=register_desktop_telemetry_runtime, error_type=already_initialized"
+        );
+        telemetry_runtime.cancel_and_discard();
+        return;
+    }
     let startup_observation = Arc::new(std::sync::Mutex::new(Some(
         telemetry_runtime.startup_guard(),
     )));
@@ -1306,7 +1316,7 @@ pub async fn run() {
             paste_files,
             get_config,
             get_configs,
-            api::telemetry_api::get_telemetry_state,
+            api::telemetry_api::telemetry_state,
             computer_use_get_status,
             computer_use_request_permissions,
             computer_use_open_system_settings,
@@ -2189,6 +2199,7 @@ fn spawn_desktop_telemetry_config_listener(
     deployment: TelemetryDeploymentConfig,
 ) {
     use bitfun_core::service::config::{subscribe_config_updates, ConfigUpdateEvent};
+    use tokio::sync::broadcast::error::RecvError;
 
     let Some(mut receiver) = subscribe_config_updates() else {
         return;
@@ -2206,8 +2217,8 @@ fn spawn_desktop_telemetry_config_listener(
                     }
                 }
                 Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                Err(RecvError::Closed) => break,
+                Err(RecvError::Lagged(_)) => {
                     if let Err(error) = apply_desktop_telemetry_config(&runtime, &deployment).await
                     {
                         log::warn!(

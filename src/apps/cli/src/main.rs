@@ -1113,7 +1113,14 @@ async fn run_cli() -> Result<()> {
     let telemetry_runtime = initialize_cli_telemetry().await?;
     let _telemetry_shutdown = telemetry_runtime.shutdown_guard();
     let startup_observation = telemetry_runtime.startup_guard();
-    let _ = CLI_TELEMETRY_RUNTIME.set(telemetry_runtime);
+    if CLI_TELEMETRY_RUNTIME.set(telemetry_runtime).is_err() {
+        tracing::error!(
+            operation = "register_cli_telemetry_runtime",
+            error_type = "already_initialized",
+            "Failed to register CLI telemetry runtime"
+        );
+        return Err(anyhow!("CLI telemetry runtime was already initialized"));
+    }
     startup_observation.complete();
 
     let config = CliConfig::load().unwrap_or_else(|e| {
@@ -1377,9 +1384,8 @@ async fn run_cli() -> Result<()> {
     Ok(())
 }
 
-static CLI_TELEMETRY_RUNTIME: std::sync::OnceLock<
-    bitfun_observability_otel::TelemetryRuntimeHandle,
-> = std::sync::OnceLock::new();
+static CLI_TELEMETRY_RUNTIME: OnceLock<bitfun_observability_otel::TelemetryRuntimeHandle> =
+    OnceLock::new();
 
 pub(crate) fn cli_telemetry() -> bitfun_observability::Telemetry {
     CLI_TELEMETRY_RUNTIME

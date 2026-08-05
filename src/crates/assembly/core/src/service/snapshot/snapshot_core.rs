@@ -415,11 +415,7 @@ impl SnapshotCore {
         )
     }
 
-    pub fn get_turn_diff_aggregate(
-        &self,
-        session_id: &str,
-        turn_index: usize,
-    ) -> TurnDiffAggregate {
+    pub fn turn_diff_aggregate(&self, session_id: &str, turn_index: usize) -> TurnDiffAggregate {
         let Some(session) = self.sessions.get(session_id) else {
             return TurnDiffAggregate::default();
         };
@@ -1848,7 +1844,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            runtime.core.get_turn_diff_aggregate("session-1", 2),
+            runtime.core.turn_diff_aggregate("session-1", 2),
             TurnDiffAggregate {
                 modified_file_count: 2,
                 lines_added: 2,

@@ -4751,7 +4751,7 @@ impl ExecutionEngine {
                 )
             {
                 manager
-                    .get_turn_diff_aggregate(&context.session_id, context.turn_index)
+                    .turn_diff_aggregate(&context.session_id, context.turn_index)
                     .await
                     .ok()
             } else {
@@ -5435,6 +5435,7 @@ mod tests {
             partial_recovery_reason: None,
             had_assistant_text: false,
             had_thinking_content: false,
+            first_result_ms: None,
         }
     }
 
