@@ -382,6 +382,18 @@ pub fn project_agentic_frontend_event(event: AgenticEvent) -> Option<AgenticFron
                 "reason": reason,
             }),
         )),
+        AgenticEvent::SessionReasoningPresetAutoCleared {
+            session_id,
+            previous_preset_id,
+            reason,
+        } => Some(AgenticFrontendEvent::new(
+            "agentic://session-reasoning-preset-auto-cleared",
+            json!({
+                "sessionId": session_id,
+                "previousPresetId": previous_preset_id,
+                "reason": reason,
+            }),
+        )),
         AgenticEvent::DeepReviewQueueStateChanged {
             session_id,
             turn_id,
@@ -571,6 +583,10 @@ mod tests {
             success: Some(true),
             finish_reason: Some("stop".to_string()),
             has_final_response: Some(true),
+            first_result_ms: None,
+            modified_file_count: None,
+            added_lines: None,
+            deleted_lines: None,
         })
         .expect("projected");
 
@@ -734,5 +750,24 @@ mod tests {
 
         assert_eq!(event.session_id(), None);
         assert_eq!(project_agentic_frontend_event(event), None);
+    }
+
+    #[test]
+    fn reasoning_preset_auto_clear_projects_canonical_auto_transition() {
+        let projected =
+            project_agentic_frontend_event(AgenticEvent::SessionReasoningPresetAutoCleared {
+                session_id: "session-1".to_string(),
+                previous_preset_id: "high".to_string(),
+                reason: "reasoning_catalog_updated".to_string(),
+            })
+            .expect("projected");
+
+        assert_eq!(
+            projected.event_name,
+            "agentic://session-reasoning-preset-auto-cleared"
+        );
+        assert_eq!(projected.payload["sessionId"], "session-1");
+        assert_eq!(projected.payload["previousPresetId"], "high");
+        assert_eq!(projected.payload["reason"], "reasoning_catalog_updated");
     }
 }

@@ -7,8 +7,11 @@
 内置扩展边界见 [`product-customization-blueprint.md`](product-customization-blueprint.md)；CLI 产品入口和配置
 兼容见 [`cli-product-line-design.md`](cli-product-line-design.md)；HarmonyOS PC 原生 CLI/TUI 平台规约见
 [`platform-portability-design.md`](platform-portability-design.md)。跨专题实施顺序见
-[`../specs/plans/product-architecture-evolution-plan.md`](../specs/plans/product-architecture-evolution-plan.md)。外部 AI 工作内容体验、OpenCode 扩展总矩阵、配置资产、插件执行、
-终端插件和外部集成适配分别见 [`external-ai-work-sources-design.md`](extensions/external-ai-work-sources-design.md)、
+[`../specs/plans/product-architecture-evolution-plan.md`](../specs/plans/product-architecture-evolution-plan.md)。外部 AI 工作内容架构、应用级连接详细设计与对应执行计划分别见
+[`external-ai-work-sources-design.md`](extensions/external-ai-work-sources-design.md)、
+[`external-ai-app-connection-experience-design.md`](extensions/external-ai-app-connection-experience-design.md)和
+[`../specs/plans/external-ai-app-connection-experience-plan.md`](../specs/plans/external-ai-app-connection-experience-plan.md)；OpenCode 扩展总矩阵、配置资产、插件执行、
+终端插件和外部集成适配分别见
 [`opencode-extension-compatibility.md`](extensions/opencode-extension-compatibility.md)、
 [`opencode-config-assets-adapter-design.md`](extensions/opencode-config-assets-adapter-design.md)、
 [`opencode-plugin-runtime-adapter-design.md`](extensions/opencode-plugin-runtime-adapter-design.md)、
@@ -17,7 +20,10 @@
 可装配并双向接入 Claude Code、Codex、OpenCode、Trae 等宿主见
 [`capability-runtime-integration-design.md`](extensions/capability-runtime-integration-design.md)；公开 BitFun Agent SDK、SDK Host、
 Headless CLI 与各产品入口的统一心智见
-[`agent-sdk-product-architecture.md`](agent-sdk-product-architecture.md)。详细设计与本文件冲突时，以本文件为准。
+[`agent-sdk-product-architecture.md`](agent-sdk-product-architecture.md)；Desktop GUI、Web UI 和交互式 TUI 的统一产品后端协议、
+Embedded/Shared App Server 边界及迁移约束见
+[`app-server-architecture.md`](app-server-architecture.md)。该专题当前是待评审的目标提案；在决策门槛通过前，当前调用路径和稳定
+owner 边界仍以本文及已接线代码为准。其他已批准的详细设计与本文件冲突时，以本文件为准。
 
 Cargo feature、第三方依赖 owner、测试目标和本地/CI 验证分工见
 [`rust-build-dependency-boundaries.md`](rust-build-dependency-boundaries.md)。该文档补充本架构的构建视图，不改变本文定义的运行时 owner 和分层依赖方向。
@@ -132,16 +138,18 @@ client 或未来 CLI/HarmonyOS 计划，不能证明同名 Rust transport adapte
 ### 2.2 宿主通信契约与 Tauri 薄适配
 
 前后端契约按能力语义归属，不按 Tauri command 名称归属。稳定的请求、响应、状态事实和类型化错误放在对应
-`contracts/*`、Agent Runtime API 或能力 owner；Tauri、HTTP/WebSocket、CLI/TUI、ACP 与公开 SDK
-Host adapter 只负责把各自协议映射到
-这些类型。该规则降低框架耦合，但不要求把每个 Desktop DTO 都搬进共享 crate。
+`contracts/*`、Agent Runtime API 或能力 owner。当前 Desktop GUI 仍使用 Tauri adapter，Web UI 使用 loopback WebSocket
+App Server，Embedded TUI 使用 in-process App Server，Shared TUI 通过 `TuiBackend` 映射 private Runtime IPC v17。待评审目标是让
+Desktop GUI、Web UI 和交互式 TUI 复用同一 Rich Client App Server 行为与 wire contract；Tauri 和各 Rich Client Host 负责
+transport、平台能力及生命周期。ACP、Headless CLI、Peer Host 与公开 SDK 继续由各自 adapter 映射到稳定 owner 接口，不因该目标
+复用 App Server wire。该规则降低框架耦合，但不要求把 controller-local Desktop DTO 搬进共享 crate。
 
 | 层 | 允许 | 禁止 |
 |---|---|---|
 | 能力 owner / Agent Runtime API | 类型化请求/响应、状态事实、权限/取消语义、与框架无关的用例方法 | `tauri::State`、`AppHandle`、窗口/菜单对象、command 宏、HTTP/WebSocket/ACP/SDK Host envelope |
-| Desktop Tauri adapter | 解包宿主状态、构造稳定请求、调用对应 Agent Runtime API/owner 接口、把类型化错误映射为 Desktop 协议、投递桌面事件 | 复制业务校验、持有第二份权威状态、把 Tauri 类型传入下层 |
+| Desktop Tauri / proposed App Server Host adapter | 当前组装 Tauri adapter；目标组装 transport、注入真实 capability 与平台 provider、管理窗口和桌面生命周期、投递 App Server typed notification 或桌面专属事件 | 复制业务校验、持有第二份权威状态、在目标迁移完成后为同一能力保留第二条 Runtime 旁路、把 Tauri 类型传入下层 |
 | Server / Remote adapter | 路由鉴权、协议 envelope、连接生命周期、背压与取消映射 | 为同一能力另建语义不同的 DTO 或 handler |
-| GUI / TUI 消费方 | 依赖入口侧 API interface、稳定读模型或 Agent Runtime API；各自保留渲染状态 | 依赖公开 Python/TypeScript SDK、直接持有平台句柄，或让 React/TUI 状态成为后端契约 |
+| GUI / Web / TUI frontend | 当前依赖各自 infrastructure 或 `TuiBackend`；目标依赖生成的 App Server client、稳定读模型和 Host-local capability adapter；各自保留渲染状态 | 在 UI component/view 中直接依赖 Runtime/Core/Service、公开 Python/TypeScript SDK、Tauri 业务 command 或私有 Shared IPC |
 
 本文其他章节和历史设计中出现的“Runtime SDK”，如果指 `agent-runtime::sdk`，统一称为
 **Rust Runtime SDK（当前 preview）**；它是共享 **Agent Runtime API** 的当前 Rust 入口。只有
@@ -246,17 +254,49 @@ flowchart TB
 
 入口 adapter 消费同一 Runtime API，部署选择不能进入业务 owner：Embedded 使用进程内强类型调用；Shared 或 SDK Host 才在各自私有 adapter 中执行 transport 封装。GUI、TUI、Headless CLI、ACP 和 SDK 不共享 wire、renderer 或生命周期，也不得为了统一接口而让默认 Embedded 路径承担序列化成本。
 
+当前已接线的产品入口路径如下；该图只描述已接线请求路径，不表示待评审目标：
+
+```mermaid
+flowchart LR
+  Desktop["Desktop GUI"] --> Tauri["Desktop / Tauri adapter"]
+  Web["Web UI"] --> WebHost["loopback WebSocket App Server"]
+  TUI["Interactive TUI"] --> Backend["TuiBackend"]
+  Backend -->|"Embedded"| EmbeddedAS["in-process App Server"]
+  Backend -->|"--shared"| SharedIPC["private Runtime IPC v17"]
+  Other["Headless CLI · ACP · Server · Remote"] --> Adapter["独立入口适配器"]
+  SDK["Rust Runtime SDK / SDK Host preview"] --> SDKAdapter["独立 SDK adapter"]
+  Tauri --> API["Runtime API / owner ports"]
+  WebHost --> API
+  EmbeddedAS --> API
+  SharedIPC --> API
+  Adapter --> API
+  SDKAdapter --> API
+  API --> Runtime["共享 Runtime"]
+```
+
+当前 Embedded TUI 核心路径经过 App Server，Shared TUI 则由 `TuiBackend` compatibility adapter 映射到 private Runtime IPC v17。
+Desktop GUI 尚未完成 App Server 迁移；当前 loopback Web Host 已通过 WebSocket 承载 App Server。Headless CLI/CI、ACP、Peer Host
+和 SDK Host 保留独立 adapter。所有路径最终消费同一 Runtime API 或 owner port，部署选择不能进入业务 owner。
+
+待评审目标是让 Desktop GUI、Web UI 和交互式 TUI 复用同一 App Server 行为与 wire contract，并让 Embedded/Shared 只在 Host 与
+transport 层不同。是否用 Shared App Server 替换 v17，仍取决于鉴权、实例身份、controller/lease、事件恢复、取消、限制、性能和
+回滚门槛；目标不表示这些能力已经交付。各入口仍各自拥有 renderer、平台能力和生命周期。Headless CLI/CI、ACP、Peer Host 和
+公开 SDK 不共享 App Server wire。完整目标形态见
+[`app-server-architecture.md`](app-server-architecture.md)。
+
 关键规则：
 
 - 产品入口先经过自己的 adapter/projection，再消费 Agent Runtime API 和只读视图；公开 SDK 只多一层
   SDK Host 跨进程适配。Agent Runtime API 是一组窄 owner/use-case interfaces，不是必须实例化的总门面；adapter
   可以调用对应 owner 的窄接口，但不能访问 manager/内部状态、绕过既有编排或复制业务规则。任何入口都不直接调用插件主机。
+  Rich Client App Server 统一路径只有在相应 Host 完成迁移和验证后才成为当前路径。
 - 插件只进入扩展贡献接口，不直接写内核状态、工具结果、权限结果或审计事实。
 - 插件运行时主机只负责类型化调用、期限、取消、有界队列、逻辑 target 状态、响应校验和故障状态；
   物理进程健康、资源预算与进程树回收属于脚本执行服务。
 - 外部来源的 Command、Tool、Subagent、MCP 仍保留能力专属 DTO 和 owner，但它们的发现调度统一由
-  `ExternalSourceControlPlane` 持有；跨 Desktop/TUI/Peer/Server 的控制事实只通过版本化 product-domain 投影共享，
-  不复制生态 payload、界面状态机或远端专用 DTO。
+  `ExternalSourceControlPlane` 持有；当前 Desktop/TUI/Peer 的控制事实只通过版本化 product-domain 投影共享，
+  不复制生态 payload、界面状态机或远端专用 DTO。Server 的 external-source helper 当前未接入 App Server schema，生产 `/ws`
+  返回 `method_not_found`；只有完成 V1 read-only schema、handler/client translation 和 WebSocket round-trip 后，Server 才进入该共享边界。
 - 每个生态适配层独立保留该生态的外部格式、来源顺序和调用语义，并映射到 BitFun 归属模块；它本身不成为新的
   业务归属模块，也不能依赖或修改兄弟生态 adapter。通用目录、生命周期协调器和能力 owner 只依赖开放生态 ID、
   来源限定身份与能力专属 provider 契约，不按 OpenCode、Codex 或 Claude Code 分支行为。
@@ -371,20 +411,20 @@ flowchart LR
 
 | 产品形态 | 当前扩展能力 | 入口行为 |
 |---|---|---|
-| Desktop / product-full | 生产入口仍依赖 `bitfun-core/product-full` 作为兼容组装层；Beta“外部 AI 应用”设置消费版本化 control/catalog 同代快照，显示正交生命周期、审批、冲突、诊断和 Host 能力，并可切换易失 Safe Mode；MCP 原生清单优先展示，外部候选保持独立来源、作用域和覆盖状态；Skills 场景显示已发现 Skill 的生态来源、用户/项目作用域与覆盖结果 | 当前四条可执行纵向切片由事实所在 Host 执行；本机 Desktop 使用本机 Host，Peer 控制界面代理 Peer Host，不在控制端回退发现或执行。Safe Mode 只撤下外部 Tool/Subagent/MCP 新调用，不改写来源偏好、不停止发现也不取消在途调用；状态仅在当前 Host 进程/执行域有效，重启或切换 Host 后关闭，所有产品面必须明确提示。Skill 仍使用独立 Registry；受管 package plugin 仍只有静态预览 |
-| CLI | 入口仍以 `bitfun-core/product-full` 作为执行兼容 owner；交互式 TUI 已可执行受支持的 Prompt Command，`/extensions` 的 status、refresh、Safe Mode 与 source enable/disable 消费同一 v1 控制 DTO，`/hooks` 异步读取与 Desktop 相同的只读 Hook 快照并遵循既有命令冲突策略，`/tools` 与 `/agents` 继续承载能力专属查看和操作；命令结果复用现有异步事件循环和 Discovery Lane，不新增调度器。Skill 列表显示来源，模式配置按实际选择结果说明覆盖来源 | 已批准的 standalone Tool 进入现有 Tool Runtime；已批准的外部 Subagent 只支持 fresh single-run。CLI/TUI 不解析生态文件、不启动第二套 worker/Agent owner；Hook 的 coverage mapping 只表示契约覆盖，不表示外部 handler 已加载、激活或执行。Safe Mode 操作后重读权威 catalog 再更新命令路由。非交互入口和 SSH Remote 未接入时不得借本机 TUI 路径代执行；其余 Runtime Parts/Rust Runtime SDK、会话和工作区 owner 边界保持不变 |
+| Desktop / product-full | 生产入口仍依赖 `bitfun-core/product-full` 作为兼容组装层；Beta“外部 AI 应用”设置消费版本化 control/catalog 同代快照，显示正交生命周期、审批、冲突、诊断和 Host 能力，并可切换易失 Safe Mode；MCP 原生清单优先展示，外部候选保持独立来源、作用域和覆盖状态；Skills 场景显示已发现 Skill 的生态来源、用户/项目作用域与覆盖结果；目标增加应用级读模型、默认连接事实和批量确认 DTO | 当前四条可执行纵向切片由事实所在 Host 执行；本机 Desktop 使用本机 Host，Peer 控制界面代理 Peer Host，不在控制端回退发现或执行。Safe Mode 只撤下外部 Tool/Subagent/MCP 新调用，不改写来源偏好、不停止发现也不取消在途调用；状态仅在当前 Host 进程/执行域有效，重启或切换 Host 后关闭，所有产品面必须明确提示。Rich Client App Server 迁移尚未完成。Skill 仍使用独立 Registry；受管 package plugin 仍只有静态预览 |
+| CLI | 入口仍以 `bitfun-core/product-full` 作为执行兼容 owner；交互式 TUI 已可执行受支持的 Prompt Command，`/extensions` 的 status、refresh、Safe Mode 与 source enable/disable 消费同一 v1 控制 DTO，`/hooks` 异步读取与 Desktop 相同的只读 Hook 快照并遵循既有命令冲突策略，`/tools` 与 `/agents` 继续承载能力专属查看和操作；命令结果复用现有异步事件循环和 Discovery Lane，不新增调度器。Skill 列表显示来源，模式配置按实际选择结果说明覆盖来源 | 交互式 TUI 通过 private in-process App Server 使用 Embedded Runtime，Headless、Peer 保留独立 adapter，可显式使用 Shared TUI。已批准的 standalone Tool 进入现有 Tool Runtime；已批准的外部 Subagent 只支持 fresh single-run。应用级摘要、首次连接、`/extensions review` 批量确认和任务相关 `action-required` 仍是目标能力，完成条件以对应详细设计和 P6 端到端证据为准。CLI/TUI 不解析生态文件、不启动第二套 worker/Agent owner；Hook 的 coverage mapping 只表示契约覆盖，不表示外部 handler 已加载、激活或执行。Safe Mode 操作后重读权威 catalog 再更新命令路由。非交互入口和 SSH Remote 未接入时不得借本机 TUI 路径代执行；其余 Runtime Parts/Rust Runtime SDK、会话和工作区 owner 边界保持不变 |
 | HarmonyOS PC 原生 CLI/TUI | 未来平台目标，当前未实现 | 目标、问题和风险见平台规约；具体适配另立专题，HAP、手机 Remote App 与远端代执行均不替代 |
 | HarmonyOS PC GUI | 完整 HarmonyOS PC 支持的另一目标形态，当前未实现 | 与 CLI/TUI 共享稳定能力和 Runtime 语义，但独立设计宿主、界面与发布验证；Web、Remote 或现有 Tauri Desktop 均不能替代 |
 | HarmonyOS 手机 Remote App | `src/apps/mobile/harmonyos` 是 phone-only ArkTS 远程入口，不持有本地 Rust Agent Runtime | 保持当前能力并按移动端专题独立演进；本轮不提前设计移动 Runtime/TUI/GUI，也不能据此宣称 HarmonyOS PC 本地能力 |
 | ACP | CLI 托管的服务端仍以 `bitfun-core/product-full` 作为兼容执行层 | 入口已选择 `DeliveryProfile::Acp` 并消费 Runtime Parts；组装层在入队前原子拒绝忙碌会话，不改变其他产品入口的排队行为；活动会话模型与模式写入走 Agent Runtime API。`session/load` 先校验和建立临时 MCP，再恢复 Core，在历史回放成功后才发布活动状态；失败会卸载本次内存状态而不删除历史。同 ID 的重叠打开/关闭被明确拒绝。成功的 `session/close` 阻止新轮次、排空队列和后台子会话，再卸载临时 Core 状态并回收 MCP 与连接；失败保留会话所有权和历史，返回可重试阶段。持久化历史仍可重新加载。完整历史、模型/模式目录与配置读取仍留在现有 Core/ACP 归属，不据此宣称完整解耦 |
-| Server / Remote | Server 可返回共享 v1 control/catalog 快照，`hostCapabilities` 明确为只读，并在解析 mutation payload 前 fail closed；Peer Host 代理同一读写控制动作与既有能力专属操作，连接旧 Peer 时读路径降级到 legacy catalog、来源启停降级到既有 mutation，Safe Mode 明确要求升级 Host；SSH Remote 工作区的外部来源发现与执行仍未实现 | 控制端用 Host 身份与工作区共同隔离异步结果。Peer Host 只处理 Host 上的真实工作区，不在控制端替远端发现；SSH Remote 未接入时返回明确不支持且不回退本机来源 |
+| Server / Remote | 当前 HTTP Server 使用 `product-full` 组装 Embedded Runtime，并通过 `/ws` 暴露 App Server；它固定绑定 loopback，只有 Origin allowlist，没有每连接认证和 user/workspace/execution-domain 绑定。Server 可返回共享 v1 control/catalog 快照，`hostCapabilities` 明确为只读，并在解析 mutation payload 前 fail closed，但 external-source 方法尚未进入 App Server schema、当前返回 `method_not_found`；Peer Host 代理同一读写控制动作与既有能力专属操作，连接旧 Peer 时读路径降级到 legacy catalog、来源启停降级到既有 mutation，Safe Mode 明确要求升级 Host；SSH Remote 工作区的外部来源发现与执行仍未实现 | 控制端用 Host 身份与工作区共同隔离异步结果。Peer Host 只处理 Host 上的真实工作区，不在控制端替远端发现。Server external-source 只读投影须先完成真实 App Server 接线；当前只能视为本机单用户 App Server Host，loopback 单用户边界不扩展到远程/多用户，也不能据此宣称公开 Server Agent API 已交付；SSH Remote 未接入时返回明确不支持且不回退本机来源 |
 | Web / Mobile Web | 依赖现有后端入口，不持有插件执行单元 | 对应 profile 当前为空计划或未接入生产，不能据枚举值宣称独立产品能力 |
 | Public Agent SDK | Python/TypeScript 产品尚未交付；Rust Runtime SDK 是内部 preview。本地 SDK Host 协议与独立 `bitfun-sdk-host` 进程只有实现候选，在跨内部调用、Headless CLI 与 Host 的同一 Query golden fixture 通过前不称为已交付 preview | SDK Host 独立选择 SDK profile/source；能力集合从共享产品事实生成，不依赖或冒充 CLI。目标为一个 `AgentClient`、query/session 和 callback 产品，Python/TypeScript 只是同一 SDK 的语言绑定；双语言可安装、核心 Query/Session 闭环和协议一致性是 Preview 门槛，仓库外消费者与冻结竞品能力矩阵是 GA 门槛，具体定义以 Agent SDK 专题为准 |
 
-对外一级状态统一使用[外部 AI 工作内容设计](extensions/external-ai-work-sources-design.md#7-状态与提示规则)定义的
+底层来源与能力继续使用[外部 AI 工作内容设计](extensions/external-ai-work-sources-design.md#7-状态与提示规则)定义的
 已发现、已应用、可用、需确认、更新中、沿用上一版本、部分受限、暂时过期、已移除/已停用和不可用，并附带
-原因与恢复建议。Host 的准备完成、重启、暂停、不支持或失败只能作为详情映射，不能形成第二套并列产品状态。
-现有代码中的过渡状态只能展示为“静态预览、未执行”，不能因为进入来源清单就误报为已应用或可用。
+原因与恢复建议。目标状态下，Settings 首页和 TUI `/extensions` 将消费[应用级连接详细设计](extensions/external-ai-app-connection-experience-design.md#34-面向用户的应用级状态)派生的五种摘要；当前生产入口仍消费 V1 来源/能力控制事实，不能据目标文档宣称应用级连接已经交付。目标摘要不能替代底层事实，宿主也不能自行重算优先级。Host 的准备完成、重启、暂停、不支持或失败只作为详情映射，不能形成第二套并列产品状态。
+现有代码中的过渡状态只能展示为“静态预览、未执行”，不能因为进入来源清单就误报为已应用、已连接或可用。
 
 ## 6. 完成判定
 

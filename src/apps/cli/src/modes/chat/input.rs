@@ -247,7 +247,17 @@ impl ChatMode {
                 KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if chat_view.model_selector_allows_edit() {
                         chat_view.hide_model_selector();
-                        chat_view.show_provider_selector();
+                        let agent = self.agent.clone();
+                        match tokio::task::block_in_place(|| {
+                            rt_handle.block_on(agent.model_catalog())
+                        }) {
+                            Ok(catalog) => {
+                                chat_view.show_provider_selector(catalog.provider_catalog)
+                            }
+                            Err(error) => chat_view.set_status(Some(format!(
+                                "Failed to load model providers: {error}"
+                            ))),
+                        }
                     }
                 }
                 // Note: Esc is handled globally for navigation back

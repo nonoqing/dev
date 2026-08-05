@@ -1074,7 +1074,13 @@ impl ChatMode {
             }
             ActionHandler::AddModel => {
                 if !self.agent.is_shared() {
-                    chat_view.show_provider_selector();
+                    let agent = self.agent.clone();
+                    match tokio::task::block_in_place(|| rt_handle.block_on(agent.model_catalog()))
+                    {
+                        Ok(catalog) => chat_view.show_provider_selector(catalog.provider_catalog),
+                        Err(error) => chat_view
+                            .set_status(Some(format!("Failed to load model providers: {error}"))),
+                    }
                 }
             }
             ActionHandler::NewSession => {
