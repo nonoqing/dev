@@ -33,6 +33,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TRACE_WORKERS: usize = 2;
 const LOG_WORKERS: usize = 2;
+const OTLP_HTTP_TRACES_PATH: &str = "/v1/traces";
+const OTLP_HTTP_METRICS_PATH: &str = "/v1/metrics";
+const OTLP_HTTP_LOGS_PATH: &str = "/v1/logs";
 
 #[derive(Debug, Clone)]
 struct QueuedLog {
@@ -235,7 +238,10 @@ impl OtelGeneration {
             let mut builder = opentelemetry_otlp::MetricExporter::builder()
                 .with_http()
                 .with_temporality(Temporality::Cumulative)
-                .with_endpoint(settings.endpoint.clone())
+                .with_endpoint(otlp_http_signal_endpoint(
+                    &settings.endpoint,
+                    OTLP_HTTP_METRICS_PATH,
+                ))
                 .with_timeout(settings.request_timeout())
                 .with_http_client(client);
             if settings.compression == OtlpCompression::Gzip {
@@ -328,7 +334,6 @@ impl OtelGeneration {
         } else {
             true
         };
-        self.gate.deactivate();
         let traces = self
             .trace_scheduler
             .as_ref()
@@ -346,6 +351,7 @@ impl OtelGeneration {
                 true
             }
         });
+        self.gate.deactivate();
         flushed && traces && logs && metrics
     }
 
@@ -633,6 +639,11 @@ fn with_exporter<T, R>(exporters: &[Mutex<T>], operation: impl FnOnce(&T) -> R) 
     operation.take().expect("operation is available")(&exporter)
 }
 
+fn otlp_http_signal_endpoint(base_endpoint: &str, signal_path: &str) -> String {
+    debug_assert!(signal_path.starts_with('/'));
+    format!("{base_endpoint}{signal_path}")
+}
+
 fn build_span_exporter(
     settings: &ValidatedTelemetrySettings,
     client: GuardedHttpClient,
@@ -640,7 +651,10 @@ fn build_span_exporter(
 ) -> Result<opentelemetry_otlp::SpanExporter, TelemetryRuntimeError> {
     let mut builder = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
-        .with_endpoint(settings.endpoint.clone())
+        .with_endpoint(otlp_http_signal_endpoint(
+            &settings.endpoint,
+            OTLP_HTTP_TRACES_PATH,
+        ))
         .with_timeout(settings.request_timeout())
         .with_http_client(client);
     if settings.compression == OtlpCompression::Gzip {
@@ -660,7 +674,10 @@ fn build_log_exporter(
 ) -> Result<opentelemetry_otlp::LogExporter, TelemetryRuntimeError> {
     let mut builder = opentelemetry_otlp::LogExporter::builder()
         .with_http()
-        .with_endpoint(settings.endpoint.clone())
+        .with_endpoint(otlp_http_signal_endpoint(
+            &settings.endpoint,
+            OTLP_HTTP_LOGS_PATH,
+        ))
         .with_timeout(settings.request_timeout())
         .with_http_client(client);
     if settings.compression == OtlpCompression::Gzip {
@@ -680,6 +697,24 @@ mod tests {
         DeploymentEnvironment, PseudonymousInstallationId, ReleaseChannel, TelemetryEntrypoint,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn appends_standard_signal_paths_to_the_validated_base_endpoint() {
+        let base_endpoint = "https://collector.example.com:4318";
+
+        assert_eq!(
+            otlp_http_signal_endpoint(base_endpoint, OTLP_HTTP_TRACES_PATH),
+            "https://collector.example.com:4318/v1/traces"
+        );
+        assert_eq!(
+            otlp_http_signal_endpoint(base_endpoint, OTLP_HTTP_METRICS_PATH),
+            "https://collector.example.com:4318/v1/metrics"
+        );
+        assert_eq!(
+            otlp_http_signal_endpoint(base_endpoint, OTLP_HTTP_LOGS_PATH),
+            "https://collector.example.com:4318/v1/logs"
+        );
+    }
 
     #[test]
     fn resource_and_scope_mapping_contains_only_registered_safe_facts() {
