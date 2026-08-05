@@ -7,58 +7,6 @@
   padding: 0;
 }
 
-.bitfun-telemetry-config__level-selector {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  width: min(100%, 360px);
-  min-width: 240px;
-  padding: 3px;
-  border: 1px solid var(--border-base);
-  border-radius: $size-radius-sm;
-  background: var(--element-bg-base);
-
-  button {
-    min-width: 0;
-    min-height: 32px;
-    padding: 5px 8px;
-    overflow-wrap: anywhere;
-    border: 0;
-    border-radius: $size-radius-sm;
-    background: transparent;
-    color: var(--color-text-secondary);
-    font: inherit;
-    cursor: pointer;
-
-    &:hover:not(:disabled):not(.is-active) {
-      background: var(--element-bg-medium);
-      color: var(--color-text-primary);
-    }
-
-    &:focus-visible {
-      outline: 2px solid var(--color-accent-500);
-      outline-offset: -2px;
-    }
-
-    &.is-active {
-      background: var(--element-bg-strong);
-      color: var(--color-text-primary);
-      box-shadow: 0 1px 2px var(--color-overlay-black-12);
-    }
-
-    &:disabled {
-      cursor: default;
-      opacity: 0.5;
-    }
-  }
-}
-
-@media (max-width: 720px) {
-  .bitfun-telemetry-config__level-selector {
-    min-width: 0;
-    width: 100%;
-  }
-}
-
 .bitfun-logging-config {
   &__content {
     display: flex;

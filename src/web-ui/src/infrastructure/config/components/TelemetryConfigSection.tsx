@@ -1,14 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ConfigPageMessage } from '@/component-library';
+import { ConfigPageMessage, Select } from '@/component-library';
 import { configAPI } from '@/infrastructure/api';
 import type { TelemetryLevel, TelemetryState } from '../types';
 import { ConfigPageRow, ConfigPageSection } from './common';
 import { createLogger } from '@/shared/utils/logger';
 
 const log = createLogger('TelemetryConfigSection');
-const TELEMETRY_LEVELS: TelemetryLevel[] = ['off', 'basic', 'diagnostic'];
-
 export const TelemetryConfigSection: React.FC = () => {
   const { t } = useTranslation('settings/basics');
   const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
@@ -70,26 +68,17 @@ export const TelemetryConfigSection: React.FC = () => {
         description={t('telemetry.levelDescription')}
         align="center"
       >
-        <div
-          className="bitfun-telemetry-config__level-selector"
-          role="radiogroup"
-          aria-label={t('telemetry.levelLabel')}
-          aria-busy={!state || saving}
-        >
-          {TELEMETRY_LEVELS.map((level) => (
-            <button
-              key={level}
-              type="button"
-              role="radio"
-              aria-checked={state?.level === level}
-              className={state?.level === level ? 'is-active' : undefined}
-              disabled={!state || saving}
-              onClick={() => { void setLevel(level); }}
-            >
-              {t(`telemetry.levels.${level}`)}
-            </button>
-          ))}
-        </div>
+        <Select
+          value={state?.level ?? 'off'}
+          onChange={(value) => { void setLevel(value as TelemetryLevel); }}
+          options={[
+            { value: 'off', label: t('telemetry.levels.off') },
+            { value: 'basic', label: t('telemetry.levels.basic') },
+            { value: 'diagnostic', label: t('telemetry.levels.diagnostic') },
+          ]}
+          disabled={!state || saving}
+          triggerAriaLabel={t('telemetry.levelLabel')}
+        />
       </ConfigPageRow>
     </ConfigPageSection>
   );

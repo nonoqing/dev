@@ -63,12 +63,19 @@ describe('TelemetryConfigSection', () => {
       root.render(<TelemetryConfigSection />);
     });
 
-    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="radio"]'));
-    expect(buttons).toHaveLength(3);
-    expect(buttons[0]?.getAttribute('aria-checked')).toBe('true');
+    const select = container.querySelector<HTMLElement>('[role="combobox"]');
+    expect(select).not.toBeNull();
+    expect(select?.textContent).toContain('telemetry.levels.off');
 
     await act(async () => {
-      buttons[1]?.click();
+      select?.click();
+    });
+
+    const basicOption = document.querySelector<HTMLElement>('[role="option"]:nth-child(2)');
+    expect(basicOption?.textContent).toContain('telemetry.levels.basic');
+
+    await act(async () => {
+      basicOption?.click();
     });
 
     expect(setTelemetryLevelMock).toHaveBeenCalledWith('basic');
@@ -76,4 +83,5 @@ describe('TelemetryConfigSection', () => {
     expect(container.textContent).not.toContain('secret');
     expect(container.textContent).not.toContain('installation');
   });
+
 });
