@@ -25,6 +25,7 @@ pnpm --dir src/mobile-web run type-check
 pnpm run i18n:contract:test          # i18n contract / resources only
 pnpm run i18n:audit                  # i18n contract / resources only
 pnpm run product:check               # default product definition
+pnpm run docs:architecture:check
 pnpm run docs:links:check
 pnpm run check:repo-hygiene
 pnpm run check:github-config

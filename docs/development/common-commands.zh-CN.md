@@ -24,6 +24,7 @@ pnpm --dir src/mobile-web run type-check
 pnpm run i18n:contract:test          # 仅 i18n 契约 / 资源
 pnpm run i18n:audit                  # 仅 i18n 契约 / 资源
 pnpm run product:check               # 默认产品定义
+pnpm run docs:architecture:check
 pnpm run docs:links:check
 pnpm run check:repo-hygiene
 pnpm run check:github-config

@@ -18,6 +18,8 @@
 4. 合并内容时必须原样保持 current/proposed/completed 等成熟度标签。移动文字不等于获准改变其权威级别。
 5. 重组若删除或合并权威文档，PR 必须提供旧内容到新位置的映射。链接检查只能证明可达，不能证明语义等价；
    映射仍须人工评审。
+6. 产品级 4+1 Authority 受 `pnpm run docs:architecture:check` 保护。若经评审迁移 Authority，必须在同一修改中
+   更新检查目标、L0 → L1 映射和旧图承接记录；不能只删除标题或把局部 L1 当作产品 L0。
 
 ## 分仓
 
@@ -93,8 +95,8 @@ AGENTS.md  →  目录 README / 单篇权威文档  →  （最多再跳一次�
 - 页首写清：用途、适用范围、状态（draft/stable）、权威语言、相关链接。
 - 能链到权威文档就不要把正文再抄一份。
 - 文件名用英文 kebab-case。
-- 文档内的双语对使用 `<name>.md` 与 `<name>.zh-CN.md`。根兼容入口保留既有特殊命名：
-  `AGENTS-CN.md`、`CONTRIBUTING_CN.md`。
+- 普通文档的双语对使用 `<name>.md` 与 `<name>.zh-CN.md`。根及模块级规范入口继续使用仓库约定的
+  `AGENTS.md` / `AGENTS-CN.md`；根贡献入口保留 `CONTRIBUTING.md` / `CONTRIBUTING_CN.md`。
 - 独立实施计划以 `-plan.md` 结尾；收尾记录以 `-completed.md` 结尾。
 
 ## Spec / Design / Plan

@@ -23,4 +23,4 @@
 | 安装器 Tauri / Rust | `cargo check --manifest-path BitFun-Installer/src-tauri/Cargo.toml` |
 | 安装器打包、payload、安装 / 卸载或原生捆绑 | `pnpm run installer:build` |
 | 构建脚本或前置检查改动 | `pnpm run check:build-prereqs`；检查逻辑有变再加 `node --test scripts/check-build-prereqs.test.mjs` |
-| 文档结构、索引、本地链接、锚点或命名 | `pnpm run docs:links:check && git diff --check`；检查器有改动时再加 `pnpm run docs:links:test` |
+| 文档结构、索引、本地链接、锚点或命名 | `pnpm run docs:links:check && pnpm run docs:architecture:check && git diff --check`；检查器有改动时再加对应的 `docs:links:test` / `docs:architecture:test` |

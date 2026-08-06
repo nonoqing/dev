@@ -26,4 +26,4 @@ change directly affects build, packaging, or CI cannot protect the path.
 | Installer Tauri/Rust changes | `cargo check --manifest-path BitFun-Installer/src-tauri/Cargo.toml` |
 | Installer packaging, payload, install/uninstall flow, or native bundling | `pnpm run installer:build` |
 | Build scripts or prerequisite changes | `pnpm run check:build-prereqs`, plus `node --test scripts/check-build-prereqs.test.mjs` when the check logic changed |
-| Documentation structure, indexes, local links, anchors, or naming | `pnpm run docs:links:check && git diff --check`; add `pnpm run docs:links:test` when the checker changed |
+| Documentation structure, indexes, local links, anchors, or naming | `pnpm run docs:links:check && pnpm run docs:architecture:check && git diff --check`; add the matching `docs:links:test` / `docs:architecture:test` when a checker changed |

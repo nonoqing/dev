@@ -85,12 +85,19 @@ BitFun 同时面向桌面 GUI、TUI/CLI、Web、ACP、Server、Remote、SDK 和�
 2. **产品表面可以有差异；共享稳定 facts 与 ports，不共享 UI、protocol、lifecycle 或平台实现。**
 3. **迁移 runtime owner 必须有评审过的 port/provider 设计、旧路径兼容、行为等价测试；** 若可能改变行为边界，须先确认。模块级 ownership 细节写在离代码最近的模块 `AGENTS.md`，不在本文件展开。
 
-Level 0 展示系统级主要边界和依赖方向；Level 1 再按 Level 0 的模块或范围展开。每张图必须能独立说明范围和图例，关系使用明确方向或协议，逻辑模块、crate、运行任务和部署实例不要求一一对应。Agent Runtime 的 Embedded/Shared 逻辑、开发、进程、物理和场景视图集中在
-[`agent-runtime-deployment-design.md`](agent-runtime-deployment-design.md)，本文件不重复其连接和性能细节。
-
 ## 2. 4+1 Architecture Views
 
 4+1 视图分别描述系统职责、代码组织、运行协作、部署边界和关键场景，避免把逻辑模块、crate、进程和调用链混在同一张图中。分类沿用 [Kruchten 4+1](https://www3.software.ibm.com/ibmdl/pub/software/rational/web/whitepapers/2003/Pbk4p1.pdf)，图的层级、动态协作和部署节点表达参考 [C4](https://c4model.com/diagrams) 以及 arc42 的 [Building Block](https://docs.arc42.org/section-5/)、[Runtime](https://docs.arc42.org/section-6/) 和 [Deployment](https://docs.arc42.org/section-7/) 视图；这些方法只提供视角和表达规则，不替代 BitFun 的真实 owner 与代码边界。
+
+Level 0 展示系统级主要边界和依赖方向；Level 1 再按 Level 0 的模块或范围展开。每张图必须能独立说明范围和图例，关系使用明确方向或协议，逻辑模块、crate、运行任务和部署实例不要求一一对应。Scenarios 用关键路径校验前四个视图，但不能替代任何一个视图。专题 Level 1 只能展开对应 Level 0，不能反向替代产品级全景。
+
+| Level 0 view | Level 1 drill-down | Scope relationship |
+|---|---|---|
+| Logical | [`agent-runtime-services-design.md`](agent-runtime-services-design.md)、[`plugin-runtime-design.md`](extensions/plugin-runtime-design.md)、[`app-server-architecture.md`](app-server-architecture.md) | 分别展开 Agent Runtime/Services、Plugin Host，以及待评审的 Rich Client App Server 逻辑边界 |
+| Development | [`rust-build-dependency-boundaries.md`](rust-build-dependency-boundaries.md)、根 [`AGENTS.md`](../../AGENTS.md) 的 Layered Module Index | 展开 crate/feature 依赖与物理仓库分层；不把 crate 等同于逻辑模块 |
+| Process | [`agent-runtime-deployment-design.md`](agent-runtime-deployment-design.md)、[`plugin-runtime-design.md`](extensions/plugin-runtime-design.md)、[`app-server-architecture.md`](app-server-architecture.md) | 展开 Session/Turn、Plugin Host 生命周期和候选 App Server transport；保留各自 Current/Proposed 标签 |
+| Physical | [`agent-runtime-deployment-design.md`](agent-runtime-deployment-design.md)、[`app-server-architecture.md`](app-server-architecture.md)、[`remote-workspace-transport.md`](remote-workspace-transport.md)、[`peer-device-mode.md`](peer-device-mode.md) | 展开 Embedded/Shared、候选 App Server、远程工作区和 Relay/Peer 部署；局部拓扑不替代全产品部署图 |
+| Scenarios (+1) | [`agent-runtime-deployment-design.md`](agent-runtime-deployment-design.md)、[`external-ai-work-sources-design.md`](extensions/external-ai-work-sources-design.md)、[`remote-workspace-transport.md`](remote-workspace-transport.md) | 展开 Runtime 生命周期、Source Scan 和 Remote 路径；专题场景只验证其覆盖范围 |
 
 ### 2.1 Logical View · Level 0
 
@@ -423,6 +430,19 @@ flowchart TB
 
 BitFun 只保留四个稳定接口边界；工具、事件和权限作为归属子接口被复用，不在插件层重复定义。本文使用“接口”描述可被调用或依赖的能力面；只有描述跨进程消息封装、结构化 schema、序列化对象或强兼容约束时才使用“契约”；只读状态视图表示从权威状态派生出的查询结果。
 
+跨本文与扩展专题使用下列唯一术语映射：
+
+| 术语 | 本仓唯一含义 | 不表示 |
+|---|---|---|
+| owner | 唯一校验并提交某类权威业务事实的现有模块；其他层只能请求、适配或投影其结果 | 人员负责人、Host、UI 状态或同名 facade |
+| facade / 门面 | 把 owner 的窄用例、只读状态、事件和类型化错误投影给特定调用方或兼容生态的薄入口 | 新 owner、第二份状态、通用 service locator 或独立产品承诺 |
+| target | 来源和插件身份下可独立准入、路由、启停并报告诊断的逻辑贡献执行项 | OS 进程、workspace、session、Plugin Host 或默认物理隔离键 |
+| Host ABI / 主机内部 ABI | Rust 调用侧、生态 adapter 与受监督 Plugin Host 之间的版本化类型请求/响应边界 | 公开 SDK、前后端 wire、OpenCode 原始对象或 Node/Bun/进程拓扑承诺 |
+| Generation | 由具体 owner 单调递增的快照/发布 fence，用于拒绝同一命名空间内的陈旧发现、路由或执行结果 | 插件版本、进程实例、全仓共享时钟或可跨 owner 比较的 ID |
+
+`owner → facade → caller` 只表示权威事实的投影方向；`target` 与 `Generation` 是 owner 管理的逻辑身份和陈旧结果保护，均不决定 Plugin Host 数量。Plugin Host 的进程复用和故障域以
+[`plugin-runtime-design.md`](extensions/plugin-runtime-design.md) 为准。
+
 | 接口边界 | 主要消费方 | 主入口 | 稳定内容 | 禁止暴露 |
 |---|---|---|---|---|
 | Agent Runtime API / 前后端能力服务边界 | GUI、TUI/CLI、Web、ACP、Server、Remote、公开 SDK adapter | 一组能力 owner 的窄类型化用例接口 | Query/Turn、会话/工作区状态、工具/MCP、权限提示、Hook 结果、诊断、产物引用、能力状态、事件流、用量和类型化错误 | 单一 service locator、公开语言 package、内核状态机、执行层内部类型、`PluginRuntimeClient`、主机内部状态、生态原始载荷、Tauri/React/TUI 实现、具体服务提供方、未预算的界面贡献接口 |
@@ -528,6 +548,19 @@ Desktop command 使用的序列化对象继续留在 `src/apps/desktop`；即使
 主题贡献只能声明语义角色和目标入口形态，例如 `accent`、`danger`、`surface`、`text`、`border`。TUI 宿主把语义角色映射为终端颜色、ANSI 或 truecolor；GUI 宿主把语义角色映射为设计 token 或 CSS 变量。若插件只提供 GUI 主题键而当前入口是 TUI，系统只能使用语义回退或返回类型化 `unsupported`，不得把 GUI 主题键直接传给 TUI。
 
 ## 4. 运行视图
+
+### 4.1 图表合并记录
+
+目录重组前的运行协作和产品形态图没有静默删除；其语义按下表合并到当前权威位置。图的合并只去除重复或已经被代码事实替代的表达，不改变 owner、边界或成熟度标签。
+
+| 旧图 | 当前承接位置 | 保持或替代的语义 |
+|---|---|---|
+| “产品入口” | 本节“当前已接线的产品入口路径”图 + 2.1 Logical / 2.4 Physical | 入口 adapter、SDK Host、Runtime API、Embedded/Shared 部署关系 |
+| “插件调用”与“插件贡献提交链” | 本节总运行图 + [`plugin-runtime-design.md`](extensions/plugin-runtime-design.md) §2–§6 | `PluginRuntimeClient`、生态 adapter、process service、Plugin Host、provider 和 owner 的调用/提交边界 |
+| “平台能力” | 本节总运行图中的 Platform Ports / Platform Adapters | Runtime 或 Plugin Host 只经平台端口访问 OS/外部系统 |
+| “当前本机入口组装”“当前 Peer 运行连接”“尚未交付的公开 SDK 路径” | 本节当前路径图 + 第 6 节产品形态矩阵 | 合并 Desktop/CLI/ACP/Server/Peer/SDK 的当前状态；旧 Server dormant 表述已由 [`main.rs`](../../src/apps/server/src/main.rs) 的 Embedded Runtime 构造和 [`websocket.rs`](../../src/apps/server/src/routes/websocket.rs) 的 `/ws` App Server `serve` 当前事实替代 |
+
+OpenCode 来源到 Plugin Host 的图仍在第 5 节保留，因为它表达生态兼容顺序而不是通用运行协作。
 
 ```mermaid
 flowchart TB

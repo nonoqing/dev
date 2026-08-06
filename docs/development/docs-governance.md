@@ -25,6 +25,9 @@ Rules for a separate product/docs site (user manuals, onboarding guides) are out
 5. Record an old-to-new content map in the PR when a reorganization deletes or
    merges authorities. A link checker proves reachability, not semantic parity;
    human review remains required for the map.
+6. `pnpm run docs:architecture:check` protects the product-level 4+1 authority.
+   An approved authority move must update the check target, L0-to-L1 map, and
+   retired-diagram map in the same change; a local L1 cannot replace product L0.
 
 ## Split: code repo vs docs site
 
@@ -107,9 +110,10 @@ AGENTS.md  →  directory README / single authority  →  (at most one more hop)
 - Page header: purpose, scope, status (`draft`/`stable`), authority language, related links.
 - Link authorities; do not paste long bodies into indexes.
 - Filenames: English kebab-case.
-- Paired locale files use `<name>.md` and `<name>.zh-CN.md`. Root compatibility
-  entrypoints keep their established names (`AGENTS-CN.md`,
-  `CONTRIBUTING_CN.md`).
+- Ordinary locale pairs use `<name>.md` and `<name>.zh-CN.md`. Root and module
+  standards entrypoints keep the repository convention `AGENTS.md` /
+  `AGENTS-CN.md`; the root contribution pair remains `CONTRIBUTING.md` /
+  `CONTRIBUTING_CN.md`.
 - Standalone implementation plans end in `-plan.md`; closeout records end in
   `-completed.md`.
 
