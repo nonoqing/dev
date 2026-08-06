@@ -11,7 +11,7 @@
 - 产品定制：[`product-customization-blueprint.md`](product-customization-blueprint.md)
 - 外部 AI 工作来源：[`extensions/external-ai-work-sources-design.md`](extensions/external-ai-work-sources-design.md)
 - 外部 AI 应用连接体验：[`extensions/external-ai-app-connection-experience-design.md`](extensions/external-ai-app-connection-experience-design.md)
-- 外部 AI 应用连接执行计划：[`../plans/external-ai-app-connection-experience-plan.md`](../plans/external-ai-app-connection-experience-plan.md)
+- 外部 AI 应用连接执行计划：[`../specs/plans/external-ai-app-connection-experience-plan.md`](../specs/plans/external-ai-app-connection-experience-plan.md)
 - OpenCode 兼容矩阵：[`extensions/opencode-extension-compatibility.md`](extensions/opencode-extension-compatibility.md)
 - 插件 Runtime：[`extensions/plugin-runtime-design.md`](extensions/plugin-runtime-design.md)
 - Detached Dispatch：[`detached-task-dispatch.md`](detached-task-dispatch.md)

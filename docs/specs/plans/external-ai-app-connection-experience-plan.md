@@ -1,6 +1,6 @@
 # 外部 AI 应用连接体验执行计划
 
-> 本计划把[外部 AI 工作内容总体架构](../architecture/extensions/external-ai-work-sources-design.md)和[外部 AI 应用连接与管理详细设计](../architecture/extensions/external-ai-app-connection-experience-design.md)拆成可独立评审、验证和回退的实施阶段。本文不扩大任何生态的能力兼容范围；OpenCode 具体能力路线仍以[OpenCode 扩展兼容计划](opencode-extension-compatibility-plan.md)为准。
+> 本计划把[外部 AI 工作内容总体架构](../../architecture/extensions/external-ai-work-sources-design.md)和[外部 AI 应用连接与管理详细设计](../../architecture/extensions/external-ai-app-connection-experience-design.md)拆成可独立评审、验证和回退的实施阶段。本文不扩大任何生态的能力兼容范围；OpenCode 具体能力路线仍以[OpenCode 扩展兼容计划](opencode-extension-compatibility-plan.md)为准。
 
 > **实现状态：全部为目标工作。** 当前生产只提供严格 V1 来源/能力控制协议；应用级连接、V2 协议、批量确认、跨宿主应用快照和任务相关 `action-required` 尚未交付。只有完成对应阶段的生产接线和退出条件，架构现状文档才能更新。
 

@@ -36,6 +36,6 @@ Open under [`extensions/`](extensions/). Hot entry:
 | OpenCode compatibility (incl. **current P0 runtime guardrail**) | [`extensions/opencode-extension-compatibility.md`](extensions/opencode-extension-compatibility.md) |
 | External AI work sources | [`extensions/external-ai-work-sources-design.md`](extensions/external-ai-work-sources-design.md) |
 | Capability runtime integration | [`extensions/capability-runtime-integration-design.md`](extensions/capability-runtime-integration-design.md) |
-| Plugin runtime host | [`extensions/plugin-runtime-host-design.md`](extensions/plugin-runtime-host-design.md) |
+| Plugin runtime and host | [`extensions/plugin-runtime-design.md`](extensions/plugin-runtime-design.md) |
 
 Other extension designs live beside these files; prefer the OpenCode overview table for the full map.

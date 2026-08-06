@@ -5,7 +5,7 @@
 > 基线日期：2026-08-05。
 >
 > 本文记录 BitFun Rich Client 与产品后端之间的候选 App Server 边界，不是已批准的权威架构。具体 TUI 迁移阶段、接口盘点和当前缺口见
-> [`tui-app-server-decoupling-refactor-plan.md`](../plans/tui-app-server-decoupling-refactor-plan.md)；Agent Runtime 的进程、所有权和实例隔离见
+> [`tui-app-server-decoupling-refactor-plan.md`](../specs/plans/tui-app-server-decoupling-refactor-plan.md)；Agent Runtime 的进程、所有权和实例隔离见
 > [`agent-runtime-deployment-design.md`](agent-runtime-deployment-design.md)；产品 owner 与分层依赖见
 > [`product-architecture.md`](product-architecture.md)。评审完成前，当前调用路径以已接线代码和上述稳定架构文档为准。
 

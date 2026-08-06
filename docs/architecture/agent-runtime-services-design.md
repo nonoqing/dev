@@ -110,7 +110,7 @@ v4 将活动 Turn 的文本 steer 纳入 `AgentDialogTurnPort`，复用同一个
 
 ### 1.3 运行时、能力服务、扩展与主机接口面
 
-接口边界以 [`product-architecture.md`](product-architecture.md#2-接口边界) 为准。本文件不维护第二套能力服务状态词、插件接口字段或生态兼容矩阵，只补充运行时和 crate 归属：
+接口边界以 [`product-architecture.md`](product-architecture.md#3-接口边界) 为准。本文件不维护第二套能力服务状态词、插件接口字段或生态兼容矩阵，只补充运行时和 crate 归属：
 
 | 接口边界 | 本文件补充的内容 | 不在本文件重复定义 |
 |---|---|---|
@@ -813,7 +813,7 @@ Desktop 与 CLI Peer Host 还各自注入同一个 Core-backed `LocalWorkspaceSn
 - Tauri 句柄、窗口、命令宏和桌面 app 状态只能存在于 Desktop 提供方或
   传输/接口适配器；运行时部件只接收类型化服务端口、DTO、事件事实和能力可用性。
 - 宿主通信的抽取门槛、Tauri 薄适配职责和逐能力迁移顺序以
-  [`product-architecture.md`](product-architecture.md#22-宿主通信契约与-tauri-薄适配) 为准；不得用通用 API 转发层
+  [`product-architecture.md`](product-architecture.md#32-宿主通信契约与-tauri-薄适配) 为准；不得用通用 API 转发层
   包装所有 Agent Runtime API 方法。
 - 插件运行时客户端只能作为内核可调用的类型化边界注入；智能体内核、工具运行时和工作流不直接加载
   OpenCode 插件代码。

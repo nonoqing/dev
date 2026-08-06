@@ -8,10 +8,10 @@
 
 相关文档：
 
-- [CLI 产品线设计](../architecture/cli-product-line-design.md)
-- [App Server 架构设计](../architecture/app-server-architecture.md)
-- [Agent Runtime 部署设计](../architecture/agent-runtime-deployment-design.md)
-- [产品架构](../architecture/product-architecture.md)
+- [CLI 产品线设计](../../architecture/cli-product-line-design.md)
+- [App Server 架构设计](../../architecture/app-server-architecture.md)
+- [Agent Runtime 部署设计](../../architecture/agent-runtime-deployment-design.md)
+- [产品架构](../../architecture/product-architecture.md)
 
 ## 1. 范围与目标
 
@@ -62,7 +62,7 @@ Phase 3/4 尚未迁移的配置、MCP、Skill、Subagent、Hook、外部来源�
 
 ### 2.2 Proposed target
 
-若 [App Server 目标架构](../architecture/app-server-architecture.md) 通过评审，交互式 Rich Client 的目标路径为：
+若 [App Server 目标架构](../../architecture/app-server-architecture.md) 通过评审，交互式 Rich Client 的目标路径为：
 
 ```text
 TUI renderer / input / state / local effects

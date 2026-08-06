@@ -22,7 +22,7 @@
 | JS/TS 工具、软件包插件、稳定 Hook、`client`、`serverUrl`、`$` | [服务插件运行时适配](opencode-plugin-runtime-adapter-design.md) |
 | TUI target、Route、Command、Keymap、Dialog、Slot、Theme、State、KV | [终端界面插件适配](opencode-tui-plugin-adapter-design.md) |
 | SDK、Server、ACP、IDE、Web、GitHub、GitLab、Slack | [外部集成适配](opencode-external-integration-adapter-design.md) |
-| 进程、调用、超时、恢复、状态与 BitFun 归属模块边界 | [插件运行时主机](plugin-runtime-host-design.md) |
+| 进程、调用、超时、恢复、状态与 BitFun 归属模块边界 | [插件运行时与 Plugin Host](plugin-runtime-design.md) |
 | BitFun 能力输出到外部宿主、Provider Slot、通用状态/事件/并发/冲突边界 | [能力装配与宿主集成](capability-runtime-integration-design.md) |
 | 交付顺序和阶段退出条件 | [粗粒度计划](../../specs/plans/opencode-extension-compatibility-plan.md) |
 
@@ -150,7 +150,7 @@ OpenCode，和 OpenCode 配置/插件进入 BitFun 是两个独立验收方向�
 | `serverUrl` | 补扩展接口 | 未实现 | 可主要适配 | OC-R2 | 在 worker 执行域提供真实回环服务，只实现插件所需的版本化路由 | [兼容门面](opencode-plugin-runtime-adapter-design.md#7-opencode-兼容门面) |
 | `$` 与脚本环境 | 补基础能力 | 未实现 | 可完整适配 | OC-R2 | 只有需要 OpenCode/Bun `$` 的冻结样例才启用 Bun-compatible adapter；Node 路径不能伪造等价语义。受限模式依赖真实 OS/容器边界，无法落实时停用 target | [默认策略](opencode-plugin-runtime-adapter-design.md#3-默认策略与可调权限) |
 | 加载、停用、更新与崩溃恢复 | 补基础能力 | standalone Tool fail-closed 已实现 | 可主要适配 | OC-R2 | 已有来源限定 target、后台重载、删除撤下与 worker 终止；精确物化旧版本、健康旧进程保留和退避恢复仍待完整 Host | [生命周期](opencode-plugin-runtime-adapter-design.md#9-生命周期与能力暴露) |
-| 跨插件进程全局共享 | 明确降级 | 未实现 | 明确降级 | OC-R2 | 每 target 使用独立可终止进程；不承诺 `globalThis`、进程环境或模块单例的未文档化共享 | [故障域](opencode-plugin-runtime-adapter-design.md#81-故障域) |
+| 跨插件进程全局共享 | 明确降级 | 未实现 | 明确降级 | OC-R2 | standalone Tool 每 target 使用独立 worker；完整 package plugin 按执行与安全事实复用 Host，但不承诺 `globalThis`、进程环境或模块单例的未文档化共享 | [故障域](opencode-plugin-runtime-adapter-design.md#81-故障域) |
 
 本类整体风险是第三方代码副作用、依赖安装失败、Hook 顺序漂移和 worker 失控。默认权限可以开放，但执行隔离、超时、取消、队列上限、结果大小和故障恢复必须始终启用。
 
@@ -335,7 +335,7 @@ worker。授权在准备前、准备后 import 前、load 后注册前和每次 
 | `api.app.version` 无法表达 renderer 降级 | 协议限制 | 插件只能读取兼容版本，没有能力协商字段，可能在懒路径选择 BitFun 不支持的组件能力 | 初始化依赖 renderer 时拒绝整个 target；懒路径返回 `unsupported(renderer-required)`，不能宣称仅凭版本检查即可兼容。 |
 | 完整 OpenCode HTTP Server 协议 | 不作为插件兼容前置目标 | 会形成第二套产品协议、会话和错误模型 | 为插件实现所需 Client/回环路由；外部协议按独立产品需求扩展。 |
 | 原始 IDE/Web/attach/GitHub/GitLab 客户端或流程直接连接 BitFun | 不承诺直接替换 | 这些入口依赖 OpenCode CLI、Server、会话和产品流程，不是插件接口 | 提供 BitFun 原生集成；IDE `/tui` 子集和外部协议按真实需求单独兼容。 |
-| 插件间 `globalThis`、进程环境和模块单例共享 | 明确不兼容 | 每 target 独立进程才能可靠终止死循环和内存失控 | 保留官方 PluginInput、Hook 顺序和显式接口，不支持未文档化进程全局副作用。 |
+| 插件间 `globalThis`、进程环境和模块单例共享 | 明确不兼容 | standalone Tool 以 target worker 隔离；完整 package plugin 可共享 Host，但 Host 内进程级状态不是兼容契约 | 保留官方 PluginInput、Hook 顺序和显式接口，不支持未文档化进程全局副作用。 |
 | `server` / `autoupdate` 在普通 BitFun 启动中的行为 | 明确降级 | 两者分别属于 OpenCode 服务进程和 OpenCode 自身更新 | 显式兼容服务可映射 `server`；`autoupdate` 只保留来源并说明不适用。 |
 | 未文档化内部接口 | 不承诺 | 没有稳定版本和契约 | 返回稳定不支持并进入版本前瞻报告。 |
 | `experimental_workspace.register` | 暂不承诺 | 接口未稳定且会改变工作区与远程连接归属 | 继续使用 BitFun Workspace/Remote 归属模块，稳定后重评。 |

@@ -115,6 +115,6 @@ Desktop Tauri surface: `src/apps/desktop/src/api/relay_deploy_api.rs`
 
 ## Related docs
 
-- Relay runtime / admin: [`src/apps/relay-server/README.md`](../../../apps/relay-server/README.md)
+- Relay runtime / admin: [`src/apps/relay-server/README.md`](../../../../apps/relay-server/README.md)
 - Account login + sync choice: comments on `account_login` /
   `account_finalize_login` in `src/apps/desktop/src/api/remote_connect_api.rs`

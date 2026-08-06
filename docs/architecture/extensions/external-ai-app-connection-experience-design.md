@@ -1,6 +1,6 @@
 # 外部 AI 应用连接与管理详细设计
 
-本文定义“外部 AI 应用”在 Desktop Settings、交互式 TUI 和非交互 CLI 中的应用级连接与管理体验。稳定架构、归属模块和运行视图见[外部 AI 工作内容架构](external-ai-work-sources-design.md)，实施顺序见[外部 AI 应用连接体验执行计划](../../plans/external-ai-app-connection-experience-plan.md)。
+本文定义“外部 AI 应用”在 Desktop Settings、交互式 TUI 和非交互 CLI 中的应用级连接与管理体验。稳定架构、归属模块和运行视图见[外部 AI 工作内容架构](external-ai-work-sources-design.md)，实施顺序见[外部 AI 应用连接体验执行计划](../../specs/plans/external-ai-app-connection-experience-plan.md)。
 
 本文只描述交互、应用级读模型、动作语义和宿主投影，不重定义生态解析、能力归属、执行权限或插件运行时。
 

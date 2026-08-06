@@ -7,7 +7,7 @@ SDK 或 Server 输出到外部宿主，以及内部能力组合、状态、事�
 [`capability-runtime-integration-design.md`](capability-runtime-integration-design.md)；两条方向共用适用的身份事实和能力归属模块，
 但不共用一个大一统 adapter 或状态模型。外部应用的 Settings/TUI 信息架构、默认连接、批量确认和提示去重见
 [`external-ai-app-connection-experience-design.md`](external-ai-app-connection-experience-design.md)，对应实施顺序见
-[`../../plans/external-ai-app-connection-experience-plan.md`](../../plans/external-ai-app-connection-experience-plan.md)。
+[`../../specs/plans/external-ai-app-connection-experience-plan.md`](../../specs/plans/external-ai-app-connection-experience-plan.md)。
 
 本文同时记录当前可用端到端能力与目标架构。当前 BitFun 已具备通用外部来源目录、四条能力专属发现通道，并由
 `ExternalSourceControlPlane` 负责 provider-neutral 调度、generation fencing 和故障隔离；`assembly/core` 的

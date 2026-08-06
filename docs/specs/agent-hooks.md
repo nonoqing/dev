@@ -33,6 +33,32 @@ documentation, which covers all of it well:
 The rest of this page is only what is BitFun-specific: where the files live,
 how to switch hooks on, and where BitFun currently differs.
 
+## Runtime ownership and hook namespaces
+
+The portable Codex-compatible engine lives in
+`bitfun-agent-runtime::native_hooks`. It owns settings parsing, matcher and
+event semantics, stdin payloads, process execution, timeout behavior, and
+decision merging. It receives already loaded settings and fully built payloads;
+it does not discover BitFun configuration or product state.
+
+`bitfun-core::native_hooks` owns user/project settings discovery, feature and
+scope gates, engine caching, event-specific payload assembly, and the typed
+dispatch helpers called by the coordinator, execution engine, and tool
+pipeline. Dispatch sites call those helpers instead of parsing settings or
+running hook processes themselves.
+
+Keep these three namespaces distinct:
+
+| Namespace | Purpose | User-configured / executable |
+| --- | --- | --- |
+| native user hooks | Codex-compatible lifecycle hooks executed by `AgentHookEngine` | Yes / yes |
+| compiled-in `post_call_hooks` | Internal Rust callbacks after successful tool calls | No / yes, inside the runtime |
+| external hook catalog | Read-only discovery and projection of hook declarations from other AI applications | No / no |
+
+An external declaration becomes executable only after the explicit reviewed
+import flow below copies a compatible command hook into a private native-hook
+snapshot. Discovery alone never routes it through `AgentHookEngine`.
+
 ## Where BitFun reads hooks
 
 Codex reads `~/.codex/hooks.json`; BitFun reads its own config directory
