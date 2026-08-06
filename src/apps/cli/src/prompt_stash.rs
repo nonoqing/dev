@@ -280,6 +280,93 @@ fn lock_is_contended(error: &std::io::Error) -> bool {
         || matches!(error.raw_os_error(), Some(32) | Some(33))
 }
 
+// ─── Shared stash operations ──────────────────────────────────────────────
+// Thin wrappers over PromptStashStore so both ChatMode and StartupPage can
+// call the same logic without duplicating the store-open + error-mapping pattern.
+
+pub(crate) fn current_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+pub(crate) fn restored_status(base: &str, references_detached: bool) -> String {
+    if references_detached {
+        format!("{base}; workspace references were detached because the stash came from another workspace")
+    } else {
+        base.to_string()
+    }
+}
+
+/// Push a draft into the stash. Caller must validate non-empty text first.
+pub(crate) fn stash_prompt(draft: &ComposerDraft, workspace: Option<&str>) -> Result<(), String> {
+    let timestamp_ms = current_timestamp_ms();
+    PromptStashStore::from_config_dir()
+        .map_err(|e| e.to_string())
+        .and_then(|store| {
+            store
+                .push(draft, workspace, timestamp_ms)
+                .map_err(|e| e.to_string())
+        })
+        .map(|_| ())
+}
+
+/// Pop the latest stashed prompt and convert it for the given workspace.
+pub(crate) fn pop_stash(workspace: Option<&str>) -> Result<Option<(ComposerDraft, bool)>, String> {
+    PromptStashStore::from_config_dir()
+        .map_err(|e| e.to_string())
+        .and_then(|store| store.pop().map_err(|e| e.to_string()))
+        .map(|opt| opt.map(|entry| entry.into_draft_for_workspace(workspace)))
+}
+
+/// List all stashed prompts (newest first).
+pub(crate) fn list_stash() -> Result<Vec<PromptStashEntry>, String> {
+    PromptStashStore::from_config_dir()
+        .map_err(|e| e.to_string())
+        .and_then(|store| store.list().map_err(|e| e.to_string()))
+}
+
+/// Restore (find + remove) a stashed prompt by ID and convert it for the
+/// given workspace. Returns None if the entry was not found.
+pub(crate) fn restore_stash(
+    id: &str,
+    workspace: Option<&str>,
+) -> Result<Option<(ComposerDraft, bool)>, String> {
+    PromptStashStore::from_config_dir()
+        .map_err(|e| e.to_string())
+        .and_then(|store| {
+            let entry = store
+                .list()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|entry| entry.id == id);
+            let Some(entry) = entry else {
+                return Ok(None);
+            };
+            if !store.remove(id).map_err(|e| e.to_string())? {
+                return Ok(None);
+            }
+            Ok(Some(entry))
+        })
+        .map(|opt| opt.map(|entry| entry.into_draft_for_workspace(workspace)))
+}
+
+/// Delete a stashed prompt by ID. Returns true if deleted, false if not found.
+pub(crate) fn delete_stash_entry(id: &str) -> Result<bool, String> {
+    PromptStashStore::from_config_dir()
+        .map_err(|e| e.to_string())
+        .and_then(|store| store.remove(id).map_err(|e| e.to_string()))
+}
+
+/// Check whether the stash has any entries.
+pub(crate) fn is_stash_non_empty() -> bool {
+    PromptStashStore::from_config_dir()
+        .ok()
+        .is_some_and(|store| store.is_non_empty().unwrap_or(false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

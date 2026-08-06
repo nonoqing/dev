@@ -62,6 +62,7 @@ enum PopupType {
     ProviderSelector,
     ModelConfigForm,
     LoginForm,
+    PromptStashSelector,
 }
 
 /// Navigation stack for managing popup hierarchy
@@ -195,6 +196,10 @@ pub(crate) struct StartupPage {
     login_form: LoginFormState,
     theme_preview_original: Option<Theme>,
 
+    // ── Prompt stash ──
+    prompt_stash_selector: crate::ui::prompt_stash_selector::PromptStashSelectorState,
+    stash_non_empty: bool,
+
     // ── System context ──
     agent: Arc<TuiAgentClient>,
 
@@ -280,6 +285,9 @@ impl StartupPage {
             model_config_form: ModelConfigFormState::new(),
             login_form: LoginFormState::new(),
             theme_preview_original: None,
+            prompt_stash_selector: crate::ui::prompt_stash_selector::PromptStashSelectorState::new(
+            ),
+            stash_non_empty: false,
             agent,
             agent_type: default_agent,
             model_display_name: String::new(),
@@ -331,7 +339,10 @@ impl StartupPage {
     }
 
     fn action_state(&self, popup_open: bool) -> ActionState {
-        ActionState::startup(popup_open).with_shared_tui(self.agent.is_shared())
+        ActionState::startup(popup_open)
+            .with_shared_tui(self.agent.is_shared())
+            .with_has_input(!self.text_input.text().trim().is_empty())
+            .with_stash_non_empty(self.stash_non_empty)
     }
 
     /// Get the current CLI config after startup-page edits.
@@ -358,6 +369,7 @@ impl StartupPage {
             || self.provider_selector.is_visible()
             || self.model_config_form.is_visible()
             || self.login_form.is_visible()
+            || self.prompt_stash_selector.is_visible()
     }
 
     pub(crate) fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<StartupResult> {
@@ -504,6 +516,7 @@ impl StartupPage {
         self.theme_selector.render(frame, size, &self.theme);
         self.provider_selector.render(frame, size, &self.theme);
         self.model_config_form.render_mut(frame, size, &self.theme);
+        self.prompt_stash_selector.render(frame, size, &self.theme);
 
         // Overlay: command palette (Ctrl+P)
         self.command_palette.render(frame, size, &self.theme);
@@ -954,6 +967,25 @@ impl StartupPage {
             return self.handle_login_form_action(action);
         }
 
+        // ── Prompt stash selector intercepts all keys when visible ──
+
+        if self.prompt_stash_selector.is_visible() {
+            let action = self.prompt_stash_selector.handle_key_event(key);
+            match action {
+                crate::ui::prompt_stash_selector::PromptStashAction::Select(id) => {
+                    self.restore_prompt_stash(&id);
+                }
+                crate::ui::prompt_stash_selector::PromptStashAction::Delete(id) => {
+                    self.delete_prompt_stash(&id);
+                }
+                crate::ui::prompt_stash_selector::PromptStashAction::Close => {
+                    self.navigate_back();
+                }
+                crate::ui::prompt_stash_selector::PromptStashAction::None => {}
+            }
+            return None;
+        }
+
         // ── Command palette intercepts all keys when visible ──
 
         if self.command_palette.is_visible() {
@@ -1029,10 +1061,8 @@ impl StartupPage {
 
         match (key.code, key.modifiers) {
             // Ctrl+D: exit the app only when the input box is empty.
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                if self.text_input.is_empty() {
-                    return Some(StartupResult::Exit);
-                }
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) if self.text_input.is_empty() => {
+                return Some(StartupResult::Exit);
             }
             (KeyCode::Esc, _) => {
                 if !self.text_input.is_empty() {
@@ -1178,6 +1208,7 @@ impl StartupPage {
                 None => self.status = Some("Init prompt not found".to_string()),
             },
             ActionHandler::OpenPalette => {
+                self.refresh_stash_non_empty();
                 self.push_current_popup_to_stack();
                 self.command_palette.show(self.action_state(false));
             }
@@ -1188,6 +1219,9 @@ impl StartupPage {
             ActionHandler::Paste => self.paste_clipboard(),
             ActionHandler::ClosePopups => self.close_all_popups(),
             ActionHandler::NavigateBack => self.navigate_back(),
+            ActionHandler::PromptStash => self.stash_current_prompt(),
+            ActionHandler::PromptStashPop => self.pop_prompt_stash(),
+            ActionHandler::PromptStashList => self.show_prompt_stash(),
             ActionHandler::RenameSession
             | ActionHandler::ViewSubagents
             | ActionHandler::Timeline
@@ -1203,9 +1237,6 @@ impl StartupPage {
             | ActionHandler::WorkspaceDiff
             | ActionHandler::CompactSession
             | ActionHandler::Editor
-            | ActionHandler::PromptStash
-            | ActionHandler::PromptStashPop
-            | ActionHandler::PromptStashList
             | ActionHandler::ToggleTimestamps
             | ActionHandler::ToggleThinking
             | ActionHandler::ToggleToolDetails
@@ -1459,6 +1490,9 @@ impl StartupPage {
         } else if self.login_form.is_visible() {
             self.popup_stack.push(PopupType::LoginForm);
             self.login_form.hide();
+        } else if self.prompt_stash_selector.is_visible() {
+            self.popup_stack.push(PopupType::PromptStashSelector);
+            self.prompt_stash_selector.hide();
         }
     }
 
@@ -1634,6 +1668,110 @@ impl StartupPage {
             LoginFormAction::None => {}
         }
         None
+    }
+
+    // ======================== Prompt stash ========================
+
+    fn refresh_stash_non_empty(&mut self) {
+        self.stash_non_empty = crate::prompt_stash::is_stash_non_empty();
+    }
+
+    fn stash_current_prompt(&mut self) {
+        let draft = self.draft_snapshot();
+        if draft.text.trim().is_empty() {
+            self.status = Some("There is no prompt to stash".to_string());
+            return;
+        }
+        match crate::prompt_stash::stash_prompt(&draft, self.workspace().as_deref()) {
+            Ok(()) => {
+                self.close_all_popups();
+                self.clear_composer();
+                self.refresh_command_menu();
+                self.stash_non_empty = true;
+                self.status = Some("Prompt stashed".to_string());
+            }
+            Err(error) => self.status = Some(format!("Could not stash prompt: {error}")),
+        }
+    }
+
+    fn pop_prompt_stash(&mut self) {
+        match crate::prompt_stash::pop_stash(self.workspace().as_deref()) {
+            Ok(Some((draft, references_detached))) => {
+                self.close_all_popups();
+                let mut draft = draft;
+                draft.retain_valid_sources();
+                let cursor = draft.text.chars().count();
+                self.apply_draft_at_cursor(draft, cursor);
+                self.refresh_stash_non_empty();
+                self.status = Some(crate::prompt_stash::restored_status(
+                    "Restored the latest stashed prompt",
+                    references_detached,
+                ));
+            }
+            Ok(None) => self.status = Some("Prompt stash is empty".to_string()),
+            Err(error) => self.status = Some(format!("Could not read prompt stash: {error}")),
+        }
+    }
+
+    fn show_prompt_stash(&mut self) {
+        match crate::prompt_stash::list_stash() {
+            Ok(entries) if entries.is_empty() => {
+                self.status = Some("Prompt stash is empty".to_string());
+            }
+            Ok(entries) => {
+                self.push_current_popup_to_stack();
+                self.prompt_stash_selector.show(entries);
+            }
+            Err(error) => self.status = Some(format!("Could not read prompt stash: {error}")),
+        }
+    }
+
+    fn restore_prompt_stash(&mut self, id: &str) {
+        match crate::prompt_stash::restore_stash(id, self.workspace().as_deref()) {
+            Ok(Some((draft, references_detached))) => {
+                self.close_all_popups();
+                let mut draft = draft;
+                draft.retain_valid_sources();
+                let cursor = draft.text.chars().count();
+                self.apply_draft_at_cursor(draft, cursor);
+                self.refresh_stash_non_empty();
+                self.status = Some(crate::prompt_stash::restored_status(
+                    "Restored stashed prompt",
+                    references_detached,
+                ));
+            }
+            Ok(None) => {
+                self.close_all_popups();
+                self.status = Some(
+                    "That stashed prompt is no longer available; the list was refreshed elsewhere"
+                        .to_string(),
+                );
+            }
+            Err(error) => self.status = Some(format!("Could not restore prompt: {error}")),
+        }
+    }
+
+    fn delete_prompt_stash(&mut self, id: &str) {
+        match crate::prompt_stash::delete_stash_entry(id) {
+            Ok(true) => {
+                self.refresh_stash_non_empty();
+                let entries = crate::prompt_stash::list_stash().unwrap_or_default();
+                if entries.is_empty() {
+                    self.close_all_popups();
+                    self.status = Some("Prompt stash is now empty".to_string());
+                } else {
+                    self.prompt_stash_selector.show(entries);
+                    self.status = Some("Stashed prompt deleted".to_string());
+                }
+            }
+            Ok(false) => {
+                self.status = Some(
+                    "That stashed prompt is no longer available; the list was refreshed elsewhere"
+                        .to_string(),
+                );
+            }
+            Err(error) => self.status = Some(format!("Could not delete prompt: {error}")),
+        }
     }
 
     fn show_session_selector(&mut self) {
@@ -2378,6 +2516,8 @@ impl StartupPage {
             self.model_config_form.hide();
         } else if self.login_form.is_visible() {
             self.login_form.hide();
+        } else if self.prompt_stash_selector.is_visible() {
+            self.prompt_stash_selector.hide();
         }
 
         // If there's a previous popup in the stack, re-show it
@@ -2393,6 +2533,7 @@ impl StartupPage {
                 PopupType::ProviderSelector => self.provider_selector.reshow(),
                 PopupType::ModelConfigForm => self.model_config_form.reshow(),
                 PopupType::LoginForm => self.login_form.show(),
+                PopupType::PromptStashSelector => self.prompt_stash_selector.reshow(),
             }
         }
     }
@@ -2411,6 +2552,7 @@ impl StartupPage {
         self.provider_selector.hide();
         self.model_config_form.hide();
         self.login_form.hide();
+        self.prompt_stash_selector.hide();
         self.popup_stack.clear();
     }
 

@@ -735,6 +735,15 @@ impl ChatMode {
                 chat_view.set_status(Some("Jumped to last message".to_string()));
             }
 
+            // Ctrl+D exits only when the input is empty and no turn is
+            // processing. With non-empty input it reaches the shared Emacs
+            // fallback below and deletes one word forward.
+            (KeyCode::Char('d'), KeyModifiers::CONTROL)
+                if !chat_state.is_processing && chat_view.input_text().is_empty() =>
+            {
+                return Ok(Some(ChatExitReason::Quit));
+            }
+
             // Emacs-style editing keys (shared with startup page via
             // TextInput::handle_emacs_edit_key). These reach the fallback
             // because the keymap moved NextTool to Ctrl+N, ClearInput to

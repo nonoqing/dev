@@ -241,7 +241,7 @@ impl TextInput {
         }
     }
 
-    /// Delete one word forward from cursor (Alt+D / Alt+Delete behavior).
+    /// Delete one word forward from cursor (Alt+D / Ctrl+D / Alt+Delete behavior).
     pub(super) fn delete_word_forward(&mut self) {
         let char_count = self.input.chars().count();
         if self.cursor >= char_count {
@@ -287,7 +287,7 @@ impl TextInput {
     /// - Ctrl+E: cursor to line end
     /// - Ctrl+K: delete to line end
     /// - Ctrl+U: delete to line start
-    /// - Alt+D / Ctrl+Delete / Alt+Delete: delete word forward
+    /// - Alt+D / Ctrl+D / Ctrl+Delete / Alt+Delete: delete word forward
     /// - Delete / Shift+Delete: delete char forward
     /// - Ctrl+- / Ctrl+_ / Ctrl+7 / Super+Z: undo (all platforms)
     /// - Ctrl+Z: undo (Windows only; Unix intercepts Ctrl+Z for terminal suspend)
@@ -310,6 +310,7 @@ impl TextInput {
                 true
             }
             (KeyCode::Char('d'), KeyModifiers::ALT)
+            | (KeyCode::Char('d'), KeyModifiers::CONTROL)
             | (KeyCode::Delete, KeyModifiers::CONTROL)
             | (KeyCode::Delete, KeyModifiers::ALT) => {
                 self.delete_word_forward();
@@ -610,6 +611,19 @@ impl TextInput {
 #[cfg(test)]
 mod tests {
     use super::TextInput;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn ctrl_d_deletes_one_word_forward_like_alt_d() {
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let mut input = TextInput::new();
+            input.set_text_and_cursor("one two three", 4);
+
+            assert!(input.handle_emacs_edit_key(KeyEvent::new(KeyCode::Char('d'), modifiers,)));
+            assert_eq!(input.text(), "one  three");
+            assert_eq!(input.cursor, 4);
+        }
+    }
 
     #[test]
     fn empty_text_has_one_visual_line_and_prefix_cursor_position() {

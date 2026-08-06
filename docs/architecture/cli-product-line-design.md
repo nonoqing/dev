@@ -160,9 +160,9 @@ TUI 增量保持四个可测试边界：
 
 Slash、Palette、Help、快捷键和 availability 从同一 Action Registry 派生。竞品已有等价入口时不自创命令；局部 UI 状态不进入 Agent Runtime contract。
 
-Emacs 风格编辑键（Ctrl+A/E 行首行尾、Ctrl+K/U 行删除、Alt+D 删词、Ctrl+- 撤销等）在 fallback 层统一处理，由 `TextInput::handle_emacs_edit_key` 提供共享实现；`Home`/`End` 改为消息滚动。终端挂起（Unix Ctrl+Z via SIGTSTP/SIGCONT）在事件循环层拦截，`fg` 恢复后重初始化终端。空闲状态下退出（Ctrl+C / Ctrl+D）为单次确认：有非空输入时先清空输入，输入为空时直接退出。处理中 Ctrl+C 先取消当前轮次。
+Emacs 风格编辑键（Ctrl+A/E 行首行尾、Ctrl+K/U 行删除、Alt+D / Ctrl+D 向前删词、Ctrl+- 撤销等）在 fallback 层统一处理，由 `TextInput::handle_emacs_edit_key` 为 ChatMode 与 StartupPage 的 composer 提供共享实现；`Home`/`End` 改为消息滚动。Ctrl+D 在 composer 非空且输入框聚焦时与 Alt+D 语义相同，从光标处删除下一个单词；composer 为空时，StartupPage 直接退出，ChatMode 仅在没有 turn 正在处理时退出。终端挂起（Unix Ctrl+Z via SIGTSTP/SIGCONT）在事件循环层拦截，`fg` 恢复后重初始化终端。Ctrl+C 保留 clear-input / quit fallback，并在处理中优先取消当前轮次。
 
-会话选择器支持分组显示（Pinned / Today / 按日期分组）、内联重命名（Ctrl+R）和置顶切换（Ctrl+F），置顶 ID 持久化到 CLI 配置文件。模型选择器支持收藏切换（Ctrl+F），收藏状态持久化到后端 `AIModelConfig`。提示词暂存（prompt stash）以 JSONL 文件持久化草稿输入，通过 `StashStore` 管理 LIFO 栈（50 条上限），独立于 `ComposerDraft`。
+会话选择器支持分组显示（Pinned / Today / 按日期分组）、内联重命名（Ctrl+R）和置顶切换（Ctrl+F），置顶 ID 持久化到 CLI 配置文件。模型选择器支持收藏切换（Ctrl+F），收藏状态持久化到后端 `AIModelConfig`。提示词暂存（prompt stash）在 ChatMode 与 StartupPage 共用同一组 stash、pop、list、restore 和 delete 操作；命令面板根据当前输入与 stash 是否非空决定 action availability，列表选择器支持恢复和删除。暂存条目以 JSONL 文件持久化并按 LIFO 排序（50 条上限）；恢复到不同工作区时移除工作区引用并明确提示。该能力是 CLI-local composer 草稿管理，不进入 Agent Runtime、Session 或 turn contract。
 
 终端恢复是强约束：正常退出、取消、初始化失败、错误返回和 panic 都要尽力恢复 raw mode、alternate screen、mouse/paste capture 与 cursor。
 
