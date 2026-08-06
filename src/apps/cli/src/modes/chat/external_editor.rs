@@ -4,13 +4,13 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct EditorCommand {
-    pub(super) program: PathBuf,
-    pub(super) args: Vec<OsString>,
+pub(crate) struct EditorCommand {
+    pub(crate) program: PathBuf,
+    pub(crate) args: Vec<OsString>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub(super) enum EditorConfigError {
+pub(crate) enum EditorConfigError {
     #[error(
         "No external editor is configured. Set VISUAL or EDITOR to an installed editor command that waits for the file to close"
     )]
@@ -23,7 +23,7 @@ pub(super) enum EditorConfigError {
     CommandNotFound { program: String },
 }
 
-pub(super) fn resolve_editor_command() -> Result<EditorCommand, EditorConfigError> {
+pub(crate) fn resolve_editor_command() -> Result<EditorCommand, EditorConfigError> {
     let visual = read_editor_variable("VISUAL")?;
     if visual
         .as_deref()
@@ -125,7 +125,7 @@ pub(super) struct ExternalEditResult {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum EditorRunError {
+pub(crate) enum EditorRunError {
     #[error("Could not create the temporary Markdown file: {0}")]
     TempCreate(#[source] std::io::Error),
     #[error("Could not write the temporary Markdown file: {0}")]
@@ -201,6 +201,33 @@ pub(super) fn run_external_editor(
             Err(error)
         }
     }
+}
+
+/// Open an existing file in the external editor for viewing/editing.
+///
+/// Unlike `run_external_editor`, this does not create a temp file or read back
+/// the content; the editor operates directly on `path`. Used by the CLI
+/// `export --open-in-editor` subcommand.
+pub(crate) fn open_file_in_editor(
+    command: &EditorCommand,
+    path: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+) -> Result<(), EditorRunError> {
+    let mut process = editor_process(command, path)?;
+    process
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if let Some(cwd) = cwd.filter(|path| path.is_dir()) {
+        process.current_dir(cwd);
+    }
+    let status = process.status().map_err(EditorRunError::Spawn)?;
+    if !status.success() {
+        return Err(EditorRunError::FailedExit {
+            code: status.code(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]

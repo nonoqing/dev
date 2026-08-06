@@ -1,4 +1,4 @@
-mod external_editor;
+pub(crate) mod external_editor;
 mod prompt_stash;
 /// Chat mode implementation
 ///

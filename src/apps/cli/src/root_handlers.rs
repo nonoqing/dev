@@ -416,6 +416,273 @@ pub(crate) async fn handle_session_action(
     Ok(None)
 }
 
+pub(crate) async fn handle_export_action(
+    session_id: Option<String>,
+    output: Option<String>,
+    include_reasoning: bool,
+    include_tool_details: bool,
+    open_in_editor: bool,
+) -> Result<()> {
+    let workspace_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let approval_policy = crate::runtime::approval::CliApprovalPolicy::Reject;
+    let runtime =
+        crate::initialize_core_services(&workspace_path, approval_policy, crate::BootstrapProfile::Management)
+            .await?;
+
+    // Resolve session ID
+    let session_id = match session_id.as_deref() {
+        Some(id) => resolve_cli_session_id(runtime.agent_runtime(), &workspace_path, id).await?,
+        None => {
+            let sessions = list_cli_sessions(runtime.agent_runtime(), &workspace_path).await?;
+            if sessions.is_empty() {
+                println!("No history sessions for current project: {}", workspace_path.display());
+                return Ok(());
+            }
+            // List sessions for user to pick
+            println!("Available sessions:\n");
+            for (i, info) in sessions.iter().enumerate() {
+                let last_updated = i64::try_from(info.last_active_at_ms)
+                    .ok()
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                println!("{}. {} (ID: {})", i + 1, info.session_name, info.session_id);
+                println!("   Agent: {} | Turns: {} | Updated: {}", info.agent_type, info.turn_count, last_updated);
+                println!();
+            }
+            print!("Enter session number to export (1-{}): ", sessions.len());
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let index: usize = input
+                .trim()
+                .parse()
+                .with_context(|| "Invalid session number")?;
+            if index == 0 || index > sessions.len() {
+                anyhow::bail!("Session number out of range");
+            }
+            sessions[index - 1].session_id.clone()
+        }
+    };
+
+    // Get session metadata
+    let restored = runtime
+        .agent_runtime()
+        .restore_session(AgentSessionRestoreRequest {
+            workspace_path: workspace_path.to_string_lossy().to_string(),
+            session_id: session_id.clone(),
+            include_internal: false,
+            remote_connection_id: None,
+            remote_ssh_host: None,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e.into_message()))?;
+
+    // Read transcript
+    let transcript = runtime
+        .agent_runtime()
+        .read_session_transcript(SessionTranscriptRequest {
+            session_id: session_id.clone(),
+            turn_id: None,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e.into_message()))?;
+
+    // Render Markdown
+    let markdown = render_transcript_markdown(
+        &restored.session,
+        &transcript.messages,
+        include_reasoning,
+        include_tool_details,
+    );
+
+    // Output
+    if open_in_editor {
+        open_export_in_editor(&markdown, output.as_deref(), &workspace_path)?;
+    } else {
+        match output {
+            Some(path) => {
+                let output_path = std::path::PathBuf::from(&path);
+                std::fs::write(&output_path, &markdown)
+                    .with_context(|| format!("Failed to write to {}", output_path.display()))?;
+                println!("Exported session to {}", output_path.display());
+            }
+            None => {
+                print!("{markdown}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Open the exported Markdown in the external editor.
+///
+/// - With `--output <path>`: write to that file, then open it in the editor.
+/// - Without `--output`: write to a temporary `.md` file, open it, and remove
+///   the temp file after the editor exits (view-only flow).
+fn open_export_in_editor(
+    markdown: &str,
+    output: Option<&str>,
+    cwd: &std::path::Path,
+) -> Result<()> {
+    use crate::modes::chat::external_editor::{open_file_in_editor, resolve_editor_command};
+
+    let command = resolve_editor_command()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+    match output {
+        Some(path) => {
+            let output_path = std::path::PathBuf::from(path);
+            std::fs::write(&output_path, markdown)
+                .with_context(|| format!("Failed to write to {}", output_path.display()))?;
+            println!("Exported session to {}", output_path.display());
+            open_file_in_editor(&command, &output_path, Some(cwd))
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            println!("Editor closed; file remains at {}", output_path.display());
+        }
+        None => {
+            use std::io::Write;
+            let mut temp_file = tempfile::Builder::new()
+                .prefix("bitfun-export-")
+                .suffix(".md")
+                .tempfile()
+                .map_err(|error| anyhow::anyhow!("Could not create temporary Markdown file: {error}"))?;
+            temp_file
+                .write_all(markdown.as_bytes())
+                .and_then(|_| temp_file.flush())
+                .map_err(|error| anyhow::anyhow!("Could not write temporary Markdown file: {error}"))?;
+            let temp_path = temp_file.into_temp_path();
+            let owned_path = temp_path.to_path_buf();
+            open_file_in_editor(&command, &owned_path, Some(cwd))
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let _ = temp_path.close();
+        }
+    }
+    Ok(())
+}
+
+fn render_transcript_markdown(
+    session: &bitfun_runtime_ports::AgentSessionSummary,
+    messages: &[bitfun_runtime_ports::TranscriptMessage],
+    include_reasoning: bool,
+    include_tool_details: bool,
+) -> String {
+    let title = if session.session_name.trim().is_empty() {
+        "BitFun Session"
+    } else {
+        &session.session_name
+    };
+
+    let mut output = format!("# {title}\n\n");
+    output.push_str(&format!("**Session ID:** {}\n", session.session_id));
+    output.push_str(&format!("**Agent:** {}\n", session.agent_type));
+    if let Some(model_id) = &session.model_id {
+        output.push_str(&format!("**Model:** {model_id}\n"));
+    }
+    output.push_str(&format!("**Turns:** {}\n", session.turn_count));
+
+    // Timestamps
+    if let Some(created) = i64::try_from(session.created_at_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+    {
+        output.push_str(&format!("**Created:** {}\n", created.format("%Y-%m-%d %H:%M:%S")));
+    }
+    if let Some(updated) = i64::try_from(session.last_active_at_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+    {
+        output.push_str(&format!("**Last Active:** {}\n", updated.format("%Y-%m-%d %H:%M:%S")));
+    }
+
+    for msg in messages {
+        let role = transcript_role_label(&msg.role);
+        if matches!(msg.role.as_str(), "system" | "tool") {
+            continue;
+        }
+
+        let mut body = String::new();
+        match &msg.content {
+            bitfun_runtime_ports::TranscriptContent::Text(text) => {
+                if !text.is_empty() {
+                    body.push_str(text);
+                }
+            }
+            bitfun_runtime_ports::TranscriptContent::Multimodal { text, image_count } => {
+                if !text.is_empty() {
+                    body.push_str(text);
+                }
+                if *image_count > 0 {
+                    if !body.is_empty() {
+                        body.push('\n');
+                    }
+                    body.push_str(&format!("[{image_count} image(s)]"));
+                }
+            }
+            bitfun_runtime_ports::TranscriptContent::Mixed {
+                reasoning_content,
+                text,
+                tool_calls,
+            } => {
+                if include_reasoning {
+                    if let Some(reasoning) = reasoning_content {
+                        if !reasoning.is_empty() {
+                            body.push_str(&format!("_Thinking:_\n\n{reasoning}\n\n"));
+                        }
+                    }
+                }
+                if !text.is_empty() {
+                    body.push_str(text);
+                }
+                if include_tool_details && !tool_calls.is_empty() {
+                    if !body.is_empty() {
+                        body.push('\n');
+                    }
+                    for tc in tool_calls {
+                        body.push_str(&format!("\n**Tool: {}**\n", tc.tool_name));
+                        if !tc.arguments.is_null() {
+                            let args = serde_json::to_string_pretty(&tc.arguments)
+                                .unwrap_or_else(|_| tc.arguments.to_string());
+                            body.push_str(&format!("```json\n{args}\n```\n"));
+                        }
+                    }
+                }
+            }
+            bitfun_runtime_ports::TranscriptContent::ToolResult {
+                tool_name,
+                result,
+                is_error,
+                ..
+            } => {
+                if include_tool_details {
+                    let status = if *is_error { " (error)" } else { "" };
+                    body.push_str(&format!("**Tool Result: {tool_name}{status}**\n"));
+                    let result_str = if result.is_string() {
+                        result.as_str().unwrap_or("").to_string()
+                    } else {
+                        serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+                    };
+                    // Truncate very long results
+                    if result_str.len() > 2000 {
+                        body.push_str(&format!("```\n{}...\n```\n", &result_str[..2000]));
+                    } else {
+                        body.push_str(&format!("```\n{result_str}\n```\n"));
+                    }
+                }
+            }
+        }
+
+        if body.is_empty() {
+            continue;
+        }
+        output.push_str(&format!("\n---\n\n## {role}\n\n{body}\n"));
+    }
+
+    output
+}
+
 async fn resolve_cli_session_id(
     runtime: &bitfun_agent_runtime::sdk::AgentRuntime,
     workspace_path: &Path,

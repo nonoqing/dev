@@ -295,6 +295,29 @@ enum Commands {
         session_id: Option<String>,
     },
 
+    /// Export a session transcript as Markdown to stdout or file
+    Export {
+        /// Session ID to export (omit to interactively select, or use "last")
+        session_id: Option<String>,
+
+        /// Write to file instead of stdout
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Include reasoning/thinking content
+        #[arg(long)]
+        include_reasoning: bool,
+
+        /// Include tool call details
+        #[arg(long)]
+        include_tool_details: bool,
+
+        /// Open the exported Markdown in the external editor (VISUAL or EDITOR).
+        /// Without --output, a temporary file is used and removed afterwards.
+        #[arg(long)]
+        open_in_editor: bool,
+    },
+
     /// Diagnostic check
     Doctor,
 
@@ -1340,6 +1363,23 @@ async fn run_cli() -> Result<()> {
                     ),
                     approval_mode,
                 },
+            )
+            .await?;
+        }
+
+        Some(Commands::Export {
+            session_id,
+            output,
+            include_reasoning,
+            include_tool_details,
+            open_in_editor,
+        }) => {
+            root_handlers::handle_export_action(
+                session_id,
+                output,
+                include_reasoning,
+                include_tool_details,
+                open_in_editor,
             )
             .await?;
         }
