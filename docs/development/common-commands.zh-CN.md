@@ -1,7 +1,7 @@
 # 常用命令
 
 > 根 `AGENTS.md` 的配套文档。本文只列**常用命令**，不回答「改完该跑哪条」。
-> 改完代码请查 [`verification-CN.md`](verification-CN.md)。
+> 改完代码请查 [`verification.zh-CN.md`](verification.zh-CN.md)。
 >
 > [English](common-commands.md)
 
@@ -24,6 +24,7 @@ pnpm --dir src/mobile-web run type-check
 pnpm run i18n:contract:test          # 仅 i18n 契约 / 资源
 pnpm run i18n:audit                  # 仅 i18n 契约 / 资源
 pnpm run product:check               # 默认产品定义
+pnpm run docs:links:check
 pnpm run check:repo-hygiene
 pnpm run check:github-config
 cargo check --workspace

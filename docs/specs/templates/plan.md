@@ -11,22 +11,45 @@
 
 Use the smallest matching rows in [`docs/development/verification.md`](../../development/verification.md).
 
+## Risk scan
+
+| Dimension | Affected? | Risk / evidence | Mitigation or N/A reason |
+|---|---|---|---|
+| Security / credentials | | | |
+| Network / external systems | | | |
+| Data or state migration | | | |
+| Release / packaging / rollout | | | |
+| Remote / multi-host | | | |
+| i18n / theme / interaction | | | |
+
 ## Milestone 1: <slice>
 
 Risk: <Low|Medium|High>. <one-line reason>.
 
-- [ ] <task>. Risk: <Low|Medium|High>.
-- [ ] <task>. Risk: <Low|Medium|High>.
+### Task 1: <independently deliverable change>
+
+- [ ] Change: <files / behavior / boundary>.
+- Risk: <Low|Medium|High>. <one-line reason>.
+- Verify: <focused command or review evidence>.
+- Rollback: <how to undo or fall back; use N/A only with a reason>.
 
 ## Milestone 2: <slice>
 
 Risk: <Low|Medium|High>. <one-line reason>.
 
-- [ ] <task>. Risk: <Low|Medium|High>.
+- Repeat the Task block above. Every task must be independently verifiable and reversible.
+
+## Migration and compatibility
+
+Ordering, persisted state/protocol compatibility, and failure handling. Use `N/A` with a reason when unchanged.
+
+## Release and rollout
+
+Feature gates, staged rollout, packaging/deployment impact, monitoring, and stop conditions. Use `N/A` with a reason when unchanged.
 
 ## Rollback
 
-Per high-risk task: how to undo or fall back.
+Cross-task rollback order, compatibility fallback, and irreversible steps. Per-task rollback belongs in every Task block, not only high-risk tasks.
 
 ## Risks
 

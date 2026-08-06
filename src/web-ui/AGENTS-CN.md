@@ -41,6 +41,8 @@ Peer Device Mode（同账号远程完整客户端）的边界见 `docs/architect
   `pnpm run i18n:generate`，Web UI 文案留在 `src/web-ui/src/locales`。
 - 路由或功能文案使用 `useI18n(namespace)` 保持非 bootstrap namespace 懒加载；直接调用
   `i18nService.t(...)` 必须有 bootstrap namespace 覆盖。
+- 稳定 DOM selector 与 E2E 属性遵循 [`docs/development/ui-testids.zh-CN.md`](../../docs/development/ui-testids.zh-CN.md)；
+  不要从本地化文案或纯展示文本派生 test ID。
 - 遵循 `src/web-ui/LOGGING.md`：仅英文、无 emoji、结构化日志
 
 ## 命令

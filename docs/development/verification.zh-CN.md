@@ -1,7 +1,7 @@
 # 验证矩阵
 
 > 根 `AGENTS.md`（STD-08）配套文档。本文回答：**改完代码该跑哪类检查**。
-> 命令列表见 [`common-commands-CN.md`](common-commands-CN.md)。
+> 命令列表见 [`common-commands.zh-CN.md`](common-commands.zh-CN.md)。
 >
 > [English](verification.md)
 
@@ -23,3 +23,4 @@
 | 安装器 Tauri / Rust | `cargo check --manifest-path BitFun-Installer/src-tauri/Cargo.toml` |
 | 安装器打包、payload、安装 / 卸载或原生捆绑 | `pnpm run installer:build` |
 | 构建脚本或前置检查改动 | `pnpm run check:build-prereqs`；检查逻辑有变再加 `node --test scripts/check-build-prereqs.test.mjs` |
+| 文档结构、索引、本地链接、锚点或命名 | `pnpm run docs:links:check && git diff --check`；检查器有改动时再加 `pnpm run docs:links:test` |

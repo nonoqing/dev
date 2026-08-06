@@ -3,7 +3,7 @@
 > Companion to the root `AGENTS.md` entry (STD-05 / STD-06 related host rules).
 > Open this when changing desktop commands, UI↔host boundaries, or remote workspace behavior.
 >
-> [中文](host-platform-and-remote-CN.md)
+> [中文](host-platform-and-remote.zh-CN.md)
 
 ## Tauri commands
 

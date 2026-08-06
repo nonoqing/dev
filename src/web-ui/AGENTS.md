@@ -50,6 +50,9 @@ Self-Hosted entries must open `RelayDeployWizard`, not an external README.
 - Use `useI18n(namespace)` for route or feature copy so non-bootstrap
   namespaces stay lazy. Direct `i18nService.t(...)` calls require bootstrap
   namespace coverage.
+- Stable DOM selectors and E2E-facing attributes follow
+  [`docs/development/ui-testids.md`](../../docs/development/ui-testids.md);
+  do not derive test IDs from localized or presentation-only text.
 - Follow `src/web-ui/LOGGING.md`: English only, no emojis, structured logs
 
 ## Commands

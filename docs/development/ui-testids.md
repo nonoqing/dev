@@ -1,4 +1,4 @@
-[中文](ui-testids-CN.md) | **English**
+[中文](ui-testids.zh-CN.md) | **English**
 
 # UI Test IDs
 

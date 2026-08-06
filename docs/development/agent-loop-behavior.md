@@ -6,7 +6,7 @@
 > Also see nearest module docs under `src/crates/execution/` (especially
 > `agent-runtime`).
 >
-> [中文](agent-loop-behavior-CN.md)
+> [中文](agent-loop-behavior.zh-CN.md)
 
 ## Hard limits
 

@@ -2,6 +2,9 @@
 
 > 范围：BitFun 加载外部软件工程后的产品需求、架构边界、执行安全、渐进质量治理和复杂项目支撑能力。
 > 用途：作为拆分后的入口文档。产品需求文档回答产品定位和体验要求，设计文档回答架构边界，实施计划回答阶段落地，子模块文档回答局部契约。
+> 状态：stable index。
+
+本目录只描述 SDLC 质量治理产品本身，不承载 BitFun 代码仓的通用开发规范，也不允许把 BitFun 本仓假设硬编码为目标项目规则。
 
 ## 文档结构
 
@@ -14,9 +17,18 @@
 | [design.md](design.md) | 架构设计 | 设计目标、领域模型、配置层级、模块边界和架构风险 |
 | [implementation-plan.md](implementation-plan.md) | 实施计划 | 按用户收益切片组织快速路径、上下文保障、团队治理、复杂生命周期能力的阶段落地 |
 | [traceability-matrix.md](traceability-matrix.md) | 追踪矩阵 | 需求、设计、功能规格、执行阶段和测试方法的映射 |
+| [architecture/agent-workflow-design.md](architecture/agent-workflow-design.md) | Agent 工作流架构 | 工作流状态、执行边界与交互协作 |
+| [architecture/artifact-graph.md](architecture/artifact-graph.md) | Artifact Graph | 交付物关系、证据边与新鲜度模型 |
 | [architecture/security-boundary.md](architecture/security-boundary.md) | 安全边界 | prompt 注入、hook/MCP/网络/凭据/shell、执行位置、沙箱等级和应急放行规则 |
+| [architecture/project-profile-integration.md](architecture/project-profile-integration.md) | Project Profile | 项目画像装配与策略接入边界 |
+| [architecture/quality-data-plane.md](architecture/quality-data-plane.md) | Quality Data Plane | 质量事实、事件和分析数据边界 |
 | [features/configurable-policy-profile.md](features/configurable-policy-profile.md) | 配置化策略 | 任务、操作、环境、项目和团队配置如何共同决定内部策略画像、提示、验证和审查 |
 | [architecture/evidence-pack.md](architecture/evidence-pack.md) | 证据包设计 | 证据包负责人、状态、生命周期、风险接受和 PR/审查/回放投影契约 |
+| [features/agent-evaluation.md](features/agent-evaluation.md) | Agent 评测 | 评测对象、数据与结果使用边界 |
+| [features/opencode-compatibility.md](features/opencode-compatibility.md) | OpenCode 兼容 | SDLC 场景下的兼容需求与限制 |
+| [features/pr-quality-gate.md](features/pr-quality-gate.md) | PR 质量门禁 | 门禁触发、证据与结果投影 |
+| [features/requirement-impact-analysis.md](features/requirement-impact-analysis.md) | 需求影响分析 | 需求到实现、测试与发布风险的影响分析 |
+| [features/risk-classifier.md](features/risk-classifier.md) | 风险分类 | 风险输入、分级与策略选择 |
 | [governance/metrics-spec.md](governance/metrics-spec.md) | 指标规格 | 开发效率、安全提示、质量治理和阶段退出指标的公式、分母、窗口和负责人 |
 | [governance/self-governance-notes.md](governance/self-governance-notes.md) | 自身治理说明 | 记录 BitFun 仓库自身作为内部验证项目暴露出的文档、边界和治理问题 |
 

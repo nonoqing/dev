@@ -12,9 +12,9 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 ## 快速开始
 
 1. 架构敏感改动前先读 [`README.md`](README.md) 与 [`CONTRIBUTING_CN.md`](CONTRIBUTING_CN.md)。提 PR、参与贡献从 CONTRIBUTING 入手；约束怎么改代码以本文件为准。
-2. 桌面端日常开发用 `pnpm run desktop:dev`；只改前端、想更快冷启动时再用 `pnpm run desktop:preview:debug`。常用命令见 [`docs/development/common-commands-CN.md`](docs/development/common-commands-CN.md)。
+2. 桌面端日常开发用 `pnpm run desktop:dev`；只改前端、想更快冷启动时再用 `pnpm run desktop:preview:debug`。常用命令见 [`docs/development/common-commands.zh-CN.md`](docs/development/common-commands.zh-CN.md)。
 3. 改完 Rust 优先跑 `pnpm run fmt:rs`（只格式化已改或已暂存的 `.rs`）。只有刻意做更大范围格式化时才用 `cargo fmt`。
-4. 先看下方 **按任务路由** / **规范类型地图**，再按 [`docs/development/verification-CN.md`](docs/development/verification-CN.md) 选最小检查。
+4. 先看下方 **按任务路由** / **规范类型地图**，再按 [`docs/development/verification.zh-CN.md`](docs/development/verification.zh-CN.md) 选最小检查。
 5. Rust workspace 依赖在根清单中统一版本，消费 crate 只声明自身所需 feature；测试专用 feature 放入 `dev-dependencies`，受 crate feature 控制的服务能力只在对应 feature 中启用。禁止使用 `tokio/full` 绕过依赖边界。
 
 ## 如何使用本文件
@@ -22,10 +22,11 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 1. 改某个目录下的代码时，优先看该目录就近的 `AGENTS.md` / `AGENTS-CN.md`。
 2. **规范类型地图**标明规范类别；**架构索引**展开 STD-01 子专题；**跨切面索引**覆盖日志 / 宿主 / Agent loop；**按任务路由**对应「改什么 → 先读什么 → 再验什么」。
 3. 细则以链接中的权威文档为准。请与英文版 [`AGENTS.md`](AGENTS.md) 保持语义一致。
+4. 完整文档地图见 [`docs/README.md`](docs/README.md)；文档放置和迁移规则仍以 [`docs-governance.zh-CN.md`](docs/development/docs-governance.zh-CN.md) 为准。
 
 ## 语言约定（本仓文档）
 
-此处仅为摘要；完整规则见 [`docs/development/docs-governance-CN.md`](docs/development/docs-governance-CN.md)。
+此处仅为摘要；完整规则见 [`docs/development/docs-governance.zh-CN.md`](docs/development/docs-governance.zh-CN.md)。
 
 | 类型 | 语言 |
 |---|---|
@@ -41,16 +42,16 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 | STD-01 | 仓库与架构 | 分层、依赖、产品线边界 | 下方 **分层模块索引** + **架构索引** → 对应设计文档 |
 | STD-02/03 | 编码与语言栈 | 超出模块 AGENTS 的风格或语言细则 | 就近模块 `AGENTS.md` |
 | STD-04 | 前端与交互 | UI、状态、adapter、i18n、主题 | i18n/主题：[`docs/architecture/i18n.md`](docs/architecture/i18n.md)、操作说明 [`docs/development/i18n.md`](docs/development/i18n.md)、[`docs/architecture/theme-token-optimization.md`](docs/architecture/theme-token-optimization.md)；UI/状态/adapter：就近产品面 `AGENTS.md`（如 [`src/web-ui/AGENTS.md`](src/web-ui/AGENTS.md)） |
-| STD-05 | API 与数据契约 | DTO、事件、Tauri command、持久化、错误结构 | DTO/事件/契约：[`src/crates/contracts/AGENTS.md`](src/crates/contracts/AGENTS.md) 及子模块；Tauri/宿主/远程：[`docs/development/host-platform-and-remote-CN.md`](docs/development/host-platform-and-remote-CN.md) |
-| STD-06 | DFX | 重试、取消、部分成功、异构输入、失败体验、日志、安全 | 日志：[`docs/development/logging.md`](docs/development/logging.md)、[`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md)、[`src/crates/LOGGING.md`](src/crates/LOGGING.md)；远程：[`host-platform-and-remote-CN.md`](docs/development/host-platform-and-remote-CN.md)；Agent loop：[`agent-loop-behavior-CN.md`](docs/development/agent-loop-behavior-CN.md)；安全：[`SECURITY.md`](SECURITY.md) |
-| STD-07 | 文档与模板 | Spec / 设计 / 计划；文档如何存放 | [`docs/development/docs-governance-CN.md`](docs/development/docs-governance-CN.md)；[`docs/specs/README.md`](docs/specs/README.md) |
-| STD-08 | 测试与验证 | 改完应跑哪些检查 | [`docs/development/verification-CN.md`](docs/development/verification-CN.md) |
+| STD-05 | API 与数据契约 | DTO、事件、Tauri command、持久化、错误结构 | DTO/事件/契约：[`src/crates/contracts/AGENTS.md`](src/crates/contracts/AGENTS.md) 及子模块；Tauri/宿主/远程：[`docs/development/host-platform-and-remote.zh-CN.md`](docs/development/host-platform-and-remote.zh-CN.md) |
+| STD-06 | DFX | 重试、取消、部分成功、异构输入、失败体验、日志、安全 | 日志：[`docs/development/logging.md`](docs/development/logging.md)、[`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md)、[`src/crates/LOGGING.md`](src/crates/LOGGING.md)；远程：[`host-platform-and-remote.zh-CN.md`](docs/development/host-platform-and-remote.zh-CN.md)；Agent loop：[`agent-loop-behavior.zh-CN.md`](docs/development/agent-loop-behavior.zh-CN.md)；安全：[`SECURITY.md`](SECURITY.md) |
+| STD-07 | 文档与模板 | Spec / 设计 / 计划；文档如何存放 | [`docs/development/docs-governance.zh-CN.md`](docs/development/docs-governance.zh-CN.md)；[`docs/specs/README.md`](docs/specs/README.md) |
+| STD-08 | 测试与验证 | 改完应跑哪些检查 | [`docs/development/verification.zh-CN.md`](docs/development/verification.zh-CN.md) |
 | STD-09 | Git 与交付 | 分支、PR、贡献流程 | [`CONTRIBUTING_CN.md`](CONTRIBUTING_CN.md)（[English](CONTRIBUTING.md)）；CONTRIBUTING 不再另维护一整套命令/验证清单 |
 | STD-10 | AI 协作 | 多 Agent、多工具共用同一套规范 | 本入口 + 就近模块 `AGENTS.md`；不要在工具侧另写一套平行规则 |
-| STD-11 | 规范自动化 | 审计、baseline、边界检查 | i18n/theme 等审计文档 + [`verification-CN.md`](docs/development/verification-CN.md)；**禁止**靠抬高 baseline 让检查「变绿」 |
+| STD-11 | 规范自动化 | 审计、baseline、边界检查 | i18n/theme 等审计文档 + [`verification.zh-CN.md`](docs/development/verification.zh-CN.md)；**禁止**靠抬高 baseline 让检查「变绿」 |
 | STD-12 | 模块规范 | 包 / crate 局部约定 | 就近 `AGENTS.md` / `AGENTS-CN.md` |
 
-**另：** 命令列表 → [`docs/development/common-commands-CN.md`](docs/development/common-commands-CN.md)（不能代替验证矩阵；快速开始第 2 条也有入口）。
+**另：** 命令列表 → [`docs/development/common-commands.zh-CN.md`](docs/development/common-commands.zh-CN.md)（不能代替验证矩阵；快速开始第 2 条也有入口）。
 
 ## 架构索引（STD-01）
 
@@ -75,26 +76,26 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 | 专题 | 何时打开 | 权威文档 |
 |---|---|---|
 | 日志 | 新增或修改日志、可观测相关文案 | 仓库级规则：[`docs/development/logging.md`](docs/development/logging.md)；前端 API：[`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md)；Rust API：[`src/crates/LOGGING.md`](src/crates/LOGGING.md) |
-| Tauri / 平台 / 远程 | 桌面 command、UI 与宿主边界、远程工作区 | [`docs/development/host-platform-and-remote-CN.md`](docs/development/host-platform-and-remote-CN.md)；[`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md) |
-| Agent loop | Agent 主循环、重复工具调用、防死循环策略 | [`docs/development/agent-loop-behavior-CN.md`](docs/development/agent-loop-behavior-CN.md)；`src/crates/execution/` 下就近 `AGENTS.md` |
+| Tauri / 平台 / 远程 | 桌面 command、UI 与宿主边界、远程工作区 | [`docs/development/host-platform-and-remote.zh-CN.md`](docs/development/host-platform-and-remote.zh-CN.md)；[`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md) |
+| Agent loop | Agent 主循环、重复工具调用、防死循环策略 | [`docs/development/agent-loop-behavior.zh-CN.md`](docs/development/agent-loop-behavior.zh-CN.md)；`src/crates/execution/` 下就近 `AGENTS.md` |
 
 ## 按任务路由
 
 | 任务 / 改动 | 先读 | 再验证 |
 |---|---|---|
-| 不确定代码该放哪 | 分层模块索引 + 产品架构行 | [`verification-CN.md`](docs/development/verification-CN.md) 对应行 |
-| 桌面 Tauri / 桌面专属 API | [`host-platform-and-remote-CN.md`](docs/development/host-platform-and-remote-CN.md)；[`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md)；`remote_workspace_policy.rs` | 验证矩阵中桌面相关行 |
+| 不确定代码该放哪 | 分层模块索引 + 产品架构行 | [`verification.zh-CN.md`](docs/development/verification.zh-CN.md) 对应行 |
+| 桌面 Tauri / 桌面专属 API | [`host-platform-and-remote.zh-CN.md`](docs/development/host-platform-and-remote.zh-CN.md)；[`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md)；`remote_workspace_policy.rs` | 验证矩阵中桌面相关行 |
 | 共享 Rust（assembly / adapters / services / execution / contracts） | 分层模块索引 + 就近 crate `AGENTS.md` | 验证矩阵中共享 Rust 行 |
-| Web UI（不改 locale 契约） | [`src/web-ui/AGENTS.md`](src/web-ui/AGENTS.md)；[`host-platform-and-remote-CN.md`](docs/development/host-platform-and-remote-CN.md) 平台边界节 | 验证矩阵中前端行 |
+| Web UI（不改 locale 契约） | [`src/web-ui/AGENTS.md`](src/web-ui/AGENTS.md)；[`host-platform-and-remote.zh-CN.md`](docs/development/host-platform-and-remote.zh-CN.md) 平台边界节 | 验证矩阵中前端行 |
 | i18n / locales | [`docs/architecture/i18n.md`](docs/architecture/i18n.md)；操作说明 [`docs/development/i18n.md`](docs/development/i18n.md) | 验证矩阵中 locale / i18n 行 |
 | 主题 / 颜色 Token | [`docs/architecture/theme-token-optimization.md`](docs/architecture/theme-token-optimization.md) | `pnpm run theme:color-audit:all` |
 | 日志文案 | 跨切面索引 → 日志 | 针对所改产品面的聚焦检查 |
-| Agent loop / 防死循环 | [`agent-loop-behavior-CN.md`](docs/development/agent-loop-behavior-CN.md) | 就近 execution / runtime 测试 |
+| Agent loop / 防死循环 | [`agent-loop-behavior.zh-CN.md`](docs/development/agent-loop-behavior.zh-CN.md) | 就近 execution / runtime 测试 |
 | Mobile web 配对 / 重连 | [`src/mobile-web/AGENTS.md`](src/mobile-web/AGENTS.md) | 验证矩阵中 Mobile web 行 |
 | CLI / TUI / HarmonyOS PC / 定制 / OpenCode / SDLC | **架构索引**对应行 | 该产品面的最小检查 + 模块 AGENTS |
 | 安装器 | [`BitFun-Installer/AGENTS.md`](BitFun-Installer/AGENTS.md) | 验证矩阵中安装器行 |
-| 失败体验 / Provider 错误 / 远程不支持 | STD-05/06 权威；[`host-platform-and-remote-CN.md`](docs/development/host-platform-and-remote-CN.md) 远程节 | 对所改产品面跑契约或聚焦测试 |
-| 写 Spec / 设计 | [`docs/specs/README.md`](docs/specs/README.md) + [`templates/`](docs/specs/templates/)；规范见 [`docs-governance-CN.md`](docs/development/docs-governance-CN.md) | 人工评审；注明适用的 STD 行 |
+| 失败体验 / Provider 错误 / 远程不支持 | STD-05/06 权威；[`host-platform-and-remote.zh-CN.md`](docs/development/host-platform-and-remote.zh-CN.md) 远程节 | 对所改产品面跑契约或聚焦测试 |
+| 写 Spec / 设计 | [`docs/specs/README.md`](docs/specs/README.md) + [`templates/`](docs/specs/templates/)；规范见 [`docs-governance.zh-CN.md`](docs/development/docs-governance.zh-CN.md) | 人工评审；注明适用的 STD 行 |
 | 开 PR / 贡献流程 | [`CONTRIBUTING_CN.md`](CONTRIBUTING_CN.md) | 所改文件对应的最小验证 |
 
 ## 分层模块索引

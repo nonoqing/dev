@@ -23,6 +23,7 @@ copy long rule bodies back into this entry.
 1. Prefer the nearest module `AGENTS.md` / `AGENTS-CN.md` when editing under that directory.
 2. **Standards map** = norm types. **Architecture index** = STD-01 subtopics. **Cross-cutting index** = host/logging/agent-loop topics. **Route by task** = change → read → verify.
 3. Open linked authorities for detail. Keep this file and [`AGENTS-CN.md`](AGENTS-CN.md) in sync.
+4. Use [`docs/README.md`](docs/README.md) for the complete documentation map; placement and migration rules remain in [`docs-governance.md`](docs/development/docs-governance.md).
 
 ## Language (repo docs)
 

@@ -21,6 +21,23 @@ Which Product Surface / Assembly / Feature / Kernel / Adapter / Service / Execut
 | State | Meaning | Owner | Independence notes |
 |---|---|---|---|
 
+## Risk scan
+
+| Dimension | Affected? | Risk / evidence | Mitigation or N/A reason |
+|---|---|---|---|
+| Security / permissions | | | |
+| Credentials / privacy | | | |
+| Network / external systems | | | |
+| Data or state migration | | | |
+| Release / packaging / rollout | | | |
+| Remote / multi-host | | | |
+| i18n | | | |
+| Theme / interaction | | | |
+
+## Migration and compatibility
+
+Existing data/config/protocol behavior, compatibility window, and migration failure behavior. Use `N/A` with a reason when no persisted or versioned state changes.
+
 ## Remote compatibility
 
 Local-only? Remote workspace? New network/SSH/agent-loop round-trips?
@@ -34,6 +51,14 @@ New locale keys (namespace / shared terms). Prefer existing semantic/component/d
 ## Security
 
 Execution location, sandbox, side effects, auth scope. Unknown capability defaults to restricted.
+
+## Release and rollout
+
+Feature gates, staged rollout, packaging/deployment impact, monitoring, and stop conditions. Use `N/A` with a reason when release behavior is unchanged.
+
+## Rollback
+
+How to restore the previous behavior and data/state interpretation; identify irreversible steps.
 
 ## Alternatives considered
 

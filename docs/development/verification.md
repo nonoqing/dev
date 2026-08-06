@@ -4,7 +4,7 @@
 > **authoritative “what to run after this change”** selector. For the command
 > dictionary, see [`common-commands.md`](common-commands.md).
 >
-> [中文](verification-CN.md)
+> [中文](verification.zh-CN.md)
 
 Run the smallest local precheck that matches the touched files. CI is expected to
 cover full builds and broad test suites; run heavier local commands only when the
@@ -26,3 +26,4 @@ change directly affects build, packaging, or CI cannot protect the path.
 | Installer Tauri/Rust changes | `cargo check --manifest-path BitFun-Installer/src-tauri/Cargo.toml` |
 | Installer packaging, payload, install/uninstall flow, or native bundling | `pnpm run installer:build` |
 | Build scripts or prerequisite changes | `pnpm run check:build-prereqs`, plus `node --test scripts/check-build-prereqs.test.mjs` when the check logic changed |
+| Documentation structure, indexes, local links, anchors, or naming | `pnpm run docs:links:check && git diff --check`; add `pnpm run docs:links:test` when the checker changed |

@@ -145,11 +145,11 @@ OpenCode，和 OpenCode 配置/插件进入 BitFun 是两个独立验收方向�
 | 全局插件加载 | 补基础能力 | 未实现 | 可完整适配 | OC-R2 | 自动发现全局配置和 ConfigPaths 全局目录，并按完整来源顺序生成 `plugin_origins`；首次可执行启用按来源、插件身份和执行域确认，决定只提示一次且可按项目覆盖 | [服务插件](opencode-plugin-runtime-adapter-design.md#52-服务插件) |
 | `package.json`、入口与依赖 | 补基础能力 | 未实现 | 可主要适配 | OC-R2 | 复现 server 入口、入口回退、`engines.opencode`、npm 配置和锁文件；原生模块失败只影响对应插件 | [来源与执行版本](opencode-plugin-runtime-adapter-design.md#4-来源与执行版本) |
 | 内置/MCP/外部同名工具；后续 pure/重复插件顺序 | 融合现有能力 | standalone Tool 显式选择已实现 | 可完整适配 | OC-R2 | 当前按候选身份与内容版本记忆选择且不静默覆盖；package plugin 阶段再复现 internal-first、pure、来源顺序和去重 | [注册与覆盖](opencode-plugin-runtime-adapter-design.md#53-注册与覆盖) |
-| `project` / `directory` / `worktree` | 直接桥接 | standalone Tool 已传 `directory/worktree/sessionID`；完整 `project` 未实现 | 可完整适配 | OC-R2 | 当前 `directory` 为打开的 workspace、`worktree` 为 Git 根并传递真实 session；完整插件 `project` 和 Remote 在 OC-R5 前保持 `unsupported` | [兼容门面](opencode-plugin-runtime-adapter-design.md#7-opencode-兼容门面) |
-| `client` | 补扩展接口 | 未实现 | 可主要适配 | OC-R2 | 提供版本化插件客户端门面，按方法转发到现有 BitFun 归属模块 | [兼容门面](opencode-plugin-runtime-adapter-design.md#7-opencode-兼容门面) |
-| `serverUrl` | 补扩展接口 | 未实现 | 可主要适配 | OC-R2 | 在 worker 执行域提供真实回环服务，只实现插件所需的版本化路由 | [兼容门面](opencode-plugin-runtime-adapter-design.md#7-opencode-兼容门面) |
+| `project` / `directory` / `worktree` | 直接桥接 | standalone Tool 已传 `directory/worktree/sessionID`；完整 `project` 未实现 | 可完整适配 | OC-R2 | 当前 `directory` 为打开的 workspace、`worktree` 为 Git 根并传递真实 session；完整插件 `project` 和 Remote 在 OC-R5 前保持 `unsupported` | [兼容接口](opencode-plugin-runtime-adapter-design.md#7-opencode-插件兼容接口) |
+| `client` | 补扩展接口 | 未实现 | 可主要适配 | OC-R2 | 提供版本化插件客户端门面，按方法转发到现有 BitFun 归属模块 | [兼容接口](opencode-plugin-runtime-adapter-design.md#7-opencode-插件兼容接口) |
+| `serverUrl` | 补扩展接口 | 未实现 | 可主要适配 | OC-R2 | 在 worker 执行域提供真实回环服务，只实现插件所需的版本化路由 | [兼容接口](opencode-plugin-runtime-adapter-design.md#7-opencode-插件兼容接口) |
 | `$` 与脚本环境 | 补基础能力 | 未实现 | 可完整适配 | OC-R2 | 只有需要 OpenCode/Bun `$` 的冻结样例才启用 Bun-compatible adapter；Node 路径不能伪造等价语义。受限模式依赖真实 OS/容器边界，无法落实时停用 target | [默认策略](opencode-plugin-runtime-adapter-design.md#3-默认策略与可调权限) |
-| 加载、停用、更新与崩溃恢复 | 补基础能力 | standalone Tool fail-closed 已实现 | 可主要适配 | OC-R2 | 已有来源限定 target、后台重载、删除撤下与 worker 终止；精确物化旧版本、健康旧进程保留和退避恢复仍待完整 Host | [生命周期](opencode-plugin-runtime-adapter-design.md#9-生命周期与能力暴露) |
+| 加载、停用、更新与崩溃恢复 | 补基础能力 | standalone Tool fail-closed 已实现 | 可主要适配 | OC-R2 | 已有来源限定 target、后台重载、删除撤下与 worker 终止；精确物化旧版本、健康旧进程保留和退避恢复仍待完整 Host | [生命周期](opencode-plugin-runtime-adapter-design.md#9-生命周期) |
 | 跨插件进程全局共享 | 明确降级 | 未实现 | 明确降级 | OC-R2 | standalone Tool 每 target 使用独立 worker；完整 package plugin 按执行与安全事实复用 Host，但不承诺 `globalThis`、进程环境或模块单例的未文档化共享 | [故障域](opencode-plugin-runtime-adapter-design.md#81-故障域) |
 
 本类整体风险是第三方代码副作用、依赖安装失败、Hook 顺序漂移和 worker 失控。默认权限可以开放，但执行隔离、超时、取消、队列上限、结果大小和故障恢复必须始终启用。
