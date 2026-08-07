@@ -309,7 +309,7 @@ enum Commands {
         #[arg(long, num_args = 0..=1, default_missing_value = "0")]
         models: Option<usize>,
 
-        /// Filter by project (default: all projects; empty string: current project)
+        /// Filter by project: "all" for all projects, or a specific workspace path
         #[arg(long)]
         project: Option<String>,
     },

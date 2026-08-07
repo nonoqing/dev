@@ -607,28 +607,68 @@ pub(crate) async fn print_stats_report(
     models_flag: Option<usize>,
     project_filter: Option<String>,
 ) -> Result<()> {
-    let workspace_path =
+    let current_dir =
         std::env::current_dir().context("Failed to resolve current directory")?;
     let runtime = crate::initialize_core_services(
-        &workspace_path,
+        &current_dir,
         crate::runtime::approval::CliApprovalPolicy::Reject,
         crate::BootstrapProfile::Management,
     )
     .await?;
 
-    // List all sessions for the current workspace
-    let sessions = runtime
-        .agent_runtime()
-        .list_sessions(bitfun_runtime_ports::AgentSessionListRequest {
-            workspace_path: workspace_path.to_string_lossy().to_string(),
-            remote_connection_id: None,
-            remote_ssh_host: None,
-        })
-        .await
-        .map_err(|error| anyhow!(error.into_message()))?;
+    // Determine which workspace path(s) to query.
+    // - No --project flag or empty string: current directory (default).
+    // - --project <path>: use that path as the workspace.
+    // - --project all: scan all projects under ~/.bitfun/projects/.
+    let workspace_paths: Vec<String> = match project_filter.as_deref() {
+        Some("all") => {
+            let path_manager = try_get_path_manager_arc()
+                .map_err(|error| anyhow!(error.to_string()))?;
+            let projects_root = path_manager.projects_root();
+            if !projects_root.exists() {
+                println!("No projects found under {}", projects_root.display());
+                return Ok(());
+            }
+            let mut paths = Vec::new();
+            for entry in std::fs::read_dir(&projects_root)
+                .with_context(|| format!("Failed to read projects dir: {}", projects_root.display()))?
+            {
+                let entry = entry?;
+                let sessions_dir = entry.path().join("sessions");
+                if sessions_dir.is_dir() {
+                    paths.push(sessions_dir.to_string_lossy().to_string());
+                }
+            }
+            if paths.is_empty() {
+                println!("No project sessions found under {}", projects_root.display());
+                return Ok(());
+            }
+            paths
+        }
+        Some(p) if !p.trim().is_empty() => vec![p.to_string()],
+        _ => vec![current_dir.to_string_lossy().to_string()],
+    };
+
+    // List sessions for each workspace path and aggregate.
+    // Track which workspace_path each session belongs to for usage queries.
+    let mut sessions: Vec<(bitfun_runtime_ports::AgentSessionSummary, String)> = Vec::new();
+    for ws_path in &workspace_paths {
+        let result = runtime
+            .agent_runtime()
+            .list_sessions(bitfun_runtime_ports::AgentSessionListRequest {
+                workspace_path: ws_path.clone(),
+                remote_connection_id: None,
+                remote_ssh_host: None,
+            })
+            .await
+            .map_err(|error| anyhow!(error.into_message()))?;
+        for s in result {
+            sessions.push((s, ws_path.clone()));
+        }
+    }
 
     if sessions.is_empty() {
-        println!("No sessions found for current project: {}", workspace_path.display());
+        println!("No sessions found.");
         return Ok(());
     }
 
@@ -654,20 +694,10 @@ pub(crate) async fn print_stats_report(
         None => 0,
     };
 
-    let mut filtered: Vec<&bitfun_runtime_ports::AgentSessionSummary> = sessions
+    let mut filtered: Vec<&(bitfun_runtime_ports::AgentSessionSummary, String)> = sessions
         .iter()
-        .filter(|s| s.last_active_at_ms >= cutoff_ms)
+        .filter(|(s, _)| s.last_active_at_ms >= cutoff_ms)
         .collect();
-
-    // Apply --project filter (empty string means current project, which is already
-    // the default since list_sessions is workspace-scoped; non-empty would need
-    // cross-project listing, which we approximate by matching workspace_path label)
-    if let Some(ref _p) = project_filter {
-        // Current implementation is workspace-scoped, so empty string is a no-op.
-        // For a non-empty project filter, we would need to list sessions across
-        // workspaces, which is not supported by the current runtime port. Warn the user.
-        eprintln!("Warning: --project filter with a non-empty value is not supported; showing current project only");
-    }
 
     if filtered.is_empty() {
         println!(
@@ -685,7 +715,7 @@ pub(crate) async fn print_stats_report(
     }
 
     // Sort by last_active_at_ms ascending so earliest/latest are easy to compute
-    filtered.sort_by_key(|s| s.last_active_at_ms);
+    filtered.sort_by_key(|(s, _)| s.last_active_at_ms);
 
     let mut stats = AggregatedStats {
         total_sessions: filtered.len(),
@@ -697,18 +727,18 @@ pub(crate) async fn print_stats_report(
         sessions_with_token_data: 0,
         tool_usage: std::collections::BTreeMap::new(),
         model_usage: std::collections::BTreeMap::new(),
-        earliest_ms: filtered.first().map(|s| s.last_active_at_ms).unwrap_or(now_ms),
-        latest_ms: filtered.last().map(|s| s.last_active_at_ms).unwrap_or(now_ms),
+        earliest_ms: filtered.first().map(|(s, _)| s.last_active_at_ms).unwrap_or(now_ms),
+        latest_ms: filtered.last().map(|(s, _)| s.last_active_at_ms).unwrap_or(now_ms),
         days: 0,
     };
 
     // For each session, fetch usage report and aggregate
-    for session in &filtered {
+    for (session, ws_path) in &filtered {
         let report = runtime
             .agent_runtime()
             .generate_session_usage(AgentSessionUsageRequest {
                 session_id: session.session_id.clone(),
-                workspace_path: Some(workspace_path.to_string_lossy().to_string()),
+                workspace_path: Some(ws_path.clone()),
                 remote_connection_id: None,
                 remote_ssh_host: None,
                 include_hidden_subagents: true,
