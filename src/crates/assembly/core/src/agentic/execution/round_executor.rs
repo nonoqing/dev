@@ -52,7 +52,7 @@ use bitfun_observability::domains::{
 };
 use bitfun_observability::Telemetry;
 use bitfun_runtime_ports::PermissionRule;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -1111,9 +1111,39 @@ impl RoundExecutor {
         // provider returned usage but before this round settles; dropping that
         // usage makes cancelled turns look unaccounted even though the provider
         // already supplied authoritative counts.
-        if let Some(ref usage) = stream_result.usage {
+        let mut resolved_usage = stream_result.usage.clone();
+        if let Some(ref usage) = resolved_usage {
             self.emit_token_usage_update(&context, usage, context_window, is_subagent)
                 .await;
+        } else if !stream_result.full_text.is_empty() || !stream_result.tool_calls.is_empty() {
+            // Fallback: if streaming response doesn't include usage data,
+            // try a non-streaming request to get token usage stats.
+            warn!(
+                "No token usage data in stream result, attempting non-streaming fallback: session_id={}, turn_id={}, model={}",
+                context.session_id,
+                context.dialog_turn_id,
+                context.effective_model_name
+            );
+            let fallback_result = self
+                .fetch_usage_via_non_stream(&ai_client, &ai_messages, &tool_definitions)
+                .await;
+            if let Ok(Some(fallback_usage)) = fallback_result {
+                resolved_usage = Some(fallback_usage.clone());
+                self.emit_token_usage_update(&context, &fallback_usage, context_window, is_subagent)
+                    .await;
+                info!(
+                    "Successfully fetched usage via non-streaming fallback: session_id={}, input_tokens={}, output_tokens={}",
+                    context.session_id,
+                    fallback_usage.prompt_token_count,
+                    fallback_usage.candidates_token_count
+                );
+            } else {
+                warn!(
+                    "Non-streaming fallback for usage data failed: session_id={}, error={:?}",
+                    context.session_id,
+                    fallback_result.err()
+                );
+            }
         }
 
         // Check cancellation token again after stream processing completes.
@@ -1759,6 +1789,145 @@ impl RoundExecutor {
                 retry_after_ms.min(Self::MAX_RATE_LIMIT_DELAY_MS)
             }
             Some(_) | None => fallback,
+        }
+    }
+
+    /// Check whether an error message represents a transient (retryable) condition.
+    ///
+    /// Errors that already exhausted the SSE-layer retry budget (e.g. "failed
+    /// after N attempts:" or "Stream retry budget exhausted") are **not**
+    /// transient from the round-executor perspective — the SSE transport layer
+    /// already retried with exponential backoff and `Retry-After` parsing.
+    /// Re-entering the send loop would multiply attempts (10 × 10 = 100) and
+    /// hold the user in a long silent stall.
+    fn is_transient_network_error(error_message: &str) -> bool {
+        let msg = error_message.to_lowercase();
+
+        // The SSE layer already exhausted its own retry budget — do not
+        // re-enter another round of attempts from the round executor.
+        // We require BOTH "failed after " and "attempts:" to co-occur,
+        // which uniquely identifies the SSE/round-executor budget-exhausted
+        // format without catching generic errors like "failed after timeout".
+        if msg.contains("failed after ") && msg.contains("attempts:") {
+            return false;
+        }
+        if msg.contains("retry budget exhausted") {
+            return false;
+        }
+
+        let non_retryable_keywords = [
+            "invalid api key",
+            "unauthorized",
+            "forbidden",
+            "model not found",
+            "unsupported model",
+            "invalid request",
+            "bad request",
+            "prompt is too long",
+            "content policy",
+            "proxy authentication required",
+            "provider quota",
+            "provider billing",
+            "insufficient_quota",
+            "insufficient quota",
+            "insufficient balance",
+            "not_enough_balance",
+            "not enough balance",
+            "余额不足",
+            "无可用资源包",
+            "账户已欠费",
+            "code=1113",
+            "\"code\":\"1113\"",
+            "client error 400",
+            "client error 401",
+            "client error 402",
+            "client error 403",
+            "client error 404",
+            "client error 413",
+            "client error 422",
+            "sse parsing error",
+            "schema error",
+            "unknown api format",
+        ];
+
+        let transient_keywords = [
+            "transport error",
+            "error decoding response body",
+            "stream closed before response completed",
+            "stream processing error",
+            "sse stream error",
+            "sse error",
+            "sse timeout",
+            "stream data timeout",
+            "timeout",
+            "request timeout",
+            "deadline exceeded",
+            "connection reset",
+            "connection closed",
+            "broken pipe",
+            "unexpected eof",
+            "connection refused",
+            "socket closed",
+            "temporarily unavailable",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "overloaded",
+            "proxy",
+            "tunnel",
+            "dns",
+            "network",
+            "econnreset",
+            "econnrefused",
+            "etimedout",
+            "rate limit",
+            "too many requests",
+            "408",
+            "409",
+            "425",
+            "429",
+            "502",
+            "503",
+            "504",
+        ];
+
+        if non_retryable_keywords.iter().any(|k| msg.contains(k)) {
+            return false;
+        }
+
+        transient_keywords.iter().any(|k| msg.contains(k))
+    }
+
+    /// Fallback method to fetch token usage data via a non-streaming request
+    /// when the streaming response doesn't include usage data.
+    async fn fetch_usage_via_non_stream(
+        &self,
+        ai_client: &Arc<AIClient>,
+        messages: &[AIMessage],
+        tools: &Option<Vec<ToolDefinition>>,
+    ) -> BitFunResult<Option<crate::util::types::ai::GeminiUsage>> {
+        // AIMessage is an alias for bitfun_core_types::Message,
+        // which is exactly what AIClient::send_message_non_stream expects.
+        let messages_owned = messages.to_vec();
+        let tools_owned = tools.clone();
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            ai_client.send_message_non_stream(messages_owned, tools_owned),
+        )
+        .await
+        {
+            Ok(Ok(response)) => {
+                Ok(response.usage)
+            }
+            Ok(Err(e)) => {
+                warn!("Non-streaming fallback request failed: {}", e);
+                Ok(None)
+            }
+            Err(_) => {
+                warn!("Non-streaming fallback request timed out");
+                Ok(None)
+            }
         }
     }
 }

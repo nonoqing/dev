@@ -222,12 +222,21 @@ pub async fn handle_openai_stream(
         }
 
         let has_empty_choices = sse_data.is_choices_empty();
+        let has_usage = sse_data.has_usage();
         let unified_responses = sse_data.into_unified_responses();
         trace!(
             target: AI_STREAM_RESPONSE_TARGET,
-            "OpenAI unified responses: {:?}",
-            unified_responses
+            "OpenAI unified responses: {:?}, has_usage_in_sse={}",
+            unified_responses, has_usage
         );
+        
+        let has_usage_in_response = unified_responses.iter().any(|r| r.usage.is_some());
+        if has_usage && !has_usage_in_response {
+            warn!(
+                "SSE chunk has usage field but none in unified responses: raw={}",
+                raw
+            );
+        }
         if unified_responses.is_empty() {
             if has_empty_choices {
                 stats.increment("skip:empty_choices_no_usage");

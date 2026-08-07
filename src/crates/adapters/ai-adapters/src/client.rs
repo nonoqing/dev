@@ -21,7 +21,7 @@ use crate::types::*;
 use anyhow::Result;
 use bitfun_core_types::errors::{AiProviderError, ErrorCategory};
 use format::ApiFormat;
-use log::warn;
+use log::{info, warn};
 use reqwest::Client;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -413,6 +413,33 @@ impl AIClient {
 
     pub async fn test_image_input_connection(&self) -> Result<ConnectionTestResult> {
         healthcheck::test_image_input_connection(self, TEST_CONNECTION_STREAM_ATTEMPTS).await
+    }
+
+    /// Send a non-streaming request to get token usage data when streaming response
+    /// doesn't include usage. This is a fallback for providers that don't support
+    /// `stream_options: { include_usage: true }`.
+    pub async fn send_message_non_stream(
+        &self,
+        messages: Vec<Message>,
+        _tools: Option<Vec<ToolDefinition>>,
+    ) -> Result<GeminiResponse> {
+        match ApiFormat::parse(&self.config.format)? {
+            ApiFormat::OpenAIChat => {
+                crate::providers::openai::chat::send_non_stream(self, messages).await
+            }
+            // For other formats, we don't have non-streaming fallback implemented
+            // Return an error so the caller can handle it gracefully
+            _ => {
+                log::warn!(
+                    "Non-streaming fallback not implemented for format: {}",
+                    self.config.format
+                );
+                Err(anyhow::anyhow!(
+                    "Non-streaming fallback not supported for format: {}",
+                    self.config.format
+                ))
+            }
+        }
     }
 
     pub(crate) async fn send_test_message(

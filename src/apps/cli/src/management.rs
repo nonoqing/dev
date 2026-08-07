@@ -573,6 +573,400 @@ pub(crate) async fn print_usage_report(session_id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Aggregated statistics across multiple sessions, mirroring OpenCode's stats command.
+struct AggregatedStats {
+    total_sessions: usize,
+    total_messages: usize,
+    total_turns: usize,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
+    total_cached_tokens: u64,
+    /// Number of sessions that actually reported token data.
+    /// If this is 0, the token totals are "N/A" rather than "0".
+    sessions_with_token_data: usize,
+    tool_usage: std::collections::BTreeMap<String, u64>,
+    model_usage: std::collections::BTreeMap<String, ModelUsageEntry>,
+    earliest_ms: u64,
+    latest_ms: u64,
+    days: u32,
+}
+
+#[derive(Default)]
+struct ModelUsageEntry {
+    call_count: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_tokens: u64,
+    /// Whether any token record was available for this model.
+    has_token_data: bool,
+}
+
+pub(crate) async fn print_stats_report(
+    days: Option<u32>,
+    tools_limit: Option<usize>,
+    models_flag: Option<usize>,
+    project_filter: Option<String>,
+) -> Result<()> {
+    let workspace_path =
+        std::env::current_dir().context("Failed to resolve current directory")?;
+    let runtime = crate::initialize_core_services(
+        &workspace_path,
+        crate::runtime::approval::CliApprovalPolicy::Reject,
+        crate::BootstrapProfile::Management,
+    )
+    .await?;
+
+    // List all sessions for the current workspace
+    let sessions = runtime
+        .agent_runtime()
+        .list_sessions(bitfun_runtime_ports::AgentSessionListRequest {
+            workspace_path: workspace_path.to_string_lossy().to_string(),
+            remote_connection_id: None,
+            remote_ssh_host: None,
+        })
+        .await
+        .map_err(|error| anyhow!(error.into_message()))?;
+
+    if sessions.is_empty() {
+        println!("No sessions found for current project: {}", workspace_path.display());
+        return Ok(());
+    }
+
+    // Apply --days filter (cutoff based on last_active_at_ms)
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let cutoff_ms = match days {
+        Some(0) => {
+            // 0 means today: midnight of current day
+            let secs = (now_ms / 1000) as i64;
+            let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+                .unwrap_or_default()
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .unwrap_or_default()
+                .and_utc()
+                .timestamp_millis() as u64;
+            dt
+        }
+        Some(d) => now_ms.saturating_sub((d as u64) * 24 * 60 * 60 * 1000),
+        None => 0,
+    };
+
+    let mut filtered: Vec<&bitfun_runtime_ports::AgentSessionSummary> = sessions
+        .iter()
+        .filter(|s| s.last_active_at_ms >= cutoff_ms)
+        .collect();
+
+    // Apply --project filter (empty string means current project, which is already
+    // the default since list_sessions is workspace-scoped; non-empty would need
+    // cross-project listing, which we approximate by matching workspace_path label)
+    if let Some(ref _p) = project_filter {
+        // Current implementation is workspace-scoped, so empty string is a no-op.
+        // For a non-empty project filter, we would need to list sessions across
+        // workspaces, which is not supported by the current runtime port. Warn the user.
+        eprintln!("Warning: --project filter with a non-empty value is not supported; showing current project only");
+    }
+
+    if filtered.is_empty() {
+        println!(
+            "No sessions matching the filter (days={:?}).",
+            days
+        );
+        return Ok(());
+    }
+
+    if filtered.len() > 200 {
+        eprintln!(
+            "Aggregating {} sessions; this may take a moment...",
+            filtered.len()
+        );
+    }
+
+    // Sort by last_active_at_ms ascending so earliest/latest are easy to compute
+    filtered.sort_by_key(|s| s.last_active_at_ms);
+
+    let mut stats = AggregatedStats {
+        total_sessions: filtered.len(),
+        total_messages: 0,
+        total_turns: 0,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cached_tokens: 0,
+        sessions_with_token_data: 0,
+        tool_usage: std::collections::BTreeMap::new(),
+        model_usage: std::collections::BTreeMap::new(),
+        earliest_ms: filtered.first().map(|s| s.last_active_at_ms).unwrap_or(now_ms),
+        latest_ms: filtered.last().map(|s| s.last_active_at_ms).unwrap_or(now_ms),
+        days: 0,
+    };
+
+    // For each session, fetch usage report and aggregate
+    for session in &filtered {
+        let report = runtime
+            .agent_runtime()
+            .generate_session_usage(AgentSessionUsageRequest {
+                session_id: session.session_id.clone(),
+                workspace_path: Some(workspace_path.to_string_lossy().to_string()),
+                remote_connection_id: None,
+                remote_ssh_host: None,
+                include_hidden_subagents: true,
+            })
+            .await;
+
+        let report = match report {
+            Ok(r) => r,
+            Err(error) => {
+                eprintln!(
+                    "Warning: could not generate usage for session {}: {}",
+                    session.session_id,
+                    error.into_message()
+                );
+                continue;
+            }
+        };
+
+        stats.total_turns += report.scope.turn_count;
+
+        // Track whether this session reported any token data.
+        let session_has_tokens = report.tokens.input_tokens.is_some()
+            || report.tokens.output_tokens.is_some()
+            || report.tokens.cached_tokens.is_some();
+        if session_has_tokens {
+            stats.sessions_with_token_data += 1;
+        }
+        if let Some(input) = report.tokens.input_tokens {
+            stats.total_input_tokens += input;
+        }
+        if let Some(output) = report.tokens.output_tokens {
+            stats.total_output_tokens += output;
+        }
+        if let Some(cached) = report.tokens.cached_tokens {
+            stats.total_cached_tokens += cached;
+        }
+
+        for tool in &report.tools {
+            *stats.tool_usage.entry(tool.tool_name.clone()).or_insert(0) += tool.call_count;
+        }
+
+        for model in &report.models {
+            let entry = stats
+                .model_usage
+                .entry(model.model_id.clone())
+                .or_default();
+            entry.call_count += model.call_count;
+            let model_has_tokens = model.input_tokens.is_some()
+                || model.output_tokens.is_some()
+                || model.cached_tokens.is_some();
+            if model_has_tokens {
+                entry.has_token_data = true;
+            }
+            if let Some(v) = model.input_tokens {
+                entry.input_tokens += v;
+            }
+            if let Some(v) = model.output_tokens {
+                entry.output_tokens += v;
+            }
+            if let Some(v) = model.cached_tokens {
+                entry.cached_tokens += v;
+            }
+        }
+    }
+
+    // Approximate message count from turn count (each turn ~ 1 user + 1 assistant)
+    stats.total_messages = stats.total_turns * 2;
+
+    // Compute days from date range
+    let range_ms = stats.latest_ms.saturating_sub(stats.earliest_ms);
+    stats.days = match days {
+        Some(0) => 1,
+        Some(d) => d,
+        None => std::cmp::max(1, ((range_ms / (24 * 60 * 60 * 1000)) + 1) as u32),
+    };
+
+    render_stats(&stats, tools_limit, models_flag);
+    Ok(())
+}
+
+fn render_stats(stats: &AggregatedStats, tools_limit: Option<usize>, models_flag: Option<usize>) {
+    const WIDTH: usize = 56;
+
+    fn render_row(label: &str, value: String) -> String {
+        let available = WIDTH.saturating_sub(1);
+        let padding = available
+            .saturating_sub(label.chars().count())
+            .saturating_sub(value.chars().count());
+        format!("│{}{}{} │", label, " ".repeat(padding), value)
+    }
+
+    fn format_number(n: u64) -> String {
+        if n >= 1_000_000 {
+            format!("{:.1}M", n as f64 / 1_000_000.0)
+        } else if n >= 1_000 {
+            format!("{:.1}K", n as f64 / 1_000.0)
+        } else {
+            n.to_string()
+        }
+    }
+
+    let border_top = "┌".to_string() + &"─".repeat(WIDTH) + "┐";
+    let border_mid = "├".to_string() + &"─".repeat(WIDTH) + "┤";
+    let border_bot = "└".to_string() + &"─".repeat(WIDTH) + "┘";
+
+    // Overview section
+    println!("{}", border_top);
+    println!("│{: ^WIDTH$}│", "OVERVIEW");
+    println!("{}", border_mid);
+    println!("{}", render_row("Sessions", stats.total_sessions.to_string()));
+    println!("{}", render_row("Messages", stats.total_messages.to_string()));
+    println!("{}", render_row("Turns", stats.total_turns.to_string()));
+    println!("{}", render_row("Days", stats.days.to_string()));
+    println!("{}", border_bot);
+    println!();
+
+    // Cost & Tokens section (BitFun has no cost tracking, so we show tokens only)
+    println!("{}", border_top);
+    println!("│{: ^WIDTH$}│", "TOKENS");
+    println!("{}", border_mid);
+    if stats.sessions_with_token_data == 0 {
+        // No session reported token data — show N/A instead of misleading "0"
+        println!("{}", render_row("Source", "unavailable".to_string()));
+        println!("{}", render_row("Input", "N/A".to_string()));
+        println!("{}", render_row("Output", "N/A".to_string()));
+        println!("{}", render_row("Cached", "N/A".to_string()));
+        println!("{}", render_row("Total", "N/A".to_string()));
+        println!(
+            "{}",
+            render_row("Avg/Session", "N/A".to_string())
+        );
+    } else {
+        println!(
+            "{}",
+            render_row("Sessions w/ data", stats.sessions_with_token_data.to_string())
+        );
+        println!(
+            "{}",
+            render_row("Input", format_number(stats.total_input_tokens))
+        );
+        println!(
+            "{}",
+            render_row("Output", format_number(stats.total_output_tokens))
+        );
+        println!(
+            "{}",
+            render_row(
+                "Cached",
+                format_number(stats.total_cached_tokens)
+            )
+        );
+        let total_tokens = stats.total_input_tokens
+            + stats.total_output_tokens
+            + stats.total_cached_tokens;
+        println!("{}", render_row("Total", format_number(total_tokens)));
+        if stats.total_sessions > 0 {
+            let avg = total_tokens / stats.total_sessions as u64;
+            println!(
+                "{}",
+                render_row("Avg/Session", format_number(avg))
+            );
+        }
+    }
+    println!("{}", border_bot);
+    println!();
+
+    // Model Usage section (only if --models flag is provided)
+    if let Some(model_limit) = models_flag {
+        if !stats.model_usage.is_empty() {
+            let mut sorted: Vec<_> = stats.model_usage.iter().collect();
+            sorted.sort_by(|a, b| b.1.call_count.cmp(&a.1.call_count));
+            let display: Vec<_> = if model_limit == 0 {
+                sorted.clone()
+            } else {
+                sorted.into_iter().take(model_limit).collect()
+            };
+
+            println!("{}", border_top);
+            println!("│{: ^WIDTH$}│", "MODEL USAGE");
+            println!("{}", border_mid);
+            for (model, usage) in &display {
+                let model_label = if model.len() > 54 {
+                    format!("{}..", &model[..52])
+                } else {
+                    model.to_string()
+                };
+                println!("│ {: <WIDTH$}│", model_label);
+                println!("{}", render_row("  Calls", usage.call_count.to_string()));
+                let input_str = if usage.has_token_data {
+                    format_number(usage.input_tokens)
+                } else {
+                    "N/A".to_string()
+                };
+                let output_str = if usage.has_token_data {
+                    format_number(usage.output_tokens)
+                } else {
+                    "N/A".to_string()
+                };
+                let cached_str = if usage.has_token_data {
+                    format_number(usage.cached_tokens)
+                } else {
+                    "N/A".to_string()
+                };
+                println!("{}", render_row("  Input", input_str));
+                println!("{}", render_row("  Output", output_str));
+                println!("{}", render_row("  Cached", cached_str));
+                println!("{}", border_mid);
+            }
+            println!("{}", border_bot);
+            println!();
+        }
+    }
+
+    // Tool Usage section
+    if !stats.tool_usage.is_empty() {
+        let mut sorted: Vec<_> = stats.tool_usage.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        let display: Vec<_> = match tools_limit {
+            Some(limit) => sorted.into_iter().take(limit).collect(),
+            None => sorted,
+        };
+
+        let total_tool_calls: u64 = display.iter().map(|(_, c)| **c).sum();
+        let max_count: u64 = display.iter().map(|(_, c)| **c).max().unwrap_or(1);
+
+        println!("{}", border_top);
+        println!("│{: ^WIDTH$}│", "TOOL USAGE");
+        println!("{}", border_mid);
+        for (tool, count) in display.iter() {
+            let count_val = **count;
+            let bar_len = std::cmp::max(1, ((count_val as f64) / (max_count as f64) * 20.0) as usize);
+            let bar = "█".repeat(bar_len);
+            let percentage = if total_tool_calls > 0 {
+                format!("{:.1}", count_val as f64 / total_tool_calls as f64 * 100.0)
+            } else {
+                "0.0".to_string()
+            };
+            let max_tool_len = 18;
+            let tool_name = if tool.len() > max_tool_len {
+                format!("{}..", &tool[..max_tool_len - 2])
+            } else {
+                tool.to_string()
+            };
+            let content = format!(
+                " {: <width$} {: <20} {: >3} ({: >5}%)",
+                tool_name,
+                bar,
+                count,
+                percentage,
+                width = max_tool_len
+            );
+            let padding = WIDTH.saturating_sub(content.chars().count()).saturating_sub(1);
+            println!("│{}{} │", content, " ".repeat(padding));
+        }
+        println!("{}", border_bot);
+    }
+}
+
 pub(crate) async fn print_plugins() -> Result<()> {
     let workspace = std::env::current_dir().context("Failed to resolve current directory")?;
     let path_manager = try_get_path_manager_arc().map_err(|error| anyhow!(error.to_string()))?;

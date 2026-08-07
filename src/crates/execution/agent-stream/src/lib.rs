@@ -16,7 +16,7 @@ use bitfun_core_types::errors::AiProviderError;
 use bitfun_events::{AgenticEvent, AgenticEventPriority as EventPriority, ToolEventData};
 use futures::{Stream, StreamExt};
 pub use hidden_text::{HiddenTextBlock, HiddenTextStreamParser, HiddenTextTag};
-use log::{debug, error, trace};
+use log::{debug, error, trace, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
@@ -882,19 +882,35 @@ impl StreamProcessor {
 
     /// Print stream processing end log
     fn log_stream_result(&self, ctx: &StreamContext) {
+        let has_usage = ctx.usage.is_some();
+        let usage_summary = ctx.usage.as_ref().map(|u| {
+            format!(
+                "input={}, output={}, total={}, cached={:?}",
+                u.prompt_token_count,
+                u.candidates_token_count,
+                u.total_token_count,
+                u.cached_content_token_count
+            )
+        }).unwrap_or_else(|| "none".to_string());
+
         debug!(
-            "Stream loop ended: text_chunks={}, thinking_chunks={}, tool_calls({}), first_chunk_ms={:?}, first_visible_output_ms={:?}: {}",
+            "Stream loop ended: text_chunks={}, thinking_chunks={}, tool_calls({}), first_chunk_ms={:?}, first_visible_output_ms={:?}, usage={}",
             ctx.text_chunks_count,
             ctx.thinking_chunks_count,
             ctx.tool_calls.len(),
             ctx.first_chunk_ms,
             ctx.first_visible_output_ms,
-            ctx.tool_calls
-                .iter()
-                .map(|tc| tc.tool_name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            usage_summary
         );
+
+        if !has_usage && (ctx.has_effective_output || !ctx.tool_calls.is_empty()) {
+            warn!(
+                "Stream completed without token usage data: text_len={}, tool_calls={}, has_effective_output={}. This may indicate the AI provider did not include usage in the stream response.",
+                ctx.full_text.len(),
+                ctx.tool_calls.len(),
+                ctx.has_effective_output
+            );
+        }
 
         if log::log_enabled!(log::Level::Debug) {
             if !ctx.full_thinking.is_empty() {

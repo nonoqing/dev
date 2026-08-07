@@ -18,7 +18,10 @@ pub(crate) fn try_build_request_body(
     let mut request_body = serde_json::json!({
         "model": client.config.model,
         "input": response_input,
-        "stream": true
+        "stream": true,
+        "stream_options": {
+            "include_usage": true
+        }
     });
 
     if let Some(instructions) = instructions.filter(|value| !value.trim().is_empty()) {
@@ -69,6 +72,7 @@ pub(crate) fn try_build_request_body(
             "instructions",
             "stream",
             "max_output_tokens",
+            "stream_options",
         ],
         &[],
     );

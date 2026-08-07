@@ -295,6 +295,25 @@ enum Commands {
         session_id: Option<String>,
     },
 
+    /// Show token usage and cost statistics across sessions
+    Stats {
+        /// Show stats for the last N days (default: all time)
+        #[arg(long)]
+        days: Option<u32>,
+
+        /// Number of tools to show (default: all)
+        #[arg(long)]
+        tools: Option<usize>,
+
+        /// Show model statistics (default: hidden). Pass a number to show top N
+        #[arg(long, num_args = 0..=1, default_missing_value = "0")]
+        models: Option<usize>,
+
+        /// Filter by project (default: all projects; empty string: current project)
+        #[arg(long)]
+        project: Option<String>,
+    },
+
     /// Export a session transcript as Markdown to stdout or file
     Export {
         /// Session ID to export (omit to interactively select, or use "last")
@@ -1488,6 +1507,15 @@ async fn run_cli() -> Result<()> {
 
         Some(Commands::Usage { session_id }) => {
             management::print_usage_report(session_id.as_deref()).await?;
+        }
+
+        Some(Commands::Stats {
+            days,
+            tools,
+            models,
+            project,
+        }) => {
+            management::print_stats_report(days, tools, models, project).await?;
         }
 
         Some(Commands::Doctor) => {
