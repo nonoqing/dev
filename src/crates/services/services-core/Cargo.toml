@@ -51,7 +51,23 @@ libc = { workspace = true, optional = true }
 
 [features]
 default = []
-filesystem = ["dep:base64", "dep:chrono", "dep:ignore", "tokio/fs", "dep:windows", "windows/Win32_Foundation", "windows/Win32_Storage_FileSystem"]
+filesystem = [
+    "dep:base64",
+    "dep:chrono",
+    "dep:ignore",
+    "dep:windows",
+    "tokio/fs",
+    "windows/Win32_Foundation",
+    "windows/Win32_Storage_FileSystem",
+]
+json-io = [
+    "dep:fs2",
+    "dep:windows",
+    "tokio/fs",
+    "tokio/sync",
+    "windows/Win32_Foundation",
+    "windows/Win32_Storage_FileSystem",
+]
 local-storage = [
     "dep:bitfun-core-types",
     "dep:bitfun-events",

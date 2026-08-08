@@ -171,6 +171,8 @@ export const AGENT_COMMAND_SCHEMA = {
     response: null as unknown as ResetAgentProfileConfigResponse,
   },
   set_config: { method: 'config/setConfig' },
+  save_cloud_speech_config: { method: 'config/saveCloudSpeechConfig' },
+  validate_config: { method: 'config/validateConfig' },
   i18n_get_current_language: { method: 'i18n/getCurrentLanguage' },
   i18n_set_language: { method: 'i18n/setLanguage' },
   i18n_get_config: { method: 'i18n/getConfig' },
@@ -387,6 +389,9 @@ export class WebSocketTransportAdapter implements ITransportAdapter {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
+  // Held so `disconnect()` can cancel a reconnect that is already scheduled; without it a
+  // pending timer reopens the socket after an explicit teardown.
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   
   constructor(url?: string) {
     
@@ -450,14 +455,23 @@ export class WebSocketTransportAdapter implements ITransportAdapter {
     return this.connectPromise;
   }
 
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
   private handleDisconnect(): void {
     if (this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++;
       const delay = this.reconnectDelay * this.reconnectAttempts;
       
       log.info('Reconnecting', { delay, attempt: this.reconnectAttempts, maxAttempts: this.maxReconnectAttempts });
-      
-      setTimeout(() => {
+
+      this.clearReconnectTimer();
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
         this.connect().catch(error => {
           log.error('Reconnection failed', error);
         });
@@ -631,7 +645,11 @@ export class WebSocketTransportAdapter implements ITransportAdapter {
   
    
   async disconnect(): Promise<void> {
-    
+
+    // Before anything else, so a reconnect that is already queued cannot fire after teardown
+    // and reopen the socket we are about to close.
+    this.clearReconnectTimer();
+
     this.pendingRequests.forEach((pending) => {
       clearTimeout(pending.timeout);
       pending.reject(new Error('WebSocket manually disconnected'));

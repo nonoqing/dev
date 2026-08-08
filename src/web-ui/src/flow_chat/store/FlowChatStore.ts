@@ -39,6 +39,7 @@ import { i18nService } from '@/infrastructure/i18n/core/I18nService';
 import type {
   DialogTurnData,
   LocalCommandMetadata,
+  SessionContextUsage,
   SessionKind,
   SessionTurnCatalog,
 } from '@/shared/types/session-history';
@@ -56,6 +57,8 @@ import {
 } from '../utils/sessionMetadata';
 import { sessionProjectWorkspacePath } from '../utils/sessionWorkspace';
 import type { SessionTitleDescriptor } from '../utils/sessionTitle';
+import { deriveContextUsageFromTurns } from '../utils/tokenUsageDisplay';
+import { isAcpAgentType } from '../utils/acpSession';
 import {
   deriveSessionTitleState,
   deriveSessionTitleStateFromMetadata,
@@ -86,6 +89,14 @@ import {
 } from '@/features/dispatch/types';
 import { dispatchJobStore } from '@/features/dispatch/dispatchJobStore';
 import { resolveSessionDriverId } from '../session-drivers/resolve';
+import {
+  isProvisionalUsageReportTurn,
+  isProjectedSessionEmpty,
+  canonicalSessionTurns,
+  projectedSessionTurnCount,
+  resolveDialogTurnIdentity,
+  resolveStorageTurnIndex,
+} from '../utils/flowChatTurnIdentity';
 
 const log = createLogger('FlowChatStore');
 
@@ -96,6 +107,114 @@ function firstNonEmptyString(...values: unknown[]): string | undefined {
     }
   }
   return undefined;
+}
+
+function persistedCurrentContextUsageValue(
+  metadata: { currentContextUsage?: SessionContextUsage },
+): unknown {
+  return metadata.currentContextUsage;
+}
+
+function deriveRestoredCurrentTokenUsage(value: unknown): TokenUsage | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const inputTokens = record.inputTokens;
+  if (typeof inputTokens !== 'number' || !Number.isFinite(inputTokens) || inputTokens <= 0) {
+    return undefined;
+  }
+  const totalTokens = record.totalTokens;
+  const turnId = typeof record.turnId === 'string' && record.turnId.trim()
+    ? record.turnId.trim()
+    : undefined;
+  const source = record.source === 'model_request' || record.source === 'context_compression'
+    ? record.source
+    : undefined;
+  const outputTokens = record.outputTokens;
+  const timestamp = record.timestamp;
+  if (
+    !turnId
+    || !source
+    || typeof totalTokens !== 'number'
+    || !Number.isFinite(totalTokens)
+    || totalTokens < 0
+    || (
+      outputTokens !== undefined
+      && (
+        typeof outputTokens !== 'number'
+        || !Number.isFinite(outputTokens)
+        || outputTokens < 0
+      )
+    )
+    || typeof timestamp !== 'number'
+    || !Number.isFinite(timestamp)
+  ) {
+    return undefined;
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    timestamp,
+    turnId,
+    source,
+  };
+}
+
+function reconcileHydratedCurrentTokenUsage(
+  currentTokenUsage: TokenUsage | undefined,
+  dialogTurns: DialogTurn[],
+  restoredAgentType: string | undefined,
+  sourceVisibilityTurns: DialogTurn[] = dialogTurns,
+): TokenUsage | undefined {
+  if (isAcpAgentType(restoredAgentType)) {
+    return undefined;
+  }
+
+  const sourceTurnId = currentTokenUsage?.turnId;
+  const retainedUsage = sourceTurnId
+    && !sourceVisibilityTurns.some(turn => turn.id === sourceTurnId)
+    ? undefined
+    : currentTokenUsage;
+
+  return retainedUsage ?? deriveContextUsageFromTurns(dialogTurns);
+}
+
+function reconcileRestoreViewCurrentTokenUsage(
+  currentTokenUsage: TokenUsage | undefined,
+  authoritativeUsage: SessionContextUsage | null | undefined,
+  dialogTurns: DialogTurn[],
+  restoredAgentType: string | undefined,
+  sourceVisibilityTurns: DialogTurn[] = dialogTurns,
+): TokenUsage | undefined {
+  if (isAcpAgentType(restoredAgentType)) {
+    return undefined;
+  }
+  const candidateUsage = authoritativeUsage === undefined
+    ? currentTokenUsage
+    : authoritativeUsage === null
+      ? undefined
+      : deriveRestoredCurrentTokenUsage(authoritativeUsage);
+  return reconcileHydratedCurrentTokenUsage(
+    candidateUsage,
+    dialogTurns,
+    restoredAgentType,
+    sourceVisibilityTurns,
+  );
+}
+
+function currentTokenUsageAfterSourceRemoval(
+  session: Pick<Session, 'currentTokenUsage' | 'isPartial'>,
+  dialogTurns: DialogTurn[],
+  sourceRemoved: boolean,
+): TokenUsage | undefined {
+  if (!sourceRemoved) {
+    return session.currentTokenUsage;
+  }
+  return session.isPartial === true
+    ? undefined
+    : deriveContextUsageFromTurns(dialogTurns);
 }
 
 function persistedSessionRemoteScope(
@@ -362,12 +481,14 @@ function normalizeLiveItemStatus(
 }
 
 function compareDialogTurnOrder(left: DialogTurn, right: DialogTurn): number {
+  const leftStorageIndex = left.storageTurnIndex ?? left.backendTurnIndex;
+  const rightStorageIndex = right.storageTurnIndex ?? right.backendTurnIndex;
   if (
-    typeof left.backendTurnIndex === 'number' &&
-    typeof right.backendTurnIndex === 'number' &&
-    left.backendTurnIndex !== right.backendTurnIndex
+    typeof leftStorageIndex === 'number' &&
+    typeof rightStorageIndex === 'number' &&
+    leftStorageIndex !== rightStorageIndex
   ) {
-    return left.backendTurnIndex - right.backendTurnIndex;
+    return leftStorageIndex - rightStorageIndex;
   }
   return left.startTime - right.startTime;
 }
@@ -974,12 +1095,6 @@ function mergeLoadedTurnRanges(
   }
 
   return merged;
-}
-
-function isProvisionalUsageReportTurn(turn: DialogTurn): boolean {
-  const metadata = turn.userMessage.metadata as LocalCommandMetadata | undefined;
-  return metadata?.localCommandKind === 'usage_report'
-    && metadata.usageReportProvisional === true;
 }
 
 function sliceLoadedTurnRange(
@@ -1606,11 +1721,7 @@ export class FlowChatStore {
       return null;
     }
 
-    const totalTurnCount = Math.max(
-      view.catalog?.totalTurnCount ?? 0,
-      session.totalTurnCount ?? 0,
-      session.dialogTurns.length,
-    );
+    const totalTurnCount = projectedSessionTurnCount(session);
     const normalizedTargetOrdinal = Math.max(0, Math.floor(targetOrdinal));
     const tailOrdinal = totalTurnCount - 1;
     const loadedRange = view.loadedRanges.find(range =>
@@ -1734,7 +1845,7 @@ export class FlowChatStore {
 
   private getSessionHistoryTailProtectedIntervals(
     sessionId: string,
-    view?: SessionHistoryViewState,
+    _view?: SessionHistoryViewState,
   ): OrdinalInterval[] {
     const session = this.state.sessions.get(sessionId);
     if (!session || session.dialogTurns.length === 0) {
@@ -1747,16 +1858,7 @@ export class FlowChatStore {
       return [];
     }
 
-    const catalog = view?.catalog?.sessionId === sessionId
-      ? view.catalog
-      : session.turnCatalog?.sessionId === sessionId
-        ? session.turnCatalog
-        : null;
-    const totalTurnCount = Math.max(
-      catalog?.totalTurnCount ?? 0,
-      session.totalTurnCount ?? 0,
-      session.dialogTurns.length,
-    );
+    const totalTurnCount = projectedSessionTurnCount(session);
     if (totalTurnCount <= 0) {
       return [];
     }
@@ -2007,9 +2109,10 @@ export class FlowChatStore {
     );
     const located = canonicalTailTurns
       .map(turn => {
+        const storageTurnIndex = resolveStorageTurnIndex(session, turn);
         const entry = entryByTurnId.get(turn.id)
-          ?? (typeof turn.backendTurnIndex === 'number'
-            ? entryByStorageIndex.get(turn.backendTurnIndex)
+          ?? (storageTurnIndex !== undefined
+            ? entryByStorageIndex.get(storageTurnIndex)
             : undefined);
         return entry ? { ordinal: entry.ordinal, turn } : null;
       })
@@ -2041,11 +2144,7 @@ export class FlowChatStore {
       return;
     }
 
-    const totalTurnCount = Math.max(
-      catalog?.totalTurnCount ?? 0,
-      session.totalTurnCount ?? 0,
-      canonicalTailTurns.length,
-    );
+    const totalTurnCount = projectedSessionTurnCount(session);
     const startOrdinal = Math.max(0, totalTurnCount - canonicalTailTurns.length);
     this.cacheSessionLoadedTurnRange(sessionId, {
       startOrdinal,
@@ -2353,8 +2452,9 @@ export class FlowChatStore {
       return false;
     }
 
+    const canonicalTurns = canonicalSessionTurns(session);
     const workspacePath = sessionProjectWorkspacePath(session);
-    if (!workspacePath || session.dialogTurns.length === 0) {
+    if (!workspacePath || canonicalTurns.length === 0) {
       return false;
     }
 
@@ -2364,7 +2464,7 @@ export class FlowChatStore {
       sessionId,
       sessionTraceId,
       reason,
-      loadedTurnCount: session.dialogTurns.length,
+      loadedTurnCount: canonicalTurns.length,
       totalTurnCount: session.totalTurnCount,
     });
     this.scheduleCompleteSessionHistoryLoad({
@@ -2372,7 +2472,7 @@ export class FlowChatStore {
       workspacePath,
       initialSessionTraceId: sessionTraceId,
       requireActiveSession: true,
-      expectedDialogTurnIds: session.dialogTurns.map(turn => turn.id),
+      expectedDialogTurnIds: canonicalTurns.map(turn => turn.id),
     });
     return true;
   }
@@ -2409,8 +2509,9 @@ export class FlowChatStore {
       request => request.sessionId === sessionId,
     );
     if (!hydrationRequest) {
+      const canonicalTurns = canonicalSessionTurns(session);
       const workspacePath = sessionProjectWorkspacePath(session);
-      if (!workspacePath || session.dialogTurns.length === 0) {
+      if (!workspacePath || canonicalTurns.length === 0) {
         this.fullHistoryProjectionApplyRequests.delete(sessionId);
         return false;
       }
@@ -2425,7 +2526,7 @@ export class FlowChatStore {
         requireActiveSession: false,
         startImmediately: true,
         initialSessionTraceId: sessionTraceId,
-        expectedDialogTurnIds: session.dialogTurns.map(turn => turn.id),
+        expectedDialogTurnIds: canonicalTurns.map(turn => turn.id),
       });
     } else {
       hydrationRequest.startNow?.();
@@ -2435,7 +2536,7 @@ export class FlowChatStore {
       sessionId,
       reason,
       remote: hydrationRequest.remote,
-      loadedTurnCount: session.dialogTurns.length,
+      loadedTurnCount: canonicalSessionTurns(session).length,
       totalTurnCount: session.totalTurnCount,
     });
     await hydrationRequest.promise;
@@ -2995,11 +3096,11 @@ export class FlowChatStore {
       }
       revealed = true;
       revealedTurnCount = previousWindow.length;
-      loadedTurnCount = mergedDialogTurns.length;
+      loadedTurnCount = canonicalSessionTurns({ dialogTurns: mergedDialogTurns }).length;
       totalTurnCount = Math.max(
         session.totalTurnCount ?? 0,
         projection.dialogTurns.length,
-        mergedDialogTurns.length,
+        loadedTurnCount,
       );
       remainingBefore = startIndex;
 
@@ -3086,6 +3187,7 @@ export class FlowChatStore {
         ...projection.dialogTurns.map(turn => currentDialogTurnsById.get(turn.id) ?? turn),
         ...appendedCurrentDialogTurns,
       ];
+      const mergedCanonicalTurnCount = canonicalSessionTurns({ dialogTurns: mergedDialogTurns }).length;
       preservedTurnCount = mergedDialogTurns.reduce(
         (count, turn) => count + (currentDialogTurnsById.get(turn.id) === turn ? 1 : 0),
         0,
@@ -3095,8 +3197,12 @@ export class FlowChatStore {
         ...session,
         dialogTurns: mergedDialogTurns,
         isPartial: false,
-        loadedTurnCount: mergedDialogTurns.length,
-        totalTurnCount: mergedDialogTurns.length,
+        loadedTurnCount: mergedCanonicalTurnCount,
+        totalTurnCount: Math.max(
+          session.totalTurnCount ?? 0,
+          projection.dialogTurns.length,
+          mergedCanonicalTurnCount,
+        ),
         contextRestoreState:
           session.contextRestoreState === 'ready' ? 'ready' : projection.contextRestoreState,
         mode: projection.restoredSessionInfo?.agentType || session.mode,
@@ -4023,8 +4129,8 @@ export class FlowChatStore {
         historyState: 'ready',
         contextRestoreState: 'ready',
         isPartial: false,
-        loadedTurnCount: session.dialogTurns.length,
-        totalTurnCount: session.dialogTurns.length,
+        loadedTurnCount: canonicalSessionTurns(session).length,
+        totalTurnCount: projectedSessionTurnCount(session),
         workspacePath: sourceWorkspacePath ?? session.workspacePath,
         projectWorkspacePath:
           sourceWorkspacePath ?? session.projectWorkspacePath,
@@ -4083,7 +4189,7 @@ export class FlowChatStore {
       const session = prev.sessions.get(sessionId);
       if (
         !session ||
-        session.dialogTurns.length > 0 ||
+        !isProjectedSessionEmpty(session) ||
         !session.config.dispatchTarget ||
         session.config.dispatchTarget.kind === 'local'
       ) {
@@ -4702,6 +4808,7 @@ export class FlowChatStore {
   }
 
   public addDialogTurn(sessionId: string, dialogTurn: DialogTurn): void {
+    let appendedTurn = false;
     this.setState(prev => {
       const session = prev.sessions.get(sessionId);
       if (!session) return prev;
@@ -4711,36 +4818,36 @@ export class FlowChatStore {
       }
 
       const updatedDialogTurns = [...session.dialogTurns, dialogTurn];
-      const catalogAlreadyCountsTurn = session.turnCatalog?.entries.some(entry =>
+      const updatedCanonicalTurnCount = canonicalSessionTurns({
+        dialogTurns: updatedDialogTurns,
+      }).length;
+      const storageTurnIndex = resolveStorageTurnIndex(session, dialogTurn);
+      const catalog = session.turnCatalog?.sessionId === sessionId
+        ? session.turnCatalog
+        : undefined;
+      const catalogAlreadyCountsTurn = catalog?.entries.some(entry =>
         entry.turnId === dialogTurn.id
         || (
-          typeof dialogTurn.backendTurnIndex === 'number'
-          && entry.storageTurnIndex === dialogTurn.backendTurnIndex
+          storageTurnIndex !== undefined
+          && entry.storageTurnIndex === storageTurnIndex
         )
       ) === true;
-      const previousTotalTurnCount = Math.max(
-        session.totalTurnCount ?? 0,
-        session.turnCatalog?.totalTurnCount ?? 0,
-        session.dialogTurns.length,
-      );
+      const previousTotalTurnCount = projectedSessionTurnCount(session);
       const updatedSession = {
         ...session,
         dialogTurns: updatedDialogTurns,
-        loadedTurnCount: session.isPartial === true
-          ? updatedDialogTurns.length
-          : session.loadedTurnCount,
-        totalTurnCount: session.isPartial === true
-          ? Math.max(
-            updatedDialogTurns.length,
-            previousTotalTurnCount + (catalogAlreadyCountsTurn ? 0 : 1),
-          )
-          : Math.max(session.totalTurnCount ?? 0, updatedDialogTurns.length),
+        loadedTurnCount: updatedCanonicalTurnCount,
+        totalTurnCount: Math.max(
+          updatedCanonicalTurnCount,
+          previousTotalTurnCount + (catalogAlreadyCountsTurn ? 0 : 1),
+        ),
         lastUserDialogMode: this.deriveLastUserDialogMode(updatedDialogTurns),
         lastActiveAt: Date.now()
       };
 
       const newSessions = new Map(prev.sessions);
       newSessions.set(sessionId, updatedSession);
+      appendedTurn = true;
 
       return {
         ...prev,
@@ -4748,22 +4855,17 @@ export class FlowChatStore {
       };
     });
     const updatedSession = this.state.sessions.get(sessionId);
-    if (updatedSession) {
+    if (appendedTurn && updatedSession) {
       const catalog = updatedSession.turnCatalog?.sessionId === sessionId
         ? updatedSession.turnCatalog
         : undefined;
-      const catalogEntry = catalog?.entries.find(entry =>
-        entry.turnId === dialogTurn.id
-        || (
-          typeof dialogTurn.backendTurnIndex === 'number'
-          && entry.storageTurnIndex === dialogTurn.backendTurnIndex
-        )
-      );
-      const ordinal = catalogEntry?.ordinal
-        ?? Math.max(0, updatedSession.dialogTurns.length - 1);
+      const identity = resolveDialogTurnIdentity(updatedSession, dialogTurn);
+      if (!identity) {
+        return;
+      }
       this.cacheSessionLoadedTurnRange(sessionId, {
-        startOrdinal: ordinal,
-        endOrdinalExclusive: ordinal + 1,
+        startOrdinal: identity.ordinal,
+        endOrdinalExclusive: identity.ordinal + 1,
         turns: [dialogTurn],
         lastAccessedAt: Date.now(),
         source: 'live',
@@ -4889,15 +4991,17 @@ export class FlowChatStore {
         }
         const metadata = { ...turn.userMessage.metadata } as LocalCommandMetadata;
         delete metadata.usageReportProvisional;
-        committedTurn = {
+        const nextTurn: DialogTurn = {
           ...turn,
+          storageTurnIndex: params.storageTurnIndex,
           backendTurnIndex: params.storageTurnIndex,
           userMessage: {
             ...turn.userMessage,
             metadata,
           },
         };
-        return committedTurn;
+        committedTurn = nextTurn;
+        return nextTurn;
       });
       const newSessions = new Map(prev.sessions);
       newSessions.set(params.sessionId, {
@@ -4905,7 +5009,7 @@ export class FlowChatStore {
         dialogTurns,
         turnCatalog: params.turnCatalog,
         totalTurnCount: params.totalTurnCount,
-        loadedTurnCount: dialogTurns.length,
+        loadedTurnCount: canonicalSessionTurns({ dialogTurns }).length,
       });
       return {
         ...prev,
@@ -4933,15 +5037,36 @@ export class FlowChatStore {
   }
 
   public deleteDialogTurn(sessionId: string, dialogTurnId: string): void {
+    let deletedTurn: DialogTurn | undefined;
+    let deletedOrdinal: number | undefined;
+    let shiftLaterOrdinals = false;
     this.setState(prev => {
       const session = prev.sessions.get(sessionId);
       if (!session) return prev;
 
+      deletedTurn = session.dialogTurns.find(turn => turn.id === dialogTurnId);
+      if (!deletedTurn) return prev;
+      deletedOrdinal = resolveDialogTurnIdentity(session, deletedTurn)?.ordinal;
       const updatedDialogTurns = session.dialogTurns.filter(turn => turn.id !== dialogTurnId);
+      const catalogCountsDeletedTurn = resolveStorageTurnIndex(session, deletedTurn) !== undefined;
+      const countedOptimisticTurn = !catalogCountsDeletedTurn
+        && !isProvisionalUsageReportTurn(deletedTurn);
+      shiftLaterOrdinals = countedOptimisticTurn;
+      const nextCanonicalTurnCount = canonicalSessionTurns({ dialogTurns: updatedDialogTurns }).length;
+      const currentTokenUsage = currentTokenUsageAfterSourceRemoval(
+        session,
+        updatedDialogTurns,
+        session.currentTokenUsage?.turnId === dialogTurnId,
+      );
 
       const updatedSession = {
         ...session,
         dialogTurns: updatedDialogTurns,
+        currentTokenUsage,
+        loadedTurnCount: nextCanonicalTurnCount,
+        totalTurnCount: countedOptimisticTurn
+          ? Math.max(nextCanonicalTurnCount, projectedSessionTurnCount(session) - 1)
+          : session.totalTurnCount,
         lastUserDialogMode: this.deriveLastUserDialogMode(updatedDialogTurns),
         lastActiveAt: Date.now()
       };
@@ -4954,6 +5079,86 @@ export class FlowChatStore {
         sessions: newSessions
       };
     });
+    const view = this.sessionHistoryViews.get(sessionId);
+    if (view && deletedTurn && deletedOrdinal !== undefined) {
+      const retainedRanges: LoadedTurnRange[] = [];
+      for (const range of view.loadedRanges) {
+        let groupStartOrdinal: number | undefined;
+        let groupTurns: DialogTurn[] = [];
+        const flushGroup = () => {
+          if (groupStartOrdinal === undefined || groupTurns.length === 0) {
+            return;
+          }
+          retainedRanges.push({
+            ...range,
+            startOrdinal: groupStartOrdinal,
+            endOrdinalExclusive: groupStartOrdinal + groupTurns.length,
+            turns: groupTurns,
+          });
+          groupStartOrdinal = undefined;
+          groupTurns = [];
+        };
+
+        range.turns.forEach((turn, localIndex) => {
+          if (turn.id === dialogTurnId) {
+            flushGroup();
+            return;
+          }
+          const ordinal = range.startOrdinal + localIndex;
+          const nextOrdinal = shiftLaterOrdinals && ordinal > deletedOrdinal!
+            ? ordinal - 1
+            : ordinal;
+          if (
+            groupStartOrdinal !== undefined
+            && nextOrdinal !== groupStartOrdinal + groupTurns.length
+          ) {
+            flushGroup();
+          }
+          groupStartOrdinal ??= nextOrdinal;
+          groupTurns.push(turn);
+        });
+        flushGroup();
+      }
+      view.loadedRanges = retainedRanges;
+
+      if (shiftLaterOrdinals) {
+        const accessTimes = this.sessionHistoryTurnAccessTimes.get(sessionId);
+        if (accessTimes) {
+          const shiftedAccessTimes = new Map<number, number>();
+          for (const [ordinal, accessedAt] of accessTimes) {
+            if (ordinal === deletedOrdinal) {
+              continue;
+            }
+            shiftedAccessTimes.set(
+              ordinal > deletedOrdinal ? ordinal - 1 : ordinal,
+              accessedAt,
+            );
+          }
+          if (shiftedAccessTimes.size > 0) {
+            this.sessionHistoryTurnAccessTimes.set(sessionId, shiftedAccessTimes);
+          } else {
+            this.sessionHistoryTurnAccessTimes.delete(sessionId);
+          }
+        }
+        if (view.pendingTargetOrdinal !== null && view.pendingTargetOrdinal > deletedOrdinal) {
+          view.pendingTargetOrdinal -= 1;
+        }
+        if (view.activeRange) {
+          const startOrdinal = view.activeRange.startOrdinal > deletedOrdinal
+            ? view.activeRange.startOrdinal - 1
+            : view.activeRange.startOrdinal;
+          const endOrdinalExclusive = view.activeRange.endOrdinalExclusive > deletedOrdinal
+            ? view.activeRange.endOrdinalExclusive - 1
+            : view.activeRange.endOrdinalExclusive;
+          view.activeRange = endOrdinalExclusive > startOrdinal
+            ? { ...view.activeRange, startOrdinal, endOrdinalExclusive }
+            : null;
+        }
+      }
+    }
+    if (deletedTurn && !isProvisionalUsageReportTurn(deletedTurn)) {
+      this.seedSessionHistoryLoadedRanges(sessionId, 'live');
+    }
   }
 
   /**
@@ -4968,6 +5173,12 @@ export class FlowChatStore {
 
       const clampedIndex = Math.max(0, Math.min(turnIndex, session.dialogTurns.length));
       const updatedDialogTurns = session.dialogTurns.slice(0, clampedIndex);
+      const removedCurrentUsageSource = Boolean(
+        session.currentTokenUsage?.turnId
+        && session.dialogTurns.slice(clampedIndex).some(
+          turn => turn.id === session.currentTokenUsage?.turnId,
+        ),
+      );
       const hasCompleteHistory = session.isPartial !== true;
       const historyView = this.sessionHistoryViews.get(sessionId);
       const currentCatalog = session.turnCatalog?.sessionId === sessionId
@@ -4985,6 +5196,11 @@ export class FlowChatStore {
       const updatedSession = {
         ...session,
         dialogTurns: updatedDialogTurns,
+        currentTokenUsage: currentTokenUsageAfterSourceRemoval(
+          session,
+          updatedDialogTurns,
+          removedCurrentUsageSource,
+        ),
         ...(hasCompleteHistory ? {
           loadedTurnCount: updatedDialogTurns.length,
           totalTurnCount: updatedDialogTurns.length,
@@ -5067,6 +5283,47 @@ export class FlowChatStore {
         sessions: newSessions
       };
     });
+  }
+
+  /**
+   * Replace a provisional Turn in place so projected counts and cached history
+   * keep one stable ordinal across runtime adoption.
+   */
+  public replaceOptimisticDialogTurn(
+    sessionId: string,
+    optimisticTurnId: string,
+    replacement: DialogTurn,
+  ): boolean {
+    let replaced = false;
+    this.setState(prev => {
+      const session = prev.sessions.get(sessionId);
+      if (!session) return prev;
+      const localIndex = session.dialogTurns.findIndex(turn => turn.id === optimisticTurnId);
+      if (localIndex < 0) return prev;
+
+      const dialogTurns = [...session.dialogTurns];
+      dialogTurns[localIndex] = replacement;
+      const newSessions = new Map(prev.sessions);
+      newSessions.set(sessionId, {
+        ...session,
+        dialogTurns,
+        lastUserDialogMode: this.deriveLastUserDialogMode(dialogTurns),
+        lastActiveAt: Date.now(),
+      });
+      replaced = true;
+      return { ...prev, sessions: newSessions };
+    });
+
+    if (replaced) {
+      const view = this.sessionHistoryViews.get(sessionId);
+      if (view) {
+        view.loadedRanges = view.loadedRanges.map(range => ({
+          ...range,
+          turns: range.turns.map(turn => turn.id === optimisticTurnId ? replacement : turn),
+        }));
+      }
+    }
+    return replaced;
   }
 
   /**
@@ -5454,18 +5711,23 @@ export class FlowChatStore {
 
   public updateTokenUsage(
     sessionId: string, 
-    tokenUsage: { inputTokens: number; outputTokens?: number; totalTokens: number },
+    tokenUsage: Pick<
+      TokenUsage,
+      'inputTokens' | 'outputTokens' | 'totalTokens' | 'turnId' | 'source'
+    >,
     dialogTurnId?: string
   ): void {
     this.setState(prev => {
       const session = prev.sessions.get(sessionId);
       if (!session) return prev;
 
-      const nextTokenUsage = {
+      const nextTokenUsage: TokenUsage = {
         inputTokens: tokenUsage.inputTokens,
         outputTokens: tokenUsage.outputTokens,
         totalTokens: tokenUsage.totalTokens,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        ...(tokenUsage.turnId ? { turnId: tokenUsage.turnId } : {}),
+        ...(tokenUsage.source ? { source: tokenUsage.source } : {}),
       };
       let dialogTurns = session.dialogTurns;
       if (dialogTurnId) {
@@ -5823,7 +6085,14 @@ export class FlowChatStore {
         return;
       }
 
-      const turnIndex = session.dialogTurns.findIndex(t => t.id === turnId);
+      const turnIndex = resolveStorageTurnIndex(session, dialogTurn);
+      if (turnIndex === undefined) {
+        log.debug('Cancelled dialog turn has no storage identity, deferring persistence', {
+          sessionId,
+          turnId,
+        });
+        return;
+      }
       
       const turnData = {
         turnId,
@@ -6107,6 +6376,7 @@ export class FlowChatStore {
           remoteConnectionId,
           remoteSshHost,
         );
+        const persistedCurrentContextUsage = persistedCurrentContextUsageValue(metadata);
 
         this.setState(prev => {
           if (surfaceGeneration !== this.surfaceGeneration) {
@@ -6118,6 +6388,9 @@ export class FlowChatStore {
 
           const rawAgentType = metadata.agentType || 'agentic';
           const validatedAgentType = isValidPersistedAgentType(rawAgentType) ? rawAgentType : 'agentic';
+          const restoredCurrentTokenUsage = isAcpAgentType(validatedAgentType)
+            ? undefined
+            : deriveRestoredCurrentTokenUsage(persistedCurrentContextUsage);
 
           if (rawAgentType !== validatedAgentType) {
             log.warn('Invalid agentType, falling back to agentic', { sessionId: metadata.sessionId, rawAgentType, validatedAgentType });
@@ -6148,6 +6421,7 @@ export class FlowChatStore {
             historyState: 'metadata-only',
             todos: (metadata as any).todos || [],
             maxContextTokens,
+            currentTokenUsage: restoredCurrentTokenUsage,
             mode: validatedAgentType,
             lastUserDialogMode: metadata.lastUserDialogAgentType,
             lastSubmittedMode: metadata.lastSubmittedAgentType,
@@ -6485,6 +6759,7 @@ export class FlowChatStore {
             remoteConnectionId,
             remoteSshHost,
           );
+          const persistedCurrentContextUsage = persistedCurrentContextUsageValue(metadata);
 
           this.setState(prev => {
             if (prev.sessions.has(metadata.sessionId)) {
@@ -6493,6 +6768,9 @@ export class FlowChatStore {
 
             const rawAgentType = metadata.agentType || 'agentic';
             const validatedAgentType = isValidPersistedAgentType(rawAgentType) ? rawAgentType : 'agentic';
+            const restoredCurrentTokenUsage = isAcpAgentType(validatedAgentType)
+              ? undefined
+              : deriveRestoredCurrentTokenUsage(persistedCurrentContextUsage);
 
             if (rawAgentType !== validatedAgentType) {
               log.warn('Invalid agentType, falling back to agentic', { sessionId: metadata.sessionId, rawAgentType, validatedAgentType });
@@ -6523,6 +6801,7 @@ export class FlowChatStore {
               historyState: 'metadata-only',
               todos: (metadata as any).todos || [],
               maxContextTokens,
+              currentTokenUsage: restoredCurrentTokenUsage,
               mode: validatedAgentType,
               lastUserDialogMode: metadata.lastUserDialogAgentType,
               lastSubmittedMode: metadata.lastSubmittedAgentType,
@@ -6702,14 +6981,28 @@ export class FlowChatStore {
         }
       }
 
+      mergedTurns.sort(compareDialogTurnOrder);
       const turnCatalog = restored.turnCatalog?.sessionId === sessionId
         ? selectPreferredTurnCatalog(session.turnCatalog, restored.turnCatalog)
         : session.turnCatalog;
-      if (!turnsChanged && turnCatalog === session.turnCatalog) {
+      const restoredAgentType =
+        restored.session.agentType || session.mode || session.config.agentType;
+      const currentTokenUsage = reconcileRestoreViewCurrentTokenUsage(
+        session.currentTokenUsage,
+        restored.currentContextUsage,
+        mergedTurns,
+        restoredAgentType,
+        snapshotTurns,
+      );
+      if (
+        !turnsChanged
+        && turnCatalog === session.turnCatalog
+        && restoredAgentType === session.mode
+        && currentTokenUsage === session.currentTokenUsage
+      ) {
         return prev;
       }
 
-      mergedTurns.sort(compareDialogTurnOrder);
       const newSessions = new Map(prev.sessions);
       newSessions.set(sessionId, {
         ...session,
@@ -6737,11 +7030,12 @@ export class FlowChatStore {
             ? { reasoningPreset: restored.session.reasoningPreset?.trim() || undefined }
             : {}),
         },
-        mode: restored.session.agentType || session.mode,
+        mode: restoredAgentType,
         lastUserDialogMode:
           restored.session.lastUserDialogAgentType || session.lastUserDialogMode,
         lastSubmittedMode:
           restored.session.lastSubmittedAgentType ?? session.lastSubmittedMode,
+        currentTokenUsage,
       });
       applied = true;
 
@@ -6812,8 +7106,8 @@ export class FlowChatStore {
             historyState: 'ready',
             contextRestoreState: 'ready',
             isPartial: false,
-            loadedTurnCount: session.dialogTurns.length,
-            totalTurnCount: session.dialogTurns.length,
+            loadedTurnCount: canonicalSessionTurns(session).length,
+            totalTurnCount: projectedSessionTurnCount(session),
           });
           return { ...prev, sessions: newSessions };
         });
@@ -6872,6 +7166,7 @@ export class FlowChatStore {
       let restoredTotalTurnCount: number | undefined;
       let restoredTurnCatalog: SessionTurnCatalog | undefined;
       let restoredTiming: SessionViewRestoreTiming | undefined;
+      let restoredCurrentContextUsage: SessionContextUsage | null | undefined;
 
       // Finish or resume relay history import before Core restores its model
       // context. Ordinary local sessions return after one metadata read, while
@@ -7012,6 +7307,7 @@ export class FlowChatStore {
                 ? restored.turnCatalog
                 : undefined;
               restoredTiming = restored.timings;
+              restoredCurrentContextUsage = restored.currentContextUsage;
             } catch (error) {
               if (!isUnsupportedTauriCommandError(error, 'restore_session_view')) {
                 throw error;
@@ -7170,6 +7466,9 @@ export class FlowChatStore {
         const session = prev.sessions.get(sessionId);
         if (!session) return prev;
 
+        const restoredAgentType =
+          restoredSessionInfo?.agentType || session.mode || session.config.agentType;
+
         const updatedSession = {
           ...session,
           dialogTurns,
@@ -7190,10 +7489,16 @@ export class FlowChatStore {
               ? { reasoningPreset: restoredSessionInfo.reasoningPreset?.trim() || undefined }
               : {}),
           },
-          mode: restoredSessionInfo?.agentType || session.mode,
+          mode: restoredAgentType,
           lastUserDialogMode: restoredLastUserDialogMode,
           lastSubmittedMode:
             restoredSessionInfo?.lastSubmittedAgentType ?? session.lastSubmittedMode,
+          currentTokenUsage: reconcileRestoreViewCurrentTokenUsage(
+            session.currentTokenUsage,
+            restoredCurrentContextUsage,
+            dialogTurns,
+            restoredAgentType,
+          ),
         };
         
         const newSessions = new Map(prev.sessions);
@@ -7531,6 +7836,7 @@ export class FlowChatStore {
             timestamp: rawTokenUsage.timestamp,
           }
         : undefined,
+      storageTurnIndex: turn.turnIndex,
       backendTurnIndex: turn.turnIndex,
     };
     });

@@ -108,6 +108,10 @@
       "sessionSearchHintDefault": "輸入關鍵詞，搜尋已開啟工作區內的會話",
       "sessionWorkspaceHint": "位於 {{workspace}}"
     },
+    "githubStar": {
+      "label": "Star",
+      "tooltip": "在 GitHub 上為 BitFun 點個 Star"
+    },
     "displayModes": {
       "pro": "專業模式",
       "assistant": "助理模式",
@@ -174,6 +178,8 @@
       "newExternalAgentSessionShort": "{{agentName}} 會話",
       "newClawSession": "新增 Claw 會話",
       "newPrimaryAssistantSession": "新增主助理會話",
+      "chooseAssistant": "選擇助理",
+      "newAssistantSessionFor": "為 {{assistantName}} 新增會話",
       "modeCode": "Code",
       "modeCowork": "Cowork",
       "noSessions": "暫無會話",

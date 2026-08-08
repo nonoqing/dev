@@ -194,11 +194,23 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     ("add_skill", RemoteWorkspacePolicy::LegacyUnaudited),
     ("analyze_work_state", RemoteWorkspacePolicy::LegacyUnaudited),
     (
+        "apply_external_application_action_v2",
+        RemoteWorkspacePolicy::RemoteUnsupported,
+    ),
+    (
         "apply_external_mcp_import_command",
         RemoteWorkspacePolicy::RemoteUnsupported,
     ),
     (
         "apply_external_source_control_action_command",
+        RemoteWorkspacePolicy::RemoteUnsupported,
+    ),
+    (
+        "get_external_ecosystem_awareness_command",
+        RemoteWorkspacePolicy::RemoteUnsupported,
+    ),
+    (
+        "acknowledge_external_ecosystems_command",
         RemoteWorkspacePolicy::RemoteUnsupported,
     ),
     ("apply_patch", RemoteWorkspacePolicy::LegacyUnaudited),
@@ -518,6 +530,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::WorkspaceAgnostic,
     ),
     (
+        "get_models_dev_catalog_status",
+        RemoteWorkspacePolicy::LocalOnly,
+    ),
+    (
         "get_all_modified_files",
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
@@ -566,6 +582,14 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     (
         "get_directory_children_paginated",
         RemoteWorkspacePolicy::LegacyUnaudited,
+    ),
+    (
+        "get_external_application_review_page_v2",
+        RemoteWorkspacePolicy::RemoteUnsupported,
+    ),
+    (
+        "get_external_application_snapshot_v2",
+        RemoteWorkspacePolicy::RemoteUnsupported,
     ),
     (
         "get_external_hook_catalog",
@@ -672,6 +696,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         "get_opened_workspaces",
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
+    (
+        "get_primary_assistant_workspace",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
     ("get_operation_diff", RemoteWorkspacePolicy::LegacyUnaudited),
     (
         "get_operation_summary",
@@ -706,6 +734,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
     ("get_session_lineage", RemoteWorkspacePolicy::RemoteRouted),
+    (
+        "get_session_permission_mode",
+        RemoteWorkspacePolicy::RemoteRouted,
+    ),
     ("get_session_files", RemoteWorkspacePolicy::LegacyUnaudited),
     (
         "get_session_operations",
@@ -1370,6 +1402,14 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
     (
+        "refresh_models_dev_catalog_now",
+        RemoteWorkspacePolicy::LocalOnly,
+    ),
+    (
+        "reveal_models_dev_cache_directory",
+        RemoteWorkspacePolicy::LocalOnly,
+    ),
+    (
         "refresh_subscription_account",
         RemoteWorkspacePolicy::LocalOnly,
     ),
@@ -1636,6 +1676,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     ),
     ("save_canvas_state", RemoteWorkspacePolicy::LegacyUnaudited),
     (
+        "save_cloud_speech_config",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
+    ),
+    (
         "save_git_repo_history",
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
@@ -1696,6 +1740,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     (
         "set_active_workspace",
         RemoteWorkspacePolicy::LegacyUnaudited,
+    ),
+    (
+        "set_primary_assistant_workspace",
+        RemoteWorkspacePolicy::WorkspaceAgnostic,
     ),
     (
         "set_agent_profile_config",
@@ -1954,6 +2002,10 @@ pub const REMOTE_WORKSPACE_COMMAND_POLICIES: &[(&str, RemoteWorkspacePolicy)] = 
     ("update_miniapp", RemoteWorkspacePolicy::LegacyUnaudited),
     ("update_session_mode", RemoteWorkspacePolicy::RemoteRouted),
     (
+        "update_session_permission_mode",
+        RemoteWorkspacePolicy::RemoteRouted,
+    ),
+    (
         "update_session_model",
         RemoteWorkspacePolicy::LegacyUnaudited,
     ),
@@ -2148,6 +2200,25 @@ mod tests {
             registered_commands().contains(COMMAND),
             "Desktop must register the external-source control command invoked by Web UI"
         );
+    }
+
+    #[test]
+    fn external_application_v2_commands_never_fall_back_to_controller_local_state() {
+        for command in [
+            "get_external_application_snapshot_v2",
+            "get_external_application_review_page_v2",
+            "apply_external_application_action_v2",
+        ] {
+            assert_eq!(
+                remote_workspace_policy(command),
+                Some(RemoteWorkspacePolicy::RemoteUnsupported),
+                "{command} must execute on the workspace Host"
+            );
+            assert!(
+                registered_commands().contains(command),
+                "{command} must be registered by Desktop"
+            );
+        }
     }
 
     /// `LegacyUnaudited` is a frozen backlog: commands may graduate out of it

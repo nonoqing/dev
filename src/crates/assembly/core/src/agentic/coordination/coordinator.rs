@@ -87,7 +87,7 @@ use bitfun_agent_runtime::deep_review::FocusedReviewAssignment;
 use bitfun_agent_runtime::output_surface::{
     supports_inline_markdown_images_for_source, TOOL_CONTEXT_INLINE_MARKDOWN_IMAGE_DISPLAY_KEY,
 };
-use bitfun_agent_runtime::permission::AUTO_APPROVE_ASK_CONTEXT_KEY;
+use bitfun_agent_runtime::permission::{AUTO_APPROVE_ASK_CONTEXT_KEY, PERMISSION_MODE_CONTEXT_KEY};
 use bitfun_agent_runtime::remote_file_delivery::{
     needs_computer_links_for_source, remote_file_delivery_reminder,
     TOOL_CONTEXT_REMOTE_FILE_DELIVERY_KEY,
@@ -101,12 +101,13 @@ use bitfun_observability::domains::{
 use bitfun_observability::{Telemetry, TraceRelation};
 use bitfun_product_domains::external_sources::EcosystemId;
 use bitfun_runtime_ports::{
-    agent_workspace_references_from_metadata, AgentMessageWorkspaceReferencesRequest,
-    AgentSessionComposerUpdate, AgentSessionWorkspaceBinding, AgentThreadGoalDeliveryKind,
-    AgentThreadGoalDeliveryRequest, AgentWorkspaceReference, AgentWorkspaceReferenceKind,
-    AgentWorkspaceReferenceSearchEntry, AgentWorkspaceReferenceSearchRequest,
-    AgentWorkspaceReferenceSearchResult, DelegationPolicy, PermissionDelegationContext,
-    PermissionRuntimeCeiling, RemoteExecPort, SessionStoragePathRequest,
+    agent_workspace_references_from_metadata, resolve_permission_mode,
+    AgentMessageWorkspaceReferencesRequest, AgentSessionComposerUpdate,
+    AgentSessionWorkspaceBinding, AgentThreadGoalDeliveryKind, AgentThreadGoalDeliveryRequest,
+    AgentWorkspaceReference, AgentWorkspaceReferenceKind, AgentWorkspaceReferenceSearchEntry,
+    AgentWorkspaceReferenceSearchRequest, AgentWorkspaceReferenceSearchResult, DelegationPolicy,
+    PermissionDelegationContext, PermissionMode, PermissionModeLayers, PermissionRuntimeCeiling,
+    RemoteExecPort, ResolvedPermissionMode, SessionStoragePathRequest,
     SessionStoragePathResolution, SessionStorePort, SubagentContextMode, TerminalPort, ThreadGoal,
     ThreadGoalContinuationPlan, ThreadGoalStatus,
 };
@@ -360,6 +361,17 @@ fn resolve_subagent_model_selection(
     }
 }
 
+/// Whether a turn belongs to the review phase of a review child session.
+///
+/// Only `CodeReview`/`DeepReview` receive the `deep_review_run_manifest`
+/// context injection (from turn metadata or persisted session metadata).
+/// `ReviewFixer` is intentionally excluded: remediation runs outside the
+/// DeepReview execution policy gates (launching it during a review pass is
+/// rejected until explicit user approval), and its scope comes from the
+/// product-surface remediation prompt rather than the review-phase manifest.
+/// Keep this list in sync with the review session primary agents resolved by
+/// the agent registry (`is_builtin_session_primary_agent`), i.e. add a new
+/// review-phase agent type here, but keep the remediation agent out.
 fn is_review_agent_type(agent_type: &str) -> bool {
     matches!(
         agent_type.to_ascii_lowercase().as_str(),
@@ -2775,6 +2787,7 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
                 snapshot_session_id: None,
                 tags: Vec::new(),
                 custom_metadata: None,
+                current_context_usage: None,
                 relationship: None,
                 todos: None,
                 review_action_state: None,
@@ -3744,6 +3757,22 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
                     child_context.insert(key.to_string(), value.to_string());
                 }
             }
+            // The delegated child runs under the same resolved mode as the
+            // submission that triggered it, so resolve the same three layers
+            // here instead of letting the child fall back to the global
+            // default. The parent runtime ceiling is applied separately and
+            // still bounds the child.
+            let delegated_permission_mode = resolve_submission_permission_mode(
+                permission_mode_from_metadata(Some(&user_message_metadata)),
+                self.session_manager
+                    .get_session(&session_id)
+                    .and_then(|session| session.config.permission_mode),
+                default_permission_mode_from_global_config().await,
+            );
+            child_context.insert(
+                PERMISSION_MODE_CONTEXT_KEY.to_string(),
+                delegated_permission_mode.mode.as_str().to_string(),
+            );
             let request = SubagentExecutionRequest {
                 task_description: prompt.clone(),
                 context_mode: SubagentContextMode::Fresh,
@@ -5830,6 +5859,19 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
                 auto_approve_ask.to_string(),
             );
         }
+        // Resolve the permission mode once per submission. Downstream rounds and
+        // delegated subagents read this value instead of re-resolving the layers
+        // with partial context, so a mid-turn configuration or session change
+        // cannot split one turn across two modes.
+        let submission_permission_mode = resolve_submission_permission_mode(
+            permission_mode_from_metadata(user_message_metadata.as_ref()),
+            session.config.permission_mode,
+            default_permission_mode_from_global_config().await,
+        );
+        context_vars.insert(
+            PERMISSION_MODE_CONTEXT_KEY.to_string(),
+            submission_permission_mode.mode.as_str().to_string(),
+        );
         if needs_computer_links_for_source(submission_policy.trigger_source) {
             context_vars.insert(
                 TOOL_CONTEXT_REMOTE_FILE_DELIVERY_KEY.to_string(),
@@ -11973,8 +12015,11 @@ impl ConversationCoordinator {
         };
         let profile_id = crate::agentic::agents::resolve_mode_config_profile_id(agent_type);
         let agent_profile = global_config.ai.agent_profiles.get(profile_id.as_ref());
+        // An explicit user-authored command keeps the stored global preset; the
+        // session mode belongs to agent turns, not to a command the user typed.
         let permission_policy = resolve_effective_permission_policy(
             &global_config,
+            None,
             &project_rules,
             agent_profile,
             None,
@@ -12797,6 +12842,47 @@ fn btw_session_memory_mode(
     }
 }
 
+/// Reads the user-level default permission mode.
+///
+/// Falling back to `Ask` on a config failure keeps an unreadable configuration
+/// from silently widening permissions.
+async fn default_permission_mode_from_global_config() -> PermissionMode {
+    match crate::service::config::get_global_config_service().await {
+        Ok(service) => service
+            .get_config(None)
+            .await
+            .map(|config: crate::service::config::types::GlobalConfig| {
+                PermissionMode::from_config(&config.tool_permissions)
+            })
+            .unwrap_or(PermissionMode::Ask),
+        Err(_) => PermissionMode::Ask,
+    }
+}
+
+/// Resolves the mode one submission runs with: `turn -> session -> global`.
+///
+/// The result is written into the execution context once so every round, tool
+/// call, and delegated subagent of this turn reads the same decision.
+fn resolve_submission_permission_mode(
+    turn_override: Option<PermissionMode>,
+    session_mode: Option<PermissionMode>,
+    global_default: PermissionMode,
+) -> ResolvedPermissionMode {
+    resolve_permission_mode(
+        PermissionModeLayers::new(global_default)
+            .with_session(session_mode)
+            .with_turn(turn_override),
+    )
+}
+
+/// Reads a one-off mode selection carried by a single submission.
+fn permission_mode_from_metadata(metadata: Option<&serde_json::Value>) -> Option<PermissionMode> {
+    metadata
+        .and_then(|value| value.get(PERMISSION_MODE_CONTEXT_KEY))
+        .and_then(serde_json::Value::as_str)
+        .and_then(PermissionMode::parse)
+}
+
 async fn new_session_memory_mode_from_global_config() -> SessionMemoryMode {
     match crate::service::config::get_global_config_service().await {
         Ok(service) => {
@@ -12882,8 +12968,9 @@ mod tests {
         lineage_post_admission_cancellation_error,
         lineage_session_is_settling_without_active_state, logical_subagent_type_or_runtime,
         merge_prepended_messages_for_turn, normalize_subagent_max_concurrency,
-        resolve_agent_session_create_created_by, resolve_agent_submission_turn_id,
-        resolve_subagent_model_selection, runtime_port_error_preserving_message,
+        permission_mode_from_metadata, resolve_agent_session_create_created_by,
+        resolve_agent_submission_turn_id, resolve_subagent_model_selection,
+        resolve_submission_permission_mode, runtime_port_error_preserving_message,
         runtime_session_summary, runtime_tool_restrictions_for_session_lifetime,
         runtime_transcript_messages_from_turns, session_storage_workspace_locator,
         turn_review_manifest_for_agent, validate_required_lineage_turns_settled,
@@ -13220,9 +13307,9 @@ mod tests {
         AgentSessionCreateRequest, AgentSessionManagementPort, AgentSessionRenameRequest,
         AgentSubmissionPort, AgentSubmissionRequest, AgentSubmissionSource,
         AgentThreadGoalGetRequest, AgentThreadGoalManagementPort, AgentUserShellCommandPort,
-        AgentUserShellCommandRequest, DelegationPolicy, PermissionEffect, PermissionRule,
-        PermissionRuntimeCeiling, PortErrorKind, SessionStoragePathRequest, SubagentContextMode,
-        ThreadGoal, ThreadGoalStatus,
+        AgentUserShellCommandRequest, DelegationPolicy, PermissionEffect, PermissionMode,
+        PermissionRule, PermissionRuntimeCeiling, PortErrorKind, SessionStoragePathRequest,
+        SubagentContextMode, ThreadGoal, ThreadGoalStatus,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -13604,6 +13691,61 @@ mod tests {
             )
             .as_deref(),
             Some("/projects/other")
+        );
+    }
+
+    #[test]
+    fn submission_permission_mode_prefers_turn_then_session_then_global() {
+        use bitfun_runtime_ports::PermissionModeSource;
+
+        let global_only = resolve_submission_permission_mode(None, None, PermissionMode::Ask);
+        assert_eq!(global_only.mode, PermissionMode::Ask);
+        assert_eq!(global_only.source, PermissionModeSource::GlobalDefault);
+
+        // A session override isolates this session from the global default.
+        let session_scoped = resolve_submission_permission_mode(
+            None,
+            Some(PermissionMode::FullAccess),
+            PermissionMode::Ask,
+        );
+        assert_eq!(session_scoped.mode, PermissionMode::FullAccess);
+        assert_eq!(session_scoped.source, PermissionModeSource::Session);
+
+        // A one-off submission selection wins over the session's own mode,
+        // including when it tightens the session back down.
+        let turn_scoped = resolve_submission_permission_mode(
+            Some(PermissionMode::Ask),
+            Some(PermissionMode::FullAccess),
+            PermissionMode::AutoApprove,
+        );
+        assert_eq!(turn_scoped.mode, PermissionMode::Ask);
+        assert_eq!(turn_scoped.source, PermissionModeSource::Turn);
+    }
+
+    #[test]
+    fn submission_metadata_mode_accepts_surface_aliases_and_rejects_unknown_values() {
+        assert_eq!(
+            permission_mode_from_metadata(Some(&serde_json::json!({
+                "permission_mode": "auto",
+            }))),
+            Some(PermissionMode::AutoApprove)
+        );
+        assert_eq!(
+            permission_mode_from_metadata(Some(&serde_json::json!({
+                "permission_mode": "full_access",
+            }))),
+            Some(PermissionMode::FullAccess)
+        );
+        assert_eq!(
+            permission_mode_from_metadata(Some(&serde_json::json!({
+                "permission_mode": "elevated",
+            }))),
+            None
+        );
+        assert_eq!(permission_mode_from_metadata(None), None);
+        assert_eq!(
+            permission_mode_from_metadata(Some(&serde_json::json!({ "other": "ask" }))),
+            None
         );
     }
 
@@ -14780,6 +14922,31 @@ mod tests {
 
         assert!(error.to_string().contains("ownership"));
         assert!(session_manager.get_session("ownership-conflict").is_none());
+    }
+
+    #[tokio::test]
+    async fn review_agent_child_sessions_create_successfully() {
+        let (coordinator, _session_manager) = test_coordinator();
+
+        for agent_type in ["CodeReview", "DeepReview"] {
+            let workspace = tempfile::tempdir().expect("review workspace");
+            let session = coordinator
+                .create_session_with_workspace(
+                    None,
+                    format!("Review child: {agent_type}"),
+                    agent_type.to_string(),
+                    SessionConfig {
+                        workspace_path: Some(workspace.path().to_string_lossy().into_owned()),
+                        ..Default::default()
+                    },
+                    workspace.path().to_string_lossy().into_owned(),
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{agent_type} review child session must create: {error}")
+                });
+            assert_eq!(session.agent_type, agent_type);
+        }
     }
 
     #[tokio::test]

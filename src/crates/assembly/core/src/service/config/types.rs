@@ -78,6 +78,10 @@ pub struct GlobalConfig {
     /// Web UI font size preferences (`get_config` / `set_config` path `font`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font: Option<FontPreferenceSnapshot>,
+    /// Version of the persisted configuration schema. This is intentionally
+    /// independent from the BitFun application version stored in `version`.
+    #[serde(default = "default_config_schema_version")]
+    pub schema_version: u32,
     pub version: String,
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub last_modified: chrono::DateTime<chrono::Utc>,
@@ -337,6 +341,32 @@ impl Default for VoiceInputConfig {
     }
 }
 
+/// Domain request for atomically saving a cloud speech-recognition model and
+/// selecting it for voice input. Text-generation fields are intentionally not
+/// part of this contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCloudSpeechConfigRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_id: Option<String>,
+    pub preset: String,
+    pub name: String,
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_url: Option<String>,
+    pub model_name: String,
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCloudSpeechConfigResult {
+    pub model_id: String,
+    pub created: bool,
+}
+
 /// AI experience configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -518,6 +548,12 @@ pub enum ModelCapability {
     FunctionCalling,
     /// Speech-to-text.
     SpeechRecognition,
+}
+
+pub const CURRENT_CONFIG_SCHEMA_VERSION: u32 = 1;
+
+fn default_config_schema_version() -> u32 {
+    CURRENT_CONFIG_SCHEMA_VERSION
 }
 
 /// Model category (for UI display and filtering).
@@ -1446,10 +1482,21 @@ pub enum SubscriptionProvider {
     Opencode,
 }
 
+/// OpenCode API product selected for a subscription-authenticated model.
+/// Zen and Go share one account credential but use different API namespaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenCodePlan {
+    Zen,
+    Go,
+}
+
 /// Where to obtain the runtime auth material for an `AIModelConfig`.
 ///
 /// Stored on disk as `{"type":"api_key"}` or
 /// `{"type":"subscription","provider":"codex"|"antigravity"|"opencode"}`.
+/// OpenCode models may additionally persist `"plan":"zen"|"go"`; an absent
+/// plan preserves the legacy Zen Chat Completions behavior.
 /// Tokens live in the subscription auth store and are resolved at request time.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1458,7 +1505,11 @@ pub enum AuthConfig {
     #[default]
     ApiKey,
     /// Use BitFun in-app subscription OAuth for the named provider.
-    Subscription { provider: SubscriptionProvider },
+    Subscription {
+        provider: SubscriptionProvider,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<OpenCodePlan>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1580,6 +1631,33 @@ pub struct ConfigValidationResult {
     pub valid: bool,
     pub errors: Vec<ConfigValidationError>,
     pub warnings: Vec<ConfigValidationWarning>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<ConfigDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigDiagnosticSeverity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigDiagnosticRecoverability {
+    None,
+    AutoFix,
+    ModelDisabled,
+    DefaultsUsed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigDiagnostic {
+    pub path: String,
+    pub message: String,
+    pub code: String,
+    pub severity: ConfigDiagnosticSeverity,
+    pub recoverability: ConfigDiagnosticRecoverability,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1613,6 +1691,7 @@ impl Default for GlobalConfig {
             acp_clients: None,
             appearance: AppearanceConfig::default(),
             font: None,
+            schema_version: CURRENT_CONFIG_SCHEMA_VERSION,
             version: "1.0.0".to_string(),
             last_modified: chrono::Utc::now(),
         }
@@ -1884,11 +1963,44 @@ impl Default for MinimapConfig {
 }
 
 impl AIModelConfig {
+    pub fn supports_capability(&self, capability: ModelCapability) -> bool {
+        if self.capabilities.is_empty() {
+            self.default_capabilities_for_category()
+                .contains(&capability)
+        } else {
+            self.capabilities.contains(&capability)
+        }
+    }
+
+    pub fn supports_text_generation(&self) -> bool {
+        self.supports_capability(ModelCapability::TextChat)
+    }
+
+    /// Canonicalizes fields that only have meaning for text-generation
+    /// requests. Returns the names of fields that were cleared.
+    pub fn normalize_inapplicable_generation_fields(&mut self) -> Vec<&'static str> {
+        if self.supports_text_generation() {
+            return Vec::new();
+        }
+
+        let mut cleared = Vec::new();
+        if self.context_window.take().is_some() {
+            cleared.push("context_window");
+        }
+        if self.max_tokens.take().is_some() {
+            cleared.push("max_tokens");
+        }
+        if self.temperature.take().is_some() {
+            cleared.push("temperature");
+        }
+        if self.top_p.take().is_some() {
+            cleared.push("top_p");
+        }
+        cleared
+    }
+
     pub fn supports_image_understanding(&self) -> bool {
-        self.capabilities
-            .iter()
-            .any(|cap| matches!(cap, ModelCapability::ImageUnderstanding))
-            || matches!(self.category, ModelCategory::Multimodal)
+        self.supports_capability(ModelCapability::ImageUnderstanding)
     }
 
     /// Legacy helper that infers the model category from the model name and provider.
@@ -2018,9 +2130,10 @@ impl AIModelConfig {
 mod tests {
     use super::{
         AIConfig, AIExperienceConfig, AIModelConfig, AgentModelDefaultsConfig, AgentProfileConfig,
-        AgentProfileView, AppConfig, AppLoggingConfig, GlobalConfig, MemoryExternalContextPolicy,
-        ModelExchangeTracingMode, NotificationConfig, SubagentBatchExecutionPolicy,
-        SubagentModelSelection, UserSkillGroupsConfig, UserToolGroupsConfig,
+        AgentProfileView, AppConfig, AppLoggingConfig, AuthConfig, GlobalConfig,
+        MemoryExternalContextPolicy, ModelExchangeTracingMode, NotificationConfig, OpenCodePlan,
+        SubagentBatchExecutionPolicy, SubagentModelSelection, SubscriptionProvider,
+        UserSkillGroupsConfig, UserToolGroupsConfig,
     };
     use bitfun_runtime_ports::ToolPermissionConfig;
 
@@ -2031,6 +2144,40 @@ mod tests {
         let config: AppConfig =
             serde_json::from_value(serde_json::json!({})).expect("empty app config should default");
         assert!(!config.prevent_sleep);
+    }
+
+    #[test]
+    fn subscription_auth_preserves_legacy_opencode_and_roundtrips_go_plan() {
+        let legacy: AuthConfig = serde_json::from_value(serde_json::json!({
+            "type": "subscription",
+            "provider": "opencode"
+        }))
+        .expect("legacy OpenCode auth should deserialize");
+        assert_eq!(
+            legacy,
+            AuthConfig::Subscription {
+                provider: SubscriptionProvider::Opencode,
+                plan: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy).expect("legacy auth should serialize"),
+            serde_json::json!({
+                "type": "subscription",
+                "provider": "opencode"
+            })
+        );
+
+        let go = AuthConfig::Subscription {
+            provider: SubscriptionProvider::Opencode,
+            plan: Some(OpenCodePlan::Go),
+        };
+        let serialized = serde_json::to_value(&go).expect("Go auth should serialize");
+        assert_eq!(serialized["plan"], "go");
+        assert_eq!(
+            serde_json::from_value::<AuthConfig>(serialized).expect("Go auth should roundtrip"),
+            go
+        );
     }
 
     #[test]

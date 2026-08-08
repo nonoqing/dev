@@ -37,7 +37,9 @@ mod self_update;
 mod shared_runtime;
 mod shared_tui_backend;
 mod terminal_attention;
+mod tui_account_management;
 mod tui_backend;
+mod tui_worktree_management;
 mod ui;
 
 use anyhow::{anyhow, Result};
@@ -46,7 +48,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use agent::tui_client::{TuiAgentClient, TuiHostCapabilities};
+use agent::tui_client::TuiAgentClient;
 use config::CliConfig;
 use hook_import::HookAction;
 use mcp_import::{McpImportCommand, McpImportOutputFormat};
@@ -90,6 +92,48 @@ pub fn get_mcp_service() -> Option<&'static std::sync::Arc<bitfun_core::service:
     MCP_SERVICE.get()
 }
 
+fn ensure_cli_mcp_service(
+    config_service: Arc<bitfun_core::service::config::ConfigService>,
+) -> Option<Arc<bitfun_core::service::mcp::MCPService>> {
+    if let Some(service) = get_mcp_service() {
+        return Some(service.clone());
+    }
+
+    let service = match bitfun_core::service::mcp::MCPService::new(config_service) {
+        Ok(service) => Arc::new(service),
+        Err(error) => {
+            tracing::warn!("Failed to create MCP service: {}", error);
+            get_mcp_init_status().store(3, Ordering::Relaxed);
+            return None;
+        }
+    };
+
+    if MCP_SERVICE.set(service.clone()).is_err() {
+        return get_mcp_service().cloned();
+    }
+    bitfun_core::service::mcp::set_global_mcp_service(service.clone());
+    get_mcp_init_status().store(1, Ordering::Relaxed);
+
+    // Shared TUI keeps the pre-migration CLI-local MCP compatibility path. It
+    // is intentionally separate from the MCP manager inside Shared Runtime;
+    // this process must not be mistaken for that Runtime's owner.
+    let initializing = service.clone();
+    tokio::spawn(async move {
+        match initializing.server_manager().initialize_all().await {
+            Ok(_) => {
+                tracing::info!("MCP servers initialized successfully");
+                get_mcp_init_status().store(2, Ordering::Relaxed);
+            }
+            Err(error) => {
+                tracing::warn!("Failed to initialize MCP servers: {}", error);
+                get_mcp_init_status().store(3, Ordering::Relaxed);
+            }
+        }
+    });
+
+    Some(service)
+}
+
 #[derive(Parser)]
 #[command(name = "bitfun")]
 #[command(about = "BitFun CLI - AI agent-driven command-line programming assistant", long_about = None)]
@@ -107,6 +151,22 @@ struct Cli {
     /// Automation, desktop, and remote modes remain unchanged.
     #[arg(long, verbatim_doc_comment)]
     shared: bool,
+
+    /// Continue the most recent session (skip startup page)
+    #[arg(long = "continue", conflicts_with = "session")]
+    continue_last: bool,
+
+    /// Open a specific session by ID (or "last" for the most recent)
+    #[arg(long, conflicts_with = "continue_last")]
+    session: Option<String>,
+
+    /// Specify the model ID for this session
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Specify the agent type for this session
+    #[arg(long)]
+    agent: Option<String>,
 }
 
 fn shared_tui_requested(shared: bool, command: &Option<Commands>) -> Result<bool> {
@@ -323,6 +383,24 @@ enum McpAction {
         /// Output format for automation
         #[arg(long, value_enum, default_value_t = McpImportOutputFormat::Text)]
         format: McpImportOutputFormat,
+    },
+    /// Add an MCP server (three-step wizard: name, type, command/URL)
+    Add {
+        /// Step 1: server name (also used as id; no spaces)
+        #[arg(long)]
+        name: Option<String>,
+        /// Step 2: server type — accepts `local` or `remote`
+        #[arg(long, value_parser = ["local", "remote"])]
+        r#type: Option<String>,
+        /// Step 3: launch command for a local server (e.g. `npx -y @modelcontextprotocol/server-xxx`)
+        #[arg(long)]
+        command: Option<String>,
+        /// Step 3: server URL for a remote server
+        #[arg(long)]
+        url: Option<String>,
+        /// Skip interactive prompts for missing fields; error instead
+        #[arg(long)]
+        non_interactive: bool,
     },
 }
 
@@ -802,38 +880,10 @@ async fn initialize_core_services_for_deployment(
         }
     }
 
-    // Initialize MCP service in background (non-blocking)
+    // Initialize MCP service in background (non-blocking).
     if bootstrap_profile.starts_mcp() {
-        if let Some(ref cfg_svc) = config_service {
-            match bitfun_core::service::mcp::MCPService::new(cfg_svc.clone()) {
-                Ok(mcp_service) => {
-                    let mcp_service = std::sync::Arc::new(mcp_service);
-                    MCP_SERVICE.set(mcp_service.clone()).ok();
-                    bitfun_core::service::mcp::set_global_mcp_service(mcp_service.clone());
-
-                    // Mark as in progress
-                    get_mcp_init_status().store(1, Ordering::Relaxed);
-
-                    // Background async initialization
-                    tokio::spawn(async move {
-                        let result = mcp_service.server_manager().initialize_all().await;
-                        match result {
-                            Ok(_) => {
-                                tracing::info!("MCP servers initialized successfully");
-                                get_mcp_init_status().store(2, Ordering::Relaxed);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to initialize MCP servers: {}", e);
-                                get_mcp_init_status().store(3, Ordering::Relaxed);
-                            }
-                        }
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create MCP service: {}", e);
-                    get_mcp_init_status().store(3, Ordering::Relaxed);
-                }
-            }
+        if let Some(config_service) = config_service {
+            ensure_cli_mcp_service(config_service);
         }
     }
 
@@ -859,6 +909,9 @@ async fn run_interactive(
     default_agent: String,
     _workspace_str: String,
     shared: bool,
+    agent_override: Option<String>,
+    model_id: Option<String>,
+    session_override: Option<String>,
 ) -> Result<()> {
     use ui::startup::{StartupPage, StartupResult};
 
@@ -896,21 +949,22 @@ async fn run_interactive(
             .as_ref()
             .expect("Embedded App Server should be started with the Runtime")
             .backend();
-        let host: Arc<dyn TuiHostCapabilities> =
-            Arc::new(embedded_app_server::EmbeddedTuiHostCapabilities);
         Arc::new(TuiAgentClient::new(
             backend,
-            host,
             Some(workspace_path.clone()),
             false,
             runtime.approval_policy(),
         ))
     } else {
         let client = shared_runtime::connect_or_start(&workspace_path).await?;
-        let backend: Arc<dyn tui_backend::TuiBackend> =
-            Arc::new(shared_tui_backend::SharedTuiBackend::new(client.clone()));
-        let host: Arc<dyn TuiHostCapabilities> =
-            Arc::new(shared_tui_backend::SharedTuiHostCapabilities::new(client));
+        let config_service = bitfun_core::service::config::get_global_config_service()
+            .await
+            .map_err(|error| anyhow!("Failed to load Shared TUI management config: {error}"))?;
+        ensure_cli_mcp_service(config_service);
+        let management = Arc::new(bitfun_app_server::AppManagementService::load().await?);
+        let backend: Arc<dyn tui_backend::TuiBackend> = Arc::new(
+            shared_tui_backend::SharedTuiBackend::new(client, management),
+        );
         let backend_initialized = backend
             .initialize(bitfun_app_server_protocol::app::InitializeRequest {
                 protocol_version: bitfun_app_server_protocol::PROTOCOL_VERSION,
@@ -926,25 +980,11 @@ async fn run_interactive(
         backend.health().await?;
         Arc::new(TuiAgentClient::new(
             backend,
-            host,
             Some(workspace_path.clone()),
             true,
             runtime::approval::CliApprovalPolicy::Ask,
         ))
     };
-    let compatibility = runtime
-        .as_ref()
-        .map(|runtime| runtime.compatibility().clone());
-    if !shared {
-        if let Err(error) =
-            bitfun_core::external_sources::ensure_external_source_workspace_snapshot(Some(
-                &workspace_path,
-            ))
-            .await
-        {
-            tracing::warn!("Failed to initialize external agent sources: {error}");
-        }
-    }
     // 3.5 Restore persisted account session (if any)
     if !shared {
         if let Some(user_id) = account::try_restore_session().await {
@@ -969,20 +1009,51 @@ async fn run_interactive(
         account_sync::start_settings_sync_loop();
     }
 
+    // Resolve agent override: validate against the agent registry AFTER core services init
+    let effective_agent = if let Some(ref override_val) = agent_override {
+        match resolve_agent_override(override_val).await {
+            Ok(valid_id) => valid_id,
+            Err(warning) => {
+                eprintln!("{warning}");
+                default_agent.clone()
+            }
+        }
+    } else {
+        default_agent.clone()
+    };
+
+    // If --continue or --session was given, skip the startup page and go directly
+    // to chat with the resolved session.
+    if let Some(ref session_spec) = session_override {
+        let restore_session_id = resolve_startup_session_override(&agent, session_spec).await?;
+
+        let mut chat_mode = ChatMode::new(config, effective_agent, workspace, agent)
+            .with_restore_session(restore_session_id);
+        if let Some(mid) = model_id {
+            chat_mode = chat_mode.with_model(mid);
+        }
+        let chat_result = chat_mode.run(Some(terminal));
+
+        if !shared {
+            shutdown_mcp_servers().await;
+        }
+        let _exit_reason = chat_result?;
+        println!("Goodbye!");
+        return Ok(());
+    }
+
     // 4. Show startup page (with full command support)
     let mut startup_page = StartupPage::new(
         config,
         Arc::clone(&agent),
-        compatibility.clone(),
-        default_agent,
+        effective_agent,
         workspace.clone(),
     );
+    startup_page.set_model_override(model_id.clone());
     let startup_result = startup_page.run(&mut terminal)?;
 
     if let StartupResult::Exit = startup_result {
-        if !shared {
-            shutdown_mcp_servers().await;
-        }
+        shutdown_mcp_servers().await;
         ui::restore_terminal(terminal)?;
         println!("Goodbye!");
         return Ok(());
@@ -1006,23 +1077,58 @@ async fn run_interactive(
     // Use the current project workspace selected at process start.
     let workspace = startup_page.workspace();
     let config = startup_page.config().clone();
-    let mut chat_mode = ChatMode::new(config, agent_type, workspace, agent, compatibility);
+    let mut chat_mode = ChatMode::new(config, agent_type, workspace, agent);
     if let Some(session_id) = restore_session_id {
         chat_mode = chat_mode.with_restore_session(session_id);
     }
     if let Some(prompt) = initial_prompt {
         chat_mode = chat_mode.with_initial_prompt(prompt);
     }
+    if let Some(mid) = model_id {
+        chat_mode = chat_mode.with_model(mid);
+    }
     let chat_result = chat_mode.run(Some(terminal));
 
     // 6. Cleanup, including fatal event-stream exits.
-    if !shared {
-        shutdown_mcp_servers().await;
-    }
+    shutdown_mcp_servers().await;
     let _exit_reason = chat_result?;
     println!("Goodbye!");
 
     Ok(())
+}
+
+/// Resolve a `--session` / `--continue` override to a concrete session ID.
+/// "last" (or empty for --continue) resolves to the most recent session.
+async fn resolve_startup_session_override(
+    agent: &Arc<TuiAgentClient>,
+    session_spec: &str,
+) -> Result<String> {
+    if session_spec == "last" || session_spec.is_empty() {
+        let sessions = agent.list_sessions().await?;
+        return sessions
+            .first()
+            .map(|s| s.session_id.clone())
+            .ok_or_else(|| anyhow!("No history sessions for current project"));
+    }
+    bitfun_agent_runtime::session_control::validate_session_id(session_spec)
+        .map_err(anyhow::Error::msg)?;
+    Ok(session_spec.to_string())
+}
+
+/// Validate an agent override against the agent registry.
+/// Returns the valid agent ID, or an error with a warning message.
+async fn resolve_agent_override(agent_override: &str) -> std::result::Result<String, String> {
+    let registry = bitfun_core::agentic::get_agent_registry();
+    let modes = registry.get_modes_info().await;
+    if modes.iter().any(|m| m.id == agent_override) {
+        Ok(agent_override.to_string())
+    } else {
+        let available: Vec<&str> = modes.iter().map(|m| m.id.as_str()).collect();
+        Err(format!(
+            "Warning: Agent '{agent_override}' not found. Available: {}. Using default.",
+            available.join(", ")
+        ))
+    }
 }
 
 // ======================== Main ========================
@@ -1166,7 +1272,16 @@ async fn run_cli() -> Result<()> {
     match cli.command {
         Some(Commands::Chat { agent, .. }) => {
             // Interactive mode with startup page, scoped to the current directory.
-            run_interactive(config, agent, ".".to_string(), use_shared_runtime).await?;
+            run_interactive(
+                config,
+                agent,
+                ".".to_string(),
+                use_shared_runtime,
+                cli.agent.clone(),
+                cli.model.clone(),
+                None,
+            )
+            .await?;
         }
 
         Some(Commands::SharedRuntime {
@@ -1264,6 +1379,22 @@ async fn run_cli() -> Result<()> {
                     candidates: candidate,
                     native_id,
                     format,
+                })
+                .await?;
+            }
+            Some(McpAction::Add {
+                name,
+                r#type,
+                command,
+                url,
+                non_interactive,
+            }) => {
+                management::add_mcp_server(management::McpAddInput {
+                    name,
+                    r#type,
+                    command,
+                    url,
+                    non_interactive,
                 })
                 .await?;
             }
@@ -1411,7 +1542,24 @@ async fn run_cli() -> Result<()> {
             let workspace_str = ".".to_string();
 
             let default_agent = config.behavior.default_agent.clone();
-            run_interactive(config, default_agent, workspace_str, use_shared_runtime).await?;
+
+            // Resolve --continue / --session into a session override spec.
+            let session_override = if cli.continue_last {
+                Some("last".to_string())
+            } else {
+                cli.session.clone()
+            };
+
+            run_interactive(
+                config,
+                default_agent,
+                workspace_str,
+                use_shared_runtime,
+                cli.agent.clone(),
+                cli.model.clone(),
+                session_override,
+            )
+            .await?;
         }
     }
 
@@ -1491,16 +1639,12 @@ async fn run_interactive_with_session(
     let workspace_path = runtime.workspace_root().to_path_buf();
     let workspace = Some(workspace_path.to_string_lossy().to_string());
     let embedded_app_server = embedded_app_server::EmbeddedAppServerHost::start(&runtime).await?;
-    let host: Arc<dyn TuiHostCapabilities> =
-        Arc::new(embedded_app_server::EmbeddedTuiHostCapabilities);
     let agent = Arc::new(TuiAgentClient::new(
         embedded_app_server.backend(),
-        host,
         Some(workspace_path),
         false,
         runtime.approval_policy(),
     ));
-    let compatibility = runtime.compatibility().clone();
     let sessions = agent.list_sessions().await?;
     let agent_type = sessions
         .iter()
@@ -1513,8 +1657,8 @@ async fn run_interactive_with_session(
             )
         })?;
 
-    let mut chat_mode = ChatMode::new(config, agent_type, workspace, agent, Some(compatibility))
-        .with_restore_session(session_id);
+    let mut chat_mode =
+        ChatMode::new(config, agent_type, workspace, agent).with_restore_session(session_id);
     let run_result = chat_mode.run(Some(terminal));
 
     shutdown_mcp_servers().await;

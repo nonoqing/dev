@@ -4,18 +4,18 @@
 
 ![BitFun](./png/BitFun_title.png)
 
-### 开源桌面 AI Agent —— 每个任务，都给你一个能打开的应用
+### 桌面 AI Agent —— 每个任务，都给你一个能打开的应用
 
-能写代码、能做文档、能操控桌面。小应用、Runtime、多设备互控的服务器，全部归你。MIT。
+能写代码、能做文档、能操控桌面，并提供小应用、Rust Runtime 和可自部署的多设备互控服务器。
 
-[**⬇ 下载 macOS · Windows · Linux 版**](https://github.com/GCWing/BitFun/releases/latest)
+[**⬇ 下载 macOS · Windows · Linux 版**](https://github.com/GCWing/BitFun/releases/latest) · [校验下载](./docs/verify-downloads.zh-CN.md)
 
-[官网](https://openbitfun.com/) · [文档](./docs) · [讨论区](https://github.com/GCWing/BitFun/discussions) · [参与贡献](./CONTRIBUTING_CN.md)
+[官网](https://openbitfun.com/) · [快速开始](#第一次运行) · [安全策略](./SECURITY_CN.md) · [讨论区](https://github.com/GCWing/BitFun/discussions) · [参与贡献](./CONTRIBUTING_CN.md)
 
 [![GitHub release](https://img.shields.io/github/v/release/GCWing/BitFun?style=flat-square&color=blue)](https://github.com/GCWing/BitFun/releases)
 [![Downloads](https://img.shields.io/github/downloads/GCWing/BitFun/total?style=flat-square&color=brightgreen)](https://github.com/GCWing/BitFun/releases)
 [![Stars](https://img.shields.io/github/stars/GCWing/BitFun?style=flat-square&color=yellow)](https://github.com/GCWing/BitFun/stargazers)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](https://github.com/GCWing/BitFun/blob/main/LICENSE)
+[![Core code: MIT](https://img.shields.io/badge/core_code-MIT-yellow?style=flat-square)](https://github.com/GCWing/BitFun/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue?style=flat-square)](https://github.com/GCWing/BitFun/releases)
 
 [![Trendshift](https://trendshift.io/api/badge/repositories/44672)](https://trendshift.io/repositories/44672)
@@ -36,11 +36,11 @@
 | **Agentic Mini App** | 为任务生成专属界面——图表、看板、表单、面板——对话绑定该界面的实时状态 |
 | **自部署多设备互联互控** | 账号登录、跨设备会话同步、设备间操控，全部走你自己部署的 relay。零知识加密，不经第三方云 |
 | **编码交付** | 在真实 Git 仓库里规划、改代码、跑测试、提交。Agentic、Plan、Debug、Deep Review、长程任务 |
-| **办公交付** | 调研、写作、PPT、DOCX、XLSX、PDF、会议纪要、报告 |
+| **办公交付** | 调研、写作、演示文稿、会议纪要、报告 |
 | **桌面执行层** | 浏览器、终端、桌面软件、文件系统、远程工作区 |
 | **四层可定制** | 自定义 Agent → MCP / Skills / Hooks → Mini App → 源码级改造 |
 | **性能** | KV Cache 平均命中率 98.67%；flashgrep 在千万行仓库上搜索平均快约 36 倍 |
-| **跨平台开源** | Windows、macOS、Linux 三端。MIT。模型自选，不绑定厂商 |
+| **跨平台、模型自选** | Windows、macOS、Linux 三端，不绑定模型厂商 |
 
 ---
 
@@ -49,6 +49,8 @@
 **Agentic Mini App。** 多数 Agent 把所有任务都挤进同一个对话框，BitFun 选择为任务造一个专属界面——图表、看板、表单、面板——并让对话绑定这个界面的实时状态。你问的是眼前看到的东西，不必再把它复述一遍。社区已经做出从行情面板到各类垂直领域工具的版本。
 
 ![小应用 Gallery](./png/miniapps_gallery_CN.png)
+
+[浏览公开 Mini App Gallery →](https://market.openbitfun.com/miniapp/)
 
 **自部署的多设备互联互控。** 账号登录、跨设备会话与配置同步、用一台设备操控另一台已登录设备，全部走**你自己部署**的 relay，不经任何第三方云中转——这往往直接决定了它在企业内网里能不能用。relay 是零知识设计：密钥在客户端本地派生，服务端只保存 Argon2id 哈希和 AES-GCM 封装后的材料。
 
@@ -73,6 +75,13 @@ pnpm run desktop:dev
 
 前置依赖：[Node.js](https://nodejs.org/) 22.12+（推荐 LTS）、[pnpm](https://pnpm.io/) 10.15.0（建议通过 Corepack 使用）、[Rust 工具链](https://rustup.rs/)、[Tauri 前置依赖](https://v2.tauri.app/start/prerequisites/)。更多说明见 [CONTRIBUTING_CN.md](./CONTRIBUTING_CN.md)。
 
+### 第一次运行
+
+1. 启动 BitFun，在欢迎页点击**打开**，选择一个项目文件夹。
+2. 打开**更多选项（…）→ 设置 → 模型 → 创建第一个配置**。
+3. 选择服务商，填写 API Key，选择一个或多个模型，然后点击**保存**。第一个保存的模型会自动成为主模型，并自动测试连接。
+4. 回到**会话**页，输入一个具体任务，按 Enter 或点击**发送**。
+
 ---
 
 ## 你可以把什么交给 BitFun
@@ -82,7 +91,7 @@ pnpm run desktop:dev
 | 场景 | 目标交付 | 典型能力 |
 | --- | --- | --- |
 | **编码** | 从真实仓库推进到可合并结果。 | Agentic、Plan、Debug、测试、Git、Deep Review、长程任务、Benchmark。 |
-| **办公** | 从资料推进到可交付文档。 | Research、PPT、DOCX、XLSX、PDF、总结、写作、会议纪要、报告。 |
+| **办公** | 从资料推进到实用的文字和视觉交付物。 | 调研、演示文稿、总结、写作、会议纪要、报告。 |
 
 **通用能力**
 
@@ -99,7 +108,7 @@ pnpm run desktop:dev
 > [!NOTE]
 > 当前数据为每个 case 跑 1 次得到的 BitFun 初始评测结果。评测会受到任务抽样、模型版本、运行环境和单次执行偶然性的影响，存在一定波动；这组数据仅用于说明当前 Agent 已具备可用的基础竞争力，并不代表固定排名或最终上限。后续会持续优化并放出完整评测详情。
 
-**1. 完成效果** —— BitFun 在 **SWE-Bench-Pro**（复杂软件工程）和 **SWE-Bench-Verified**（人工验证的 GitHub issue 修复）上均领先 Open Code 与 Claude Code。
+**1. 初始完成效果快照** —— 下图对比了 **SWE-Bench-Pro**（复杂软件工程）和 **SWE-Bench-Verified**（人工验证的 GitHub issue 修复）当前的单次运行结果。
 
 ![Agent benchmark scores](./png/agent_benchmark_scores.svg)
 
@@ -160,5 +169,5 @@ BitFun 的扩展路径从轻到重连续展开：
 ## 声明
 
 1. 本项目为业余时间探索、研究构建下一代人机协同交互，非商用盈利项目。
-2. 本项目 97%+ 由 Vibe Coding 完成，代码问题欢迎指正，也欢迎通过 AI 进行重构优化。
+2. AI 辅助开发是本项目工作流的一部分。贡献以代码和验证结果为准；AI 辅助 PR 请说明测试程度，详见 [CONTRIBUTING_CN.md](./CONTRIBUTING_CN.md)。
 3. 本项目依赖和参考了众多开源软件。感谢所有开源作者。如侵犯您的相关权益，请联系我们整改。

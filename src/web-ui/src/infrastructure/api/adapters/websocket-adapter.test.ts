@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AGENT_COMMAND_SCHEMA,
   decodeWsNotification,
   decodeResponseBody,
   encodeRequestBody,
   resolveWsMethod,
+  WebSocketTransportAdapter,
 } from './websocket-adapter';
 import type {
   SubmitDialogTurnBody,
@@ -107,6 +108,10 @@ describe('resolveWsMethod', () => {
       'config/resetAgentProfileConfig'
     );
     expect(resolveWsMethod('set_config')).toBe('config/setConfig');
+    expect(resolveWsMethod('save_cloud_speech_config')).toBe(
+      'config/saveCloudSpeechConfig'
+    );
+    expect(resolveWsMethod('validate_config')).toBe('config/validateConfig');
     expect(resolveWsMethod('i18n_get_current_language')).toBe(
       'i18n/getCurrentLanguage'
     );
@@ -133,11 +138,12 @@ describe('resolveWsMethod', () => {
     // Runtime sanity: the schema entry carries the method string and the table
     // covers the schema methods (key count is stable; ordering is not pinned
     // because the table is a plain object). Track B Batch 1 added config write +
-    // i18n and the P0 Session/Config control plane, raising the count to 31.
+    // i18n and the P0 Session/Config control plane. Atomic cloud-speech save
+    // and config validation raise the count to 33.
     expect(AGENT_COMMAND_SCHEMA.start_dialog_turn.method).toBe(
       'agent/submitDialogTurn'
     );
-    expect(Object.keys(AGENT_COMMAND_SCHEMA).length).toBe(31);
+    expect(Object.keys(AGENT_COMMAND_SCHEMA).length).toBe(33);
 
     // Touch the locals so noUnusedLocals does not flag them under vitest's
     // transformed build (tsc --noEmit is the real gate; this is belt-and-suspenders).
@@ -330,5 +336,63 @@ describe('decodeResponseBody', () => {
     const result = { foo: 'bar' };
     expect(decodeResponseBody('some_unknown_action', result)).toBe(result);
     expect(decodeResponseBody('get_config', result)).toBe(result);
+  });
+});
+
+describe('WebSocketTransportAdapter reconnect lifecycle', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('cancels a scheduled reconnect when explicitly disconnected', async () => {
+    vi.useFakeTimers();
+
+    const sockets: MockWebSocket[] = [];
+    class MockWebSocket {
+      static readonly OPEN = 1;
+
+      readyState = 0;
+      onopen: ((event: Event) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+
+      constructor(readonly url: string) {
+        sockets.push(this);
+      }
+
+      open(): void {
+        this.readyState = MockWebSocket.OPEN;
+        this.onopen?.({} as Event);
+      }
+
+      closeFromServer(): void {
+        this.readyState = 3;
+        this.onclose?.({} as CloseEvent);
+      }
+
+      close(): void {
+        this.readyState = 3;
+        this.onclose?.({} as CloseEvent);
+      }
+
+      send(): void {}
+    }
+
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const adapter = new WebSocketTransportAdapter('ws://example.test/ws');
+    const connection = adapter.connect();
+
+    sockets[0].open();
+    await connection;
+    sockets[0].closeFromServer();
+    expect(vi.getTimerCount()).toBe(1);
+
+    await adapter.disconnect();
+    expect(vi.getTimerCount()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets).toHaveLength(1);
   });
 });

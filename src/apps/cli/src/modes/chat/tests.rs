@@ -11,7 +11,8 @@ mod tests {
         command_route, consume_selected_native_command_once, context_compression_tool_event,
         extension_command_help_request, external_agent_attention, external_agent_diagnostic_lines,
         external_agent_pending_notice_key, external_agent_result_is_stale,
-        external_agent_review_text, external_command_projections, external_control_review_text,
+        external_agent_review_text, external_command_projections,
+        external_control_read_only_review_text, external_control_review_text,
         external_hook_help_text, external_integration_policy_lines,
         external_operation_error_status, external_tool_mutation_result_label,
         external_tool_pending_notice_key, external_tool_result_is_stale, external_tool_review_text,
@@ -41,24 +42,37 @@ mod tests {
     use crate::ui::chat::ChatView;
     use crate::ui::command_menu::{ExternalCommandProjection, NativeCommandCollisionProjection};
     use crate::ui::theme::Theme;
-    use bitfun_core::external_hooks::ExternalHookCatalogSnapshotV1;
-    use bitfun_core::external_sources::{
-        native_prompt_command_conflict_key, ExternalSourceAssetKind, ExternalSourceCatalogSnapshot,
-        ExternalSourceControlSnapshotV1, ExternalSourceDiagnostic,
-        ExternalSourceDiagnosticSeverity, ExternalSourceOperationError,
-        ExternalSourceOperationErrorCode, ExternalSubagentActivationState,
-        ExternalToolActivationState,
-    };
-
-    use bitfun_core::native_hooks::{
-        NativeHookFileView, NativeHookHandlerView, NativeHookOverview, NativeHookRuleView,
+    use bitfun_app_server_protocol::hook::{
+        NativeHookFileSummary as NativeHookFileView,
+        NativeHookHandlerSummary as NativeHookHandlerView, NativeHookOverview,
+        NativeHookRuleSummary as NativeHookRuleView,
     };
     use bitfun_events::{AgenticEvent, ToolEventData};
-    use bitfun_product_domains::external_sources::ExternalSourceScope;
-    use bitfun_product_domains::external_subagents::ExternalSubagentModelBindingTarget;
+    use bitfun_product_domains::external_hook_catalog::{
+        ExternalHookCatalogEntry, ExternalHookCatalogSnapshotV1, ExternalHookHandlerKind,
+        ExternalHookMatcherSummary, ExternalHookNativeActivation, ExternalHookProjectionStatus,
+    };
+    use bitfun_product_domains::external_source_control::ExternalSourceControlSnapshotV1;
+    use bitfun_product_domains::external_sources::{
+        native_prompt_command_conflict_key, ExternalSourceAssetKind,
+        ExternalSourceCatalogSnapshot as RawExternalSourceCatalogSnapshot,
+        ExternalSourceDiagnostic, ExternalSourceDiagnosticSeverity, ExternalSourceOperationError,
+        ExternalSourceOperationErrorCode,
+        ExternalSourcePublicSnapshot as ExternalSourceCatalogSnapshot, ExternalSourceScope,
+        ExternalToolActivationState,
+    };
+    use bitfun_product_domains::external_subagents::{
+        ExternalSubagentActivationState, ExternalSubagentModelBindingTarget,
+    };
     use bitfun_runtime_ports::AgentContextReloadTarget;
     use crossterm::event::Event;
     use std::collections::{BTreeMap, BTreeSet};
+
+    fn public_external_source_snapshot(value: serde_json::Value) -> ExternalSourceCatalogSnapshot {
+        let snapshot: RawExternalSourceCatalogSnapshot =
+            serde_json::from_value(value).expect("parse raw external source test snapshot");
+        snapshot.into()
+    }
 
     #[test]
     fn explicit_same_id_agent_selection_rebinds_through_the_runtime_owner() {
@@ -220,6 +234,13 @@ mod tests {
         assert!(text.contains("source disable <source-key>"));
         assert!(text.contains("Tools: 2 items, 1 review, 0 conflicts, inactive"));
         assert!(text.contains("/extensions safe-mode off"));
+
+        let read_only = external_control_read_only_review_text(&control);
+        assert!(read_only.contains("Read-only compatibility status"));
+        assert!(read_only.contains("/extensions refresh"));
+        assert!(!read_only.contains("/extensions safe-mode"));
+        assert!(!read_only.contains("source enable <source-key>"));
+        assert!(!read_only.contains("source disable <source-key>"));
     }
 
     #[test]
@@ -271,7 +292,7 @@ mod tests {
     }
 
     fn external_tool_review_snapshot() -> ExternalSourceCatalogSnapshot {
-        serde_json::from_value(serde_json::json!({
+        public_external_source_snapshot(serde_json::json!({
             "generation": 3,
             "discoveryPending": false,
             "sources": [{
@@ -482,7 +503,6 @@ mod tests {
                 "source": { "providerId": "opencode.tools", "sourceId": "project" }
             }]
         }))
-        .unwrap()
     }
 
     #[test]
@@ -880,26 +900,26 @@ mod tests {
             project_hooks_enabled: false,
             files: vec![
                 NativeHookFileView {
-                    scope: "user",
-                    path: std::path::PathBuf::from("/home/u/.config/bitfun/config/hooks.json"),
+                    scope: "user".to_string(),
+                    location: "<user-config>/config/hooks.json".to_string(),
                     exists: true,
                     loaded: true,
                 },
                 NativeHookFileView {
-                    scope: "project",
-                    path: std::path::PathBuf::from("/ws/.bitfun/config/hooks.json"),
+                    scope: "project".to_string(),
+                    location: "<workspace>/.bitfun/config/hooks.json".to_string(),
                     exists: true,
                     loaded: false,
                 },
             ],
             rules: vec![NativeHookRuleView {
-                event: "PreToolUse",
+                event: "PreToolUse".to_string(),
                 matcher: "Bash".to_string(),
                 matcher_is_valid: true,
-                scope: "user",
-                source: "/home/u/.config/bitfun/config/hooks.json".to_string(),
+                scope: "user".to_string(),
                 handlers: vec![NativeHookHandlerView {
-                    command: "jq -r '.tool_input.command' >> ~/log".to_string(),
+                    command_summary: "jq -r '.tool_input.command' >> ~/log".to_string(),
+                    command_truncated: false,
                     timeout_seconds: 600,
                     status_message: None,
                 }],
@@ -1051,21 +1071,17 @@ mod tests {
             }))
             .unwrap();
         snapshot.entries = (0..105)
-            .map(
-                |index| bitfun_core::external_hooks::ExternalHookCatalogEntry {
-                    stable_key: format!("test-{index}"),
-                    source: snapshot.sources[0].key.clone(),
-                    native_event: format!("Event{index}"),
-                    matcher: bitfun_core::external_hooks::ExternalHookMatcherSummary::Any,
-                    handler_kind: bitfun_core::external_hooks::ExternalHookHandlerKind::Command,
-                    projection_status:
-                        bitfun_core::external_hooks::ExternalHookProjectionStatus::NativeOnly,
-                    native_activation:
-                        bitfun_core::external_hooks::ExternalHookNativeActivation::Unknown,
-                    mapping: None,
-                    content_version: format!("entry-v{index}"),
-                },
-            )
+            .map(|index| ExternalHookCatalogEntry {
+                stable_key: format!("test-{index}"),
+                source: snapshot.sources[0].key.clone(),
+                native_event: format!("Event{index}"),
+                matcher: ExternalHookMatcherSummary::Any,
+                handler_kind: ExternalHookHandlerKind::Command,
+                projection_status: ExternalHookProjectionStatus::NativeOnly,
+                native_activation: ExternalHookNativeActivation::Unknown,
+                mapping: None,
+                content_version: format!("entry-v{index}"),
+            })
             .collect();
 
         let text = render_external_hook_catalog(&snapshot);
@@ -1076,7 +1092,7 @@ mod tests {
 
     #[test]
     fn unresolved_provider_conflicts_expose_explicit_cli_choices() {
-        let snapshot: ExternalSourceCatalogSnapshot = serde_json::from_value(serde_json::json!({
+        let snapshot = public_external_source_snapshot(serde_json::json!({
             "generation": 1,
             "discoveryPending": false,
             "sources": [
@@ -1140,8 +1156,7 @@ mod tests {
                     }
                 ]
             }]
-        }))
-        .unwrap();
+        }));
 
         let projections = external_command_projections(&snapshot, &BTreeMap::new());
 
@@ -2191,13 +2206,16 @@ mod tests {
     }
 
     #[test]
-    fn shared_chat_status_separates_session_selection_from_management() {
+    fn shared_chat_status_describes_local_compatibility_management() {
         assert!(SHARED_TUI_CHAT_STATUS.contains("current Session Agent mode"));
-        assert!(SHARED_TUI_CHAT_STATUS.contains("current Session model"));
+        assert!(!SHARED_TUI_CHAT_STATUS.contains("current Session model"));
         assert!(SHARED_TUI_CHAT_STATUS.contains("current Session name"));
         assert!(SHARED_TUI_CHAT_STATUS.contains("/reload [skills|instructions]"));
-        assert!(SHARED_TUI_CHAT_STATUS.contains("Agent/Subagent management"));
-        assert!(SHARED_TUI_CHAT_STATUS.contains("model management remains Embedded"));
+        assert!(SHARED_TUI_CHAT_STATUS.contains("Model, Skill, Subagent, and MCP management"));
+        assert!(SHARED_TUI_CHAT_STATUS.contains("local compatibility owner"));
+        assert!(SHARED_TUI_CHAT_STATUS
+            .contains("do not reconfigure an already-running Shared Runtime Host"));
+        assert!(SHARED_TUI_CHAT_STATUS.contains("other management remain Embedded"));
     }
 
     #[test]
@@ -2223,7 +2241,7 @@ mod tests {
         assert!(help.contains("Command Palette"));
     }
     fn external_agent_review_snapshot() -> ExternalSourceCatalogSnapshot {
-        serde_json::from_value(serde_json::json!({
+        public_external_source_snapshot(serde_json::json!({
             "generation": 9,
             "discoveryPending": false,
             "sources": [],
@@ -2299,7 +2317,6 @@ mod tests {
             }],
             "pendingSubagentApprovals": ["external_subagent:opencode:review:v1"]
         }))
-        .unwrap()
     }
 
     #[test]

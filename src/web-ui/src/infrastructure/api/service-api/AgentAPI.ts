@@ -5,6 +5,7 @@ import { createTauriCommandError } from '../errors/TauriCommandError';
 import type {
   DialogTurnData,
   ModelRoundAttemptDiagnostic,
+  SessionContextUsage,
   SessionRelationship,
   SessionTurnCatalog,
 } from '@/shared/types/session-history';
@@ -241,6 +242,7 @@ export interface SessionViewRestoreTiming {
 export interface RestoreSessionViewResponse {
   session: SessionInfo;
   turns: DialogTurnData[];
+  currentContextUsage?: SessionContextUsage | null;
   turnCatalog?: SessionTurnCatalog;
   contextRestoreState: 'ready' | 'pending';
   isPartial?: boolean;
@@ -318,6 +320,23 @@ export interface UpdateSessionModelRequest {
   remoteConnectionId?: string;
   remoteSshHost?: string;
   includeInternal?: boolean;
+}
+
+/** `ask` | `auto_approve` | `full_access`; `null` clears the session override. */
+export type SessionPermissionMode = 'ask' | 'auto_approve' | 'full_access';
+
+export interface SessionPermissionModeRequest {
+  sessionId: string;
+  /** Omit or pass null to clear the override and follow the global default. */
+  mode?: SessionPermissionMode | null;
+  workspacePath?: string;
+  remoteConnectionId?: string;
+  remoteSshHost?: string;
+  includeInternal?: boolean;
+}
+
+export interface SessionPermissionModeResponse {
+  mode: SessionPermissionMode | null;
 }
 
 export interface UpdateSessionModeRequest {
@@ -967,6 +986,38 @@ export class AgentAPI {
       await api.invoke<void>('update_session_model', { request });
     } catch (error) {
       throw createTauriCommandError('update_session_model', error, request);
+    }
+  }
+
+  /**
+   * Sets the tool permission mode for one session. Other open sessions keep
+   * their own selection; passing no mode returns this session to the
+   * user-level default.
+   */
+  async updateSessionPermissionMode(
+    request: SessionPermissionModeRequest,
+  ): Promise<SessionPermissionModeResponse> {
+    try {
+      return await api.invoke<SessionPermissionModeResponse>(
+        'update_session_permission_mode',
+        { request },
+      );
+    } catch (error) {
+      throw createTauriCommandError('update_session_permission_mode', error, request);
+    }
+  }
+
+  /** Reads a session's own permission mode; `null` means it follows the default. */
+  async getSessionPermissionMode(
+    request: SessionPermissionModeRequest,
+  ): Promise<SessionPermissionModeResponse> {
+    try {
+      return await api.invoke<SessionPermissionModeResponse>(
+        'get_session_permission_mode',
+        { request },
+      );
+    } catch (error) {
+      throw createTauriCommandError('get_session_permission_mode', error, request);
     }
   }
 

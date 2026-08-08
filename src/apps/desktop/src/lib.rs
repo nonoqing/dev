@@ -31,6 +31,7 @@ pub mod runtime;
 pub mod sleep_prevention;
 pub mod startup_trace;
 pub mod tray;
+mod webview_recovery;
 
 use bitfun_core::agentic::tools::computer_use_capability::set_computer_use_desktop_available;
 use bitfun_core::agentic::tools::computer_use_host::ComputerUseHostRef;
@@ -116,6 +117,34 @@ static MAIN_WINDOW_CLOSE_PENDING_ON_MACOS: AtomicBool = AtomicBool::new(false);
 
 const MAIN_WINDOW_CLOSE_REQUESTED_EVENT: &str = "bitfun_main_window_close_requested";
 const BROWSER_WEBVIEW_PAGE_LOAD_EVENT: &str = "browser-webview-page-load";
+
+#[cfg(target_os = "windows")]
+fn show_fatal_startup_error(message: &str) {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    let title = "BitFun startup error"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let message = message
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(message.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_fatal_startup_error(message: &str) {
+    eprintln!("BitFun startup error: {message}");
+}
 const CRON_DESKTOP_START_FALLBACK_DELAY: Duration = Duration::from_secs(120);
 static DESKTOP_TELEMETRY_RUNTIME: OnceLock<TelemetryRuntimeHandle> = OnceLock::new();
 pub(crate) const MAIN_WINDOW_DEFAULT_WIDTH: f64 = 1200.0;
@@ -435,13 +464,30 @@ pub async fn run() {
         .duration_since(UNIX_EPOCH)
         .map(|duration| format!("desktop-{}", duration.as_millis()))
         .unwrap_or_else(|_| "desktop-unknown".to_string());
-    let startup_trace = DesktopStartupTrace::new(startup_trace_id.clone(), startup_started);
-    startup_trace.record_phase("native_process_start", "native");
     let mut startup_timings = TimingCollector::default();
     let in_debug = cfg!(debug_assertions) || std::env::var("DEBUG").unwrap_or_default() == "1";
     let log_config = logging::LogConfig::new(in_debug);
     let log_targets = logging::build_log_targets(&log_config);
     let session_log_dir = log_config.session_log_dir.clone();
+    if let Err(error) = logging::install_early_file_logging(&session_log_dir) {
+        eprintln!(
+            "Warning: Failed to install early startup logging: {}",
+            error
+        );
+    }
+    let native_startup_trace_path = logging::native_startup_trace_path(&session_log_dir);
+    let startup_trace = match DesktopStartupTrace::new_persisted(
+        startup_trace_id.clone(),
+        startup_started,
+        &native_startup_trace_path,
+    ) {
+        Ok(trace) => trace,
+        Err(error) => {
+            log::warn!("Native startup trace persistence is unavailable: {}", error);
+            DesktopStartupTrace::new(startup_trace_id.clone(), startup_started)
+        }
+    };
+    startup_trace.record_phase("native_process_start", "native");
     crash_diagnostics::initialize_run_state(session_log_dir.clone(), &startup_trace_id);
     setup_panic_hook();
 
@@ -455,7 +501,20 @@ pub async fn run() {
     let step_started = Instant::now();
     if let Err(e) = bitfun_core::service::config::initialize_global_config().await {
         log::error!("Failed to initialize global config service: {}", e);
+        show_fatal_startup_error(&format!(
+            "BitFun could not initialize its configuration and cannot continue.\n\n{e}\n\nSee early-startup.log for details."
+        ));
         return;
+    }
+    if let Ok(config_service) = bitfun_core::service::config::get_global_config_service().await {
+        for diagnostic in config_service.load_diagnostics().await {
+            log::warn!(
+                "Startup configuration diagnostic: code={}, path={}, recoverability={:?}",
+                diagnostic.code,
+                diagnostic.path,
+                diagnostic.recoverability
+            );
+        }
     }
     startup_timings.record_elapsed("initialize_global_config", step_started);
     startup_trace.record_elapsed_step("native_pre_tauri", "initialize_global_config", step_started);
@@ -662,7 +721,8 @@ pub async fn run() {
     }
 
     let app = builder
-        .plugin(logging::build_log_plugin(log_targets))
+        .plugin(logging::build_log_command_plugin())
+        .plugin(logging::build_log_handoff_plugin(log_targets))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -740,6 +800,7 @@ pub async fn run() {
                 "register_runtime_log_state_and_crash_diagnostics",
                 step_started,
             );
+            startup_trace.record_logging_ready_and_stop_persistence();
 
             // Ensure the Tauri NSIS registry install-location key points to the
             // actual install directory, so that auto-updates respect the custom
@@ -1171,6 +1232,8 @@ pub async fn run() {
             api::agentic_api::create_session,
             api::agentic_api::update_session_mode,
             api::agentic_api::update_session_model,
+            api::agentic_api::update_session_permission_mode,
+            api::agentic_api::get_session_permission_mode,
             api::agentic_api::reload_session_context,
             api::agentic_api::update_session_title,
             api::agentic_api::ensure_coordinator_session,
@@ -1227,12 +1290,17 @@ pub async fn run() {
             apply_external_hook_import_command,
             mutate_external_hook_import_command,
             get_external_source_snapshot,
+            get_external_application_snapshot_v2,
+            get_external_application_review_page_v2,
+            apply_external_application_action_v2,
             get_workspace_reference_snapshot,
             plan_external_mcp_import_command,
             apply_external_mcp_import_command,
             reveal_external_source_location,
             get_external_source_control_snapshot,
             apply_external_source_control_action_command,
+            get_external_ecosystem_awareness_command,
+            acknowledge_external_ecosystems_command,
             update_external_integration_policy_command,
             set_external_source_enabled_command,
             set_external_source_conflict_choice_command,
@@ -1322,6 +1390,7 @@ pub async fn run() {
             computer_use_open_system_settings,
             set_config,
             api::telemetry_api::set_telemetry_level,
+            save_cloud_speech_config,
             reset_config,
             export_config,
             import_config,
@@ -1568,6 +1637,9 @@ pub async fn run() {
             subscribe_config_updates,
             get_model_configs,
             get_ai_model_catalog,
+            get_models_dev_catalog_status,
+            refresh_models_dev_catalog_now,
+            reveal_models_dev_cache_directory,
             get_recent_workspaces,
             remove_recent_workspace,
             cleanup_invalid_workspaces,
@@ -1575,6 +1647,8 @@ pub async fn run() {
             open_workspace,
             open_remote_workspace,
             create_assistant_workspace,
+            get_primary_assistant_workspace,
+            set_primary_assistant_workspace,
             delete_assistant_workspace,
             reset_assistant_workspace,
             close_workspace,
@@ -2000,6 +2074,14 @@ async fn init_agentic_system(
         bitfun_core::service::token_usage::TokenUsageSubscriber::new(token_usage_service.clone()),
     );
     event_router.subscribe_internal("token_usage".to_string(), token_usage_subscriber);
+    event_router.subscribe_internal(
+        "session_context_usage".to_string(),
+        Arc::new(
+            bitfun_core::agentic::session::SessionContextUsageSubscriber::new(
+                session_manager.clone(),
+            ),
+        ),
+    );
     event_router.subscribe_internal(
         "thread_goal_tokens".to_string(),
         Arc::new(bitfun_core::agentic::goal_mode::ThreadGoalTokenSubscriber),

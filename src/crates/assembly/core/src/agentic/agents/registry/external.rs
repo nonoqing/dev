@@ -1,6 +1,9 @@
 use super::types::{AgentCategory, AgentEntry, AgentInfo, AgentSource, SubAgentSource};
 use super::AgentRegistry;
 use crate::agentic::agents::{Agent, SubagentVisibilityPolicy};
+use crate::agentic::deep_review_policy::{
+    CODE_REVIEW_AGENT_TYPE, DEEP_REVIEW_AGENT_TYPE, REVIEW_FIXER_AGENT_TYPE,
+};
 use crate::agentic::workspace::canonical_local_workspace_path;
 use bitfun_agent_runtime::prompt_cache::prompt_cache_scope_key;
 use bitfun_core_types::{
@@ -8,6 +11,7 @@ use bitfun_core_types::{
 };
 use bitfun_product_domains::external_sources::EcosystemId;
 use bitfun_product_domains::external_subagents::ExternalSubagentMode;
+use log::{debug, warn};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, Weak};
@@ -436,10 +440,23 @@ impl AgentRegistry {
                     .cloned()
                 {
                     let binding = match route {
-                        ExternalSubagentRoute::Local => self
-                            .find_agent_entry(logical_id, Some(workspace_root))
-                            .filter(|entry| entry.category == AgentCategory::Mode)
-                            .map(|entry| local_primary_binding(entry.agent.id())),
+                        ExternalSubagentRoute::Local => {
+                            match self.find_agent_entry(logical_id, Some(workspace_root)) {
+                                Some(entry) if is_local_session_primary_entry(&entry) => {
+                                    Some(local_primary_binding(entry.agent.id()))
+                                }
+                                Some(entry) => {
+                                    warn!(
+                                        "Session primary agent resolution rejected a registered non-mode agent under a Local route: logical_id={}, category={:?}, source={:?}",
+                                        logical_id,
+                                        entry.category,
+                                        entry.source
+                                    );
+                                    None
+                                }
+                                None => None,
+                            }
+                        }
                         ExternalSubagentRoute::External(runtime_key) => {
                             self.external_subagents.acquire_primary(&runtime_key)
                         }
@@ -454,9 +471,28 @@ impl AgentRegistry {
         if expected_owner == Some(SessionAgentRouteOwner::External) {
             return None;
         }
-        self.find_agent_entry(logical_id, workspace_root)
-            .filter(|entry| entry.category == AgentCategory::Mode)
-            .map(|entry| local_primary_binding(entry.agent.id()))
+        match self.find_agent_entry(logical_id, workspace_root) {
+            Some(entry) if is_local_session_primary_entry(&entry) => {
+                Some(local_primary_binding(entry.agent.id()))
+            }
+            Some(entry) => {
+                warn!(
+                    "Session primary agent resolution rejected a registered non-mode agent: logical_id={}, category={:?}, source={:?}, expected_owner={:?}",
+                    logical_id,
+                    entry.category,
+                    entry.source,
+                    expected_owner
+                );
+                None
+            }
+            None => {
+                debug!(
+                    "Session primary agent resolution found no registered agent: logical_id={}, expected_owner={:?}",
+                    logical_id, expected_owner
+                );
+                None
+            }
+        }
     }
 
     /// Resolve only the currently approved external route for an exact
@@ -574,6 +610,34 @@ fn local_binding(logical_id: &str, runtime_agent_key: &str) -> ExternalSubagentI
         model_binding_policy: SessionModelBindingPolicy::Mutable,
         lease: None,
     }
+}
+
+/// Builtin agents that are allowed to act as the main agent of a session even
+/// though they are not registered as `Mode` (review child sessions).
+///
+/// Review child sessions are created by the product surfaces with
+/// `agentType=CodeReview` (standard) or `agentType=DeepReview` (strict), and
+/// the remediation phase of either session runs with `agentType=ReviewFixer`.
+/// All three must resolve through the primary-agent path for create, turn,
+/// restore, and compaction. Other subagents (e.g. `ReviewWorker`,
+/// `ReviewJudge`) stay restricted.
+fn is_builtin_session_primary_agent(id: &str) -> bool {
+    matches!(
+        id,
+        CODE_REVIEW_AGENT_TYPE | DEEP_REVIEW_AGENT_TYPE | REVIEW_FIXER_AGENT_TYPE
+    )
+}
+
+/// Whether a locally-resolved agent entry may act as a session primary agent.
+///
+/// Used by both the explicit `ExternalSubagentRoute::Local` branch and the
+/// no-route fallback so review child sessions (CodeReview/DeepReview) resolve
+/// identically regardless of whether a workspace route table pins them to the
+/// local implementation.
+fn is_local_session_primary_entry(entry: &AgentEntry) -> bool {
+    entry.category == AgentCategory::Mode
+        || (entry.source == AgentSource::Builtin
+            && is_builtin_session_primary_agent(entry.agent.id()))
 }
 
 fn local_primary_binding(runtime_agent_key: &str) -> ExternalPrimaryAgentTurnBinding {

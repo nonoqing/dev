@@ -46,7 +46,7 @@
   },
   "subscriptionAuth": {
     "sectionTitle": "訂閱賬號",
-    "sectionDescription": "登入 Codex / Antigravity / OpenCode 訂閱後，可直接作為模型 API 使用",
+    "sectionDescription": "OpenCode 帳號只需登入一次，即可分別使用 Zen 或 Go API 方案；同時支援 Codex 與 Antigravity",
     "rescan": "重新整理狀態",
     "import": "匯入使用",
     "login": "登入",
@@ -71,8 +71,26 @@
       "apiKey": "API Key",
       "codex": "Codex（ChatGPT 訂閱）",
       "antigravity": "Antigravity（Google 訂閱）",
-      "opencode": "OpenCode Zen 訂閱"
+      "opencodeZen": "OpenCode 帳號 · Zen API",
+      "opencodeGo": "OpenCode 帳號 · Go API"
     },
+    "openCodePlans": {
+      "zen": {
+        "label": "OpenCode Zen",
+        "description": "使用此 OpenCode 帳號可用的 Zen 按量計費與免費模型"
+      },
+      "go": {
+        "label": "OpenCode Go",
+        "description": "使用此 OpenCode 帳號的 Go 訂閱額度請求模型"
+      }
+    },
+    "openCodeFormats": {
+      "chatCompletions": "Chat Completions",
+      "responses": "Responses",
+      "messages": "Messages"
+    },
+    "useFormat": "使用 {{format}}",
+    "useFormatWithCount": "使用 {{format}}（{{modelCount}} 個模型）",
     "detected": "將使用 {{label}}（賬號 {{account}}）",
     "notConnected": "尚未登入 {{kind}}，請先在上方完成登入",
     "unknownAccount": "目前登入賬號",
@@ -107,6 +125,10 @@
     "customTitle": "自定義設定",
     "customDescription": "手動設定所有參數，適用於私有部署或其他未列出的提供商",
     "getApiKey": "獲取 API Key",
+    "searchProviders": "搜尋提供商或模型名稱...",
+    "showAllProviders": "顯示全部 {{count}} 個提供商",
+    "collapseProviders": "收合提供商列表",
+    "noProviderMatches": "沒有符合的提供商，可選擇上方的自定義設定",
     "fetchModels": "獲取模型列表",
     "fetchHint": "可從目前供應商拉取模型列表；拉取失敗時回退到常用預設模型",
     "fetchingModels": "正在拉取模型列表...",
@@ -322,6 +344,9 @@
     },
     "catalogProvider": "models.dev 供應商",
     "catalogModel": "models.dev 模型",
+    "catalogUnbound": "未綁定",
+    "catalogProviderCustomValueHint": "使用自訂供應商 ID",
+    "catalogModelCustomValueHint": "使用自訂模型 ID",
     "defaultBehavior": "預設思考",
     "defaultPreset": "預設選項",
     "auto": "自動（模型預設值）",
@@ -465,6 +490,33 @@
     "cloneName": "{{name}} - 副本",
     "templateName": "{{provider}} - {{modelName}}",
     "templateDescription": "{{description}} - {{modelName}}"
+  },
+  "modelsDevCatalog": {
+    "title": "models.dev 模型目錄",
+    "detailsTitle": "models.dev 目錄詳情",
+    "viewDetails": "查看 models.dev 目錄詳情",
+    "description": "用於推理預設供應商和模型綁定的目錄狀態。開啟模型設定時會自動檢查更新。",
+    "activeSource": "目前來源",
+    "source": { "cache": "快取", "bundle": "內建快照", "empty": "無法使用" },
+    "catalogSize": "目錄規模",
+    "catalogSizeValue": "{{providers}} 個供應商 · {{models}} 個推理模型",
+    "cacheUpdatedAt": "快取寫入時間",
+    "cachePath": "快取路徑",
+    "revision": "版本",
+    "loading": "載入中…",
+    "noCache": "尚未建立快取",
+    "refreshNow": "立即更新",
+    "refreshing": "正在更新…",
+    "refreshSuccess": "models.dev 目錄已更新",
+    "alreadyCurrent": "models.dev 目錄已是最新",
+    "refreshThrottled": "models.dev 目錄更新請求過於頻繁，請稍後再試",
+    "refreshFailed": "models.dev 目錄更新失敗，繼續使用目前目錄",
+    "reveal": "在資料夾中顯示",
+    "revealFailed": "無法開啟快取所在資料夾",
+    "offlineTitle": "無法連線時如何更新",
+    "offlineDescription": "在可連線的裝置上下載 models.dev 原始檔案，將其命名為 catalog.json 並放入上方快取目錄。替換後重新啟動 BitFun 即可生效；點擊立即更新可能會覆蓋該檔案。",
+    "downloadOriginal": "下載原始目錄",
+    "openCacheDirectory": "開啟快取目錄"
   },
   "advancedSettings": {
     "title": "高級設置",

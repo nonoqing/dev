@@ -46,7 +46,7 @@
   },
   "subscriptionAuth": {
     "sectionTitle": "Subscription accounts",
-    "sectionDescription": "Sign in to Codex, Antigravity, or OpenCode subscriptions and use them as model APIs",
+    "sectionDescription": "Sign in once to an OpenCode account and use either its Zen or Go API plan, alongside Codex and Antigravity",
     "rescan": "Refresh status",
     "import": "Use as model",
     "login": "Sign in",
@@ -71,8 +71,26 @@
       "apiKey": "API Key",
       "codex": "Codex (ChatGPT subscription)",
       "antigravity": "Antigravity (Google subscription)",
-      "opencode": "OpenCode Zen subscription"
+      "opencodeZen": "OpenCode account · Zen API",
+      "opencodeGo": "OpenCode account · Go API"
     },
+    "openCodePlans": {
+      "zen": {
+        "label": "OpenCode Zen",
+        "description": "Pay-as-you-go and free Zen models available to this OpenCode account"
+      },
+      "go": {
+        "label": "OpenCode Go",
+        "description": "Models billed against the Go subscription on this OpenCode account"
+      }
+    },
+    "openCodeFormats": {
+      "chatCompletions": "Chat Completions",
+      "responses": "Responses",
+      "messages": "Messages"
+    },
+    "useFormat": "Use {{format}}",
+    "useFormatWithCount": "Use {{format}} ({{modelCount}})",
     "detected": "Will use {{label}} ({{account}})",
     "notConnected": "{{kind}} is not signed in; sign in above first",
     "unknownAccount": "current account",
@@ -107,6 +125,10 @@
     "customTitle": "Custom Configuration",
     "customDescription": "Manually configure all parameters, suitable for private deployments or other unlisted providers",
     "getApiKey": "Get API Key",
+    "searchProviders": "Search providers or model names...",
+    "showAllProviders": "Show all {{count}} providers",
+    "collapseProviders": "Collapse the provider list",
+    "noProviderMatches": "No matching providers. Use the custom configuration above.",
     "fetchModels": "Fetch Models",
     "fetchHint": "Fetch the model list from the current provider; if it fails, fall back to common preset models",
     "fetchingModels": "Fetching model list...",
@@ -322,6 +344,9 @@
     },
     "catalogProvider": "models.dev provider",
     "catalogModel": "models.dev model",
+    "catalogUnbound": "Not bound",
+    "catalogProviderCustomValueHint": "Use custom provider ID",
+    "catalogModelCustomValueHint": "Use custom model ID",
     "defaultBehavior": "Default reasoning",
     "defaultPreset": "Default preset",
     "auto": "Auto (model default)",
@@ -465,6 +490,33 @@
     "cloneName": "{{name}} - Copy",
     "templateName": "{{provider}} - {{modelName}}",
     "templateDescription": "{{description}} - {{modelName}}"
+  },
+  "modelsDevCatalog": {
+    "title": "models.dev model catalog",
+    "detailsTitle": "models.dev catalog details",
+    "viewDetails": "View models.dev catalog details",
+    "description": "Catalog status used for reasoning preset provider and model bindings. It is checked automatically when model settings open.",
+    "activeSource": "Active source",
+    "source": { "cache": "Cache", "bundle": "Built-in snapshot", "empty": "Unavailable" },
+    "catalogSize": "Catalog size",
+    "catalogSizeValue": "{{providers}} providers · {{models}} reasoning models",
+    "cacheUpdatedAt": "Cache write time",
+    "cachePath": "Cache path",
+    "revision": "Revision",
+    "loading": "Loading…",
+    "noCache": "No cache created",
+    "refreshNow": "Update now",
+    "refreshing": "Updating…",
+    "refreshSuccess": "models.dev catalog updated",
+    "alreadyCurrent": "models.dev catalog is already up to date",
+    "refreshThrottled": "models.dev catalog was refreshed recently; please try again later",
+    "refreshFailed": "Failed to update models.dev catalog; continuing with the current catalog",
+    "reveal": "Show in folder",
+    "revealFailed": "Unable to open the cache folder",
+    "offlineTitle": "Updating without network access",
+    "offlineDescription": "On a device with internet access, download the original models.dev file, name it catalog.json, and place it in the cache directory above. Restart BitFun to apply it; Update now may overwrite this file.",
+    "downloadOriginal": "Download original catalog",
+    "openCacheDirectory": "Open cache directory"
   },
   "advancedSettings": {
     "title": "Advanced Settings",

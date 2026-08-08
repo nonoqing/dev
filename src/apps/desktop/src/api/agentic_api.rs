@@ -17,8 +17,8 @@ use crate::startup_trace::DesktopStartupTrace;
 use bitfun_agent_runtime::deep_review::sanitize_focused_review_public_metadata;
 use bitfun_agent_runtime::sdk::{
     AgentDialogSteerRequest, AgentDialogTurnExecution, AgentDialogTurnRequest,
-    AgentInputAttachment, AgentSessionCreateResult, AgentSessionModelSelection,
-    AgentSessionModeUpdateRequest, AgentSessionModelSelectionUpdateRequest,
+    AgentInputAttachment, AgentSessionCreateResult, AgentSessionModeUpdateRequest,
+    AgentSessionModelSelection, AgentSessionModelSelectionUpdateRequest,
     AgentSessionModelUpdateRequest, AgentSubmissionSource, AgentTurnCancellationRequest,
     DialogSteerOutcome, PermissionAuditRecord, PermissionGrant, PermissionGrantKey,
     PermissionReply, PermissionRequest,
@@ -54,7 +54,7 @@ use bitfun_core::service::config::project_permission_store::{
 use bitfun_core::service::remote_ssh::workspace_state::is_remote_path;
 use bitfun_core::service::remote_ssh::workspace_state::resolve_workspace_session_identity;
 use bitfun_core::service::session::{
-    DialogTurnData, SessionMemoryMode, SessionMetadata, SessionRelationship,
+    DialogTurnData, SessionContextUsage, SessionMemoryMode, SessionMetadata, SessionRelationship,
     SessionRelationshipKind, SessionTurnCatalog, SessionTurnWindowResponse,
 };
 use bitfun_core::service::workspace::WorkspaceKind;
@@ -65,7 +65,7 @@ use bitfun_core_types::{
     WorktreeError, WorktreeErrorCode,
 };
 use bitfun_product_domains::tool_permissions::PermissionRule;
-use bitfun_runtime_ports::SessionTurnWindowRequest;
+use bitfun_runtime_ports::{PermissionMode, SessionTurnWindowRequest};
 
 const SESSION_VIEW_TOOL_RESULT_TOTAL_CHAR_BUDGET: usize = 512 * 1024;
 const SESSION_VIEW_TOOL_RESULT_STRING_CHAR_LIMIT: usize = 16 * 1024;
@@ -241,6 +241,31 @@ pub struct UpdateSessionModelRequest {
     pub remote_ssh_host: Option<String>,
     #[serde(default)]
     pub include_internal: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSessionPermissionModeRequest {
+    pub session_id: String,
+    /// `None` clears the session override so the session follows the
+    /// user-level default again, including later changes to that default.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+    #[serde(default)]
+    pub remote_connection_id: Option<String>,
+    #[serde(default)]
+    pub remote_ssh_host: Option<String>,
+    #[serde(default)]
+    pub include_internal: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPermissionModeResponse {
+    /// The session's own selection, or `null` when it follows the default.
+    pub mode: Option<PermissionMode>,
 }
 
 fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -502,6 +527,7 @@ pub struct RestoreSessionWithTurnsResponse {
 pub struct RestoreSessionViewResponse {
     pub session: SessionResponse,
     pub turns: Vec<DialogTurnData>,
+    pub current_context_usage: Option<SessionContextUsage>,
     pub turn_catalog: SessionTurnCatalog,
     pub context_restore_state: String,
     pub is_partial: bool,
@@ -1798,6 +1824,78 @@ pub async fn update_session_model(
         .map_err(|error| format!("Failed to update session model: {}", error.into_message()))
 }
 
+/// Sets the tool permission mode this session runs with.
+///
+/// The mode is a per-session selector, so switching it in one conversation
+/// leaves every other open session on its own selection. Passing no mode clears
+/// the override and returns the session to the user-level default.
+#[tauri::command]
+pub async fn update_session_permission_mode(
+    runtime: State<'_, DesktopRuntimeContext>,
+    coordinator: State<'_, Arc<ConversationCoordinator>>,
+    request: UpdateSessionPermissionModeRequest,
+) -> Result<SessionPermissionModeResponse, String> {
+    let session_id = request.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("session_id is required".to_string());
+    }
+    let mode = match request.mode.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(value) => Some(
+            PermissionMode::parse(value)
+                .ok_or_else(|| format!("unsupported permission mode: {value}"))?,
+        ),
+    };
+
+    ensure_session_loaded_for_selector_update(
+        runtime.inner(),
+        &session_id,
+        request.workspace_path,
+        request.remote_connection_id,
+        request.remote_ssh_host,
+        request.include_internal,
+    )
+    .await?;
+
+    coordinator
+        .get_session_manager()
+        .update_session_permission_mode(&session_id, mode)
+        .await
+        .map_err(|error| format!("Failed to update session permission mode: {error}"))?;
+
+    Ok(SessionPermissionModeResponse { mode })
+}
+
+/// Reads the session's own permission mode selection.
+///
+/// `null` means the session never chose one and follows the user-level default.
+#[tauri::command]
+pub async fn get_session_permission_mode(
+    runtime: State<'_, DesktopRuntimeContext>,
+    coordinator: State<'_, Arc<ConversationCoordinator>>,
+    request: UpdateSessionPermissionModeRequest,
+) -> Result<SessionPermissionModeResponse, String> {
+    let session_id = request.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("session_id is required".to_string());
+    }
+    ensure_session_loaded_for_selector_update(
+        runtime.inner(),
+        &session_id,
+        request.workspace_path,
+        request.remote_connection_id,
+        request.remote_ssh_host,
+        request.include_internal,
+    )
+    .await?;
+
+    Ok(SessionPermissionModeResponse {
+        mode: coordinator
+            .get_session_manager()
+            .session_permission_mode(&session_id),
+    })
+}
+
 async fn ensure_session_loaded_for_selector_update(
     runtime: &DesktopRuntimeContext,
     session_id: &str,
@@ -3072,6 +3170,7 @@ pub async fn restore_session_view(
             .map_err(|error| format!("Failed to restore session view: {error}"))?;
         let session = restored.session;
         let mut turns = restored.turns;
+        let current_context_usage = restored.current_context_usage;
         let total_turn_count = restored.total_turn_count;
         let turn_catalog = restored.turn_catalog;
         let timings = restored.timings;
@@ -3124,6 +3223,7 @@ pub async fn restore_session_view(
         Ok(RestoreSessionViewResponse {
             session: session_to_response_with_turn_count(session, total_turn_count),
             turns,
+            current_context_usage,
             turn_catalog,
             context_restore_state: "pending".to_string(),
             is_partial,

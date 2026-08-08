@@ -709,9 +709,19 @@
         "tooltip": "此工作階段的權限由 ACP 用戶端控制。"
       },
       "fullAccessWarningTitle": "啟用完全存取？",
-      "fullAccessWarningMessage": "完全存取會預設允許工具執行，不再逐次確認。",
+      "fullAccessWarningMessage": "完全存取會預設放行工具呼叫，不再逐次確認。此設定僅作用於目前工作階段，專案規則與強制規則仍然生效。",
       "fullAccessConfirm": "啟用完全存取",
-      "cancel": "取消"
+      "cancel": "取消",
+      "sessionScope": "目前工作階段",
+      "currentSessionOverride": "權限：{{mode}}（僅目前工作階段）",
+      "resetToDefault": "跟隨預設模式",
+      "noSession": "請先開啟或新建工作階段，再變更其權限模式。",
+      "turnScope": "僅下一則訊息",
+      "currentTurnOverride": "權限：{{mode}}（僅下一則訊息）",
+      "nextTurnOnly": "僅下一則訊息使用「{{mode}}」",
+      "nextTurnOnlyShort": "僅一次",
+      "fullAccessWarningMessageNextTurn": "完全存取會預設放行工具呼叫，不再逐次確認。此設定僅作用於下一則訊息，專案規則與強制規則仍然生效。",
+      "openDefaultSettings": "開啟權限設定"
     },
     "addModeTooltip": "附加 Plan 或 Debug",
     "boostSectionAgent": "智能體",
@@ -796,6 +806,10 @@
     "nativeCommandReconfirmationRequired": "先前選擇的外部命令已無法使用。請從斜線選單中選擇 BitFun 命令後再執行。",
     "selectHint": "↑↓ 選擇 · Enter 確認 · Esc 取消",
     "current": "目前",
+    "commandStatus": {
+      "restricted": "受限",
+      "chooseSource": "選擇來源"
+    },
     "computerUseDisabled": "已在「設定 → 工作階段權限」中停用 Computer Use",
     "professionalMode": "專業模式",
     "designMode": "設計模式",
@@ -2477,9 +2491,9 @@
         "prompt": "請幫我寫一封郵件回覆。\n\n對方郵件內容（可粘貼）：\n我的目標（確認/拒絕/推進/澄清）：\n語氣（正式/友好/強硬但禮貌）：\n需要包含的資訊點：\n\n請輸出：\n1) 主題（Subject）建議\n2) 郵件正文（2 個版本：更正式/更簡潔）\n3) 需要對方確認的問題列表（如有）"
       },
       "make_docx": {
-        "title": "寫一份 Word 文檔",
-        "description": "把內容結構化成文檔，並導出為 DOCX。",
-        "prompt": "請幫我寫一份文檔，並導出為 .docx 檔案。\n\n文檔類型（PRD/方案/覆盤/報告/SOP）：\n受眾：\n語氣（正式/友好/簡潔）：\n必須包含的資訊點：\n期望長度：\n\n最終交付：\n1) 建議目錄結構\n2) 完整正文內容\n3) 導出為 DOCX 檔案（儲存到 artifacts/）"
+        "title": "寫一份結構化文檔",
+        "description": "把資料整理成清晰、可複用的文檔。",
+        "prompt": "請幫我寫一份結構化文檔。\n\n文檔類型（PRD/方案/覆盤/報告/SOP）：\n受眾：\n語氣（正式/友好/簡潔）：\n必須包含的資訊點：\n期望長度：\n\n最終交付：\n1) 建議目錄結構\n2) 完整正文內容\n3) 將 Markdown 文檔儲存到 artifacts/"
       },
       "make_spreadsheet": {
         "title": "做一張表格",

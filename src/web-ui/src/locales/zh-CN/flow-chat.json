@@ -709,9 +709,19 @@
         "tooltip": "此会话的权限由 ACP 客户端控制。"
       },
       "fullAccessWarningTitle": "启用完全访问？",
-      "fullAccessWarningMessage": "完全访问会默认允许工具执行，不再逐次确认。",
+      "fullAccessWarningMessage": "完全访问会默认放行工具调用，不再逐次确认。该设置仅作用于当前会话，项目规则与强制规则仍然生效。",
       "fullAccessConfirm": "启用完全访问",
-      "cancel": "取消"
+      "cancel": "取消",
+      "sessionScope": "当前会话",
+      "currentSessionOverride": "权限：{{mode}}（仅当前会话）",
+      "resetToDefault": "跟随默认模式",
+      "noSession": "请先打开或新建会话，再修改其权限模式。",
+      "turnScope": "仅下一条消息",
+      "currentTurnOverride": "权限：{{mode}}（仅下一条消息）",
+      "nextTurnOnly": "仅下一条消息使用「{{mode}}」",
+      "nextTurnOnlyShort": "仅一次",
+      "fullAccessWarningMessageNextTurn": "完全访问会默认放行工具调用，不再逐次确认。该设置仅作用于下一条消息，项目规则与强制规则仍然生效。",
+      "openDefaultSettings": "打开权限设置"
     },
     "addModeTooltip": "附加 Plan 或 Debug",
     "boostSectionAgent": "智能体",
@@ -796,6 +806,10 @@
     "nativeCommandReconfirmationRequired": "之前选择的外部命令已不可用。请从斜杠菜单中选择 BitFun 命令后再执行。",
     "selectHint": "↑↓ 选择 · Enter 确认 · Esc 取消",
     "current": "当前",
+    "commandStatus": {
+      "restricted": "受限",
+      "chooseSource": "选择来源"
+    },
     "computerUseDisabled": "已在「设置 → 会话权限」中禁用 Computer Use",
     "professionalMode": "专业模式",
     "designMode": "设计模式",
@@ -2477,9 +2491,9 @@
         "prompt": "请帮我写一封邮件回复。\n\n对方邮件内容（可粘贴）：\n我的目标（确认/拒绝/推进/澄清）：\n语气（正式/友好/强硬但礼貌）：\n需要包含的信息点：\n\n请输出：\n1) 主题（Subject）建议\n2) 邮件正文（2 个版本：更正式/更简洁）\n3) 需要对方确认的问题列表（如有）"
       },
       "make_docx": {
-        "title": "写一份 Word 文档",
-        "description": "把内容结构化成文档，并导出为 DOCX。",
-        "prompt": "请帮我写一份文档，并导出为 .docx 文件。\n\n文档类型（PRD/方案/复盘/报告/SOP）：\n受众：\n语气（正式/友好/简洁）：\n必须包含的信息点：\n期望长度：\n\n最终交付：\n1) 建议目录结构\n2) 完整正文内容\n3) 导出为 DOCX 文件（保存到 artifacts/）"
+        "title": "写一份结构化文档",
+        "description": "把资料整理成清晰、可复用的文档。",
+        "prompt": "请帮我写一份结构化文档。\n\n文档类型（PRD/方案/复盘/报告/SOP）：\n受众：\n语气（正式/友好/简洁）：\n必须包含的信息点：\n期望长度：\n\n最终交付：\n1) 建议目录结构\n2) 完整正文内容\n3) 将 Markdown 文档保存到 artifacts/"
       },
       "make_spreadsheet": {
         "title": "做一张表格",

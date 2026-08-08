@@ -24,15 +24,16 @@ mod plugin;
 mod script_tool;
 #[cfg(feature = "permission")]
 pub use bitfun_product_domains::tool_permissions::{
-    resolve_child_permission_policy, resolve_permission_policy, wildcard_matches,
-    ChildPermissionPolicyLayers, PermissionAuditEvent, PermissionAuditRecord,
-    PermissionConstraintLayer, PermissionDelegationContext, PermissionEffect, PermissionEvaluator,
-    PermissionGrant, PermissionGrantKey, PermissionInteractionConfig, PermissionPolicyConfig,
-    PermissionPolicyLayers, PermissionPolicyPreset, PermissionReply, PermissionReplySource,
-    PermissionRequest, PermissionRequestEvent, PermissionRequestSource,
+    deserialize_optional_permission_mode, resolve_child_permission_policy, resolve_permission_mode,
+    resolve_permission_policy, wildcard_matches, ChildPermissionPolicyLayers, PermissionAuditEvent,
+    PermissionAuditRecord, PermissionConstraintLayer, PermissionDelegationContext,
+    PermissionEffect, PermissionEvaluator, PermissionGrant, PermissionGrantKey,
+    PermissionInteractionConfig, PermissionMode, PermissionModeLayers, PermissionModeSource,
+    PermissionPolicyConfig, PermissionPolicyLayers, PermissionPolicyPreset, PermissionReply,
+    PermissionReplySource, PermissionRequest, PermissionRequestEvent, PermissionRequestSource,
     PermissionRequestSourceKind, PermissionResourceCaseSensitivity, PermissionRule,
     PermissionRuleset, PermissionRuntimeCeiling, PermissionRuntimeCeilingValidationError,
-    ResolvedPermissionPolicy, ToolPermissionConfig,
+    ResolvedPermissionMode, ResolvedPermissionPolicy, ToolPermissionConfig,
 };
 pub use local_workspace_snapshot::{
     LocalWorkspaceSnapshotPort, LocalWorkspaceSnapshotSessionRequest, LocalWorkspaceSnapshotStats,
@@ -305,6 +306,19 @@ pub enum WorkspacePathKind {
 #[async_trait::async_trait]
 pub trait WorkspaceFileSystem: Send + Sync {
     async fn read_file(&self, path: &str) -> anyhow::Result<Vec<u8>>;
+    /// Read binary content up to `max_bytes`.
+    ///
+    /// `Ok(None)` means the file exceeded the bound; missing paths, non-files, and transport
+    /// failures remain errors. Production providers should enforce the bound before or while
+    /// transferring the file.
+    async fn read_file_bounded(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let bytes = self.read_file(path).await?;
+        Ok((bytes.len() <= max_bytes).then_some(bytes))
+    }
     async fn read_file_text(&self, path: &str) -> anyhow::Result<String>;
     /// Read UTF-8 text up to `max_bytes`. Production filesystem providers
     /// should enforce the bound before or while transferring the file.

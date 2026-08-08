@@ -829,6 +829,8 @@ export const externalSourceContractPublicApiEntries = [
 
 export const externalSourceControlPublicApiEntries = [
   'EXTERNAL_SOURCE_CONTROL_SCHEMA_V1',
+  'EXTERNAL_APPLICATION_SCHEMA_V2',
+  'EXTERNAL_APPLICATION_REVIEW_PAGE_MAX_ITEMS',
   'ExternalSourceOperationStage',
   'ExternalSourceRecoveryActionV1',
   'ExternalSourceDiscoveryState',
@@ -844,6 +846,39 @@ export const externalSourceControlPublicApiEntries = [
   'ExternalSourceSurfaceSnapshotV1',
   'ExternalSourceControlActionV1',
   'ExternalSourceControlRequestV1',
+  'ExternalApplicationTargetScopeV2',
+  'ExternalApplicationDesiredConnectionV2',
+  'ExternalApplicationUserDecisionV2',
+  'ExternalApplicationDiscoveryStateV2',
+  'ExternalApplicationConnectionStateV2',
+  'ExternalApplicationHealthV2',
+  'ExternalApplicationEffectiveStatusV2',
+  'ExternalApplicationPrimaryActionV2',
+  'derive_external_application_status_v2',
+  'ExternalApplicationDefaultConnectionPolicyV2',
+  'ExternalApplicationRiskLevelV2',
+  'ExternalApplicationSafetyCeilingV2',
+  'ExternalApplicationRecoveryActionV2',
+  'ExternalApplicationHostCapabilitiesV2',
+  'ExternalApplicationRiskSummaryV2',
+  'ExternalApplicationReviewItemKindV2',
+  'ExternalApplicationReviewItemRefV2',
+  'ExternalApplicationOwnerGenerationV2',
+  'ExternalApplicationReviewCategoryCountV2',
+  'ExternalApplicationReviewRecommendationSummaryV2',
+  'ExternalApplicationReviewSummaryV2',
+  'ExternalApplicationSummaryV2',
+  'ExternalApplicationSnapshotV2',
+  'ExternalApplicationReviewItemV2',
+  'ExternalApplicationReviewPageRequestV2',
+  'ExternalApplicationReviewPageV2',
+  'ExternalApplicationReviewSelectionBaselineV2',
+  'ExternalApplicationReviewSelectionOverrideV2',
+  'ExternalApplicationControlActionV2',
+  'ExternalApplicationControlRequestV2',
+  'ExternalApplicationOperationOutcomeV2',
+  'ExternalApplicationReviewItemResultV2',
+  'ExternalApplicationControlResultV2',
 ].map((symbol) =>
   externalSourceControlEntry(
     symbol,
@@ -985,6 +1020,9 @@ export const externalSourceCorePublicApiEntries = [
     'EXTERNAL_SOURCE_CONTROL_SCHEMA_V1',
     'get_external_source_control_snapshot',
     'apply_external_source_control_action',
+    'get_external_application_snapshot_v2',
+    'get_external_application_review_page_v2',
+    'apply_external_application_action_v2',
   ].map((symbol) =>
     externalSourceControlEntry(
       symbol,
@@ -1076,6 +1114,23 @@ export const externalSourceCorePublicApiEntries = [
     'Desktop external-source configuration host adapter',
     true,
   ),
+  ...[
+    'unacknowledged_external_ecosystems',
+    'acknowledge_external_ecosystems',
+  ].map((symbol) => ({
+    symbol,
+    owner: 'bitfun-core external source composition facade',
+    consumer: 'Desktop settings navigation and CLI/TUI external application entry points',
+    verification:
+      'core acknowledgement persistence and execution-domain scoping tests, plus Desktop and TUI first-discovery hint tests',
+    p0: 'first-discovery hint for external applications shared by GUI and TUI',
+    contractSlice: contractSlices.externalSourceCommandContract,
+    wireImpact: true,
+    rationale:
+      'both surfaces must derive "an external application the user has not seen" from one owner, otherwise GUI and TUI drift; awareness stays outside the preference-revision contract because it grants nothing and only suppresses a hint',
+    exit:
+      'remove once the versioned application-level read model owns notice state, together with its cross-surface deduplication tests',
+  })),
   ...[
     'ExternalToolActivationState',
     'ExternalToolApprovalRequest',

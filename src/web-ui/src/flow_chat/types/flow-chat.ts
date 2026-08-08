@@ -6,6 +6,7 @@
 import type {
   DialogTurnKind,
   SessionKind,
+  SessionContextUsageSource,
   SessionTitleSource,
   SessionTurnCatalog,
 } from '@/shared/types/session-history';
@@ -199,6 +200,10 @@ export interface TokenUsage {
   outputTokens?: number;
   totalTokens: number;
   timestamp: number;
+  /** Persisted source turn used to invalidate usage after history rewrites. */
+  turnId?: string;
+  /** Runtime provenance for restored session-level context usage. */
+  source?: SessionContextUsageSource;
 }
 
 export interface AcpContextUsage {
@@ -254,6 +259,9 @@ export interface DialogTurn {
   errorDetail?: AiErrorDetail;
   tokenUsage?: TokenUsage;
   todos?: TodoItem[];
+  /** Backend persistence slot. It may be sparse and must not be used as ordinal. */
+  storageTurnIndex?: number;
+  /** @deprecated Compatibility for older restored projections. Use `storageTurnIndex`. */
   backendTurnIndex?: number;
   /** Whether the turn completed successfully. */
   success?: boolean;
@@ -261,6 +269,23 @@ export interface DialogTurn {
   finishReason?: string;
   /** Whether the turn produced a final assistant response visible to the user. */
   hasFinalResponse?: boolean;
+}
+
+declare const localTurnIndexBrand: unique symbol;
+declare const turnOrdinalBrand: unique symbol;
+declare const storageTurnIndexBrand: unique symbol;
+
+/** Position inside the currently loaded `dialogTurns` array. */
+export type LocalTurnIndex = number & { readonly [localTurnIndexBrand]: 'LocalTurnIndex' };
+/** Zero-based visible Turn position inside the complete Session history. */
+export type TurnOrdinal = number & { readonly [turnOrdinalBrand]: 'TurnOrdinal' };
+/** Opaque backend persistence slot. It may be sparse and differ from ordinal. */
+export type StorageTurnIndex = number & { readonly [storageTurnIndexBrand]: 'StorageTurnIndex' };
+
+export interface DialogTurnIdentity {
+  ordinal: TurnOrdinal;
+  storageTurnIndex?: StorageTurnIndex;
+  state: 'optimistic' | 'persisted';
 }
 
 export interface FlowChatState {
@@ -337,7 +362,7 @@ export interface Session {
    *
    * This array may temporarily contain provisional frontend Turns that have
    * not been persisted. Never derive a backend storage index from its length
-   * or local array position; use `DialogTurn.backendTurnIndex` and
+   * or local array position; use `DialogTurn.storageTurnIndex` and
    * `turnCatalog` for persisted identity and ordinals.
    */
   dialogTurns: DialogTurn[];

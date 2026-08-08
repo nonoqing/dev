@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Plus, SquarePen, Trash2, Wifi, Loader, RefreshCw, AlertTriangle, X, Settings, ExternalLink, Eye, EyeOff, ChevronDown, ChevronRight, Info, Brain } from 'lucide-react';
-import { Button, Switch, Select, IconButton, NumberInput, Card, Modal, Input, Textarea, Tooltip, type SelectOption } from '@/component-library';
+import { Plus, SquarePen, Trash2, Wifi, Loader, RefreshCw, AlertTriangle, X, Settings, ExternalLink, Eye, EyeOff, ChevronDown, ChevronRight, ChevronUp, Info, Brain, FolderOpen } from 'lucide-react';
+import { Button, Switch, Select, IconButton, NumberInput, Card, Modal, Input, Search, Textarea, Tooltip, type SelectOption } from '@/component-library';
 import {
   AIModelConfig as AIModelConfigType, 
   ProxyConfig, 
@@ -18,8 +18,12 @@ import { normalizeProviderBaseUrl } from '../services/providerCatalog';
 import { supportsResponsesReasoning } from '../utils/reasoning';
 import { canonicalReasoningConfig, validateReasoningConfig } from '../utils/reasoningPresets';
 import { aiApi, systemAPI } from '@/infrastructure/api';
-import type { SubscriptionAccount } from '@/infrastructure/api/service-api/AIApi';
-import type { SubscriptionProvider } from '../types';
+import type {
+  SubscriptionAccount,
+  SubscriptionApiOffering,
+} from '@/infrastructure/api/service-api/AIApi';
+import type { ProviderRegion } from '@/shared/types';
+import type { OpenCodePlan, SubscriptionProvider } from '../types';
 import { useNotification } from '@/shared/notification-system';
 import { ConfigPageHeader, ConfigPageLayout, ConfigPageContent, ConfigPageSection, ConfigPageRow, ConfigCollectionItem } from './common';
 import DefaultModelConfig from './DefaultModelConfig';
@@ -37,6 +41,10 @@ import {
 import './AIModelConfig.scss';
 
 const log = createLogger('AIModelConfig');
+const MODELS_DEV_DOWNLOAD_URL = 'https://models.dev/api.json';
+
+/** Rows the preset picker shows before the user searches or expands the list. */
+const COLLAPSED_PROVIDER_COUNT = 6;
 
 interface RemoteModelOption {
   id: string;
@@ -234,7 +242,8 @@ function resolveRequestUrl(baseUrl: string, provider: string, _modelName = ''): 
     return trimmed.endsWith('responses') ? trimmed : `${trimmed}/responses`;
   }
   if (provider === 'anthropic') {
-    return trimmed.endsWith('v1/messages') ? trimmed : `${trimmed}/v1/messages`;
+    if (trimmed.endsWith('/messages')) return trimmed;
+    return trimmed.endsWith('/v1') ? `${trimmed}/messages` : `${trimmed}/v1/messages`;
   }
   if (provider === 'gemini') {
     return geminiBaseUrl(trimmed);
@@ -363,11 +372,15 @@ function configsNeedingAutoTest(
 }
 
 const AIModelConfig: React.FC = () => {
-  const { t } = useTranslation('settings/ai-model');
+  const { t, i18n } = useTranslation('settings/ai-model');
   const { t: tDefault } = useTranslation('settings/default-model');
   const { t: tComponents } = useTranslation('components');
   const [aiModels, setAiModels] = useState<AIModelConfigType[]>([]);
   const [modelCatalog, setModelCatalog] = useState<Awaited<ReturnType<typeof aiApi.getModelCatalog>> | null>(null);
+  const [modelsDevStatus, setModelsDevStatus] = useState<Awaited<ReturnType<typeof aiApi.getModelsDevCatalogStatus>> | null>(null);
+  const [modelsDevStatusAvailable, setModelsDevStatusAvailable] = useState(true);
+  const [isRefreshingModelsDev, setIsRefreshingModelsDev] = useState(false);
+  const [showModelsDevDetails, setShowModelsDevDetails] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editingConfig, setEditingConfig] = useState<Partial<AIModelConfigType> | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -379,7 +392,9 @@ const AIModelConfig: React.FC = () => {
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
 
   const [creationMode, setCreationMode] = useState<'selection' | 'form' | null>(null);
-  
+  const [providerQuery, setProviderQuery] = useState('');
+  const [showAllProviders, setShowAllProviders] = useState(false);
+
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
   const [proxyConfig, setProxyConfig] = useState<ProxyConfig>({
     enabled: false,
@@ -494,6 +509,38 @@ const AIModelConfig: React.FC = () => {
     }
   }, []);
 
+  const loadModelsDevStatus = useCallback(async () => {
+    try {
+      setModelsDevStatus(await aiApi.getModelsDevCatalogStatus());
+      setModelsDevStatusAvailable(true);
+    } catch (error) {
+      setModelsDevStatusAvailable(false);
+      log.warn('Failed to load models.dev catalog status', { error });
+    }
+  }, []);
+
+  const handleRefreshModelsDev = useCallback(async () => {
+    setIsRefreshingModelsDev(true);
+    try {
+      const result = await aiApi.refreshModelsDevCatalogNow();
+      setModelsDevStatus(result.status);
+      await loadModelCatalog();
+      notification.success(
+        result.outcome === 'updated'
+          ? t('modelsDevCatalog.refreshSuccess')
+          : result.outcome === 'throttled'
+            ? t('modelsDevCatalog.refreshThrottled')
+            : t('modelsDevCatalog.alreadyCurrent'),
+      );
+    } catch (error) {
+      log.warn('Failed to refresh models.dev catalog', { error });
+      notification.error(t('modelsDevCatalog.refreshFailed'));
+      await loadModelsDevStatus();
+    } finally {
+      setIsRefreshingModelsDev(false);
+    }
+  }, [loadModelCatalog, loadModelsDevStatus, notification, t]);
+
   const loadConfig = useCallback(async () => {
     try {
       const [models, proxy, streamIdleTimeoutSecs, streamTtftTimeoutSecs, allowJsonRepair] = await Promise.all([
@@ -505,6 +552,7 @@ const AIModelConfig: React.FC = () => {
       ]);
       setAiModels(models);
       await loadModelCatalog();
+      await loadModelsDevStatus();
       if (proxy) {
         setProxyConfig(proxy);
       }
@@ -518,15 +566,16 @@ const AIModelConfig: React.FC = () => {
     } catch (error) {
       log.error('Failed to load AI config', error);
     }
-  }, [loadModelCatalog]);
+  }, [loadModelCatalog, loadModelsDevStatus]);
 
   useEffect(() => {
     const unsubscribeCatalog = aiApi.onModelCatalogUpdated(() => {
       void loadModelCatalog();
+      void loadModelsDevStatus();
     });
     loadConfig();
     return unsubscribeCatalog;
-  }, [loadConfig, loadModelCatalog]);
+  }, [loadConfig, loadModelCatalog, loadModelsDevStatus]);
 
   const refreshSubscriptionAccounts = useCallback(async () => {
     setIsLoadingSubscriptions(true);
@@ -562,20 +611,50 @@ const AIModelConfig: React.FC = () => {
       .map(provider => provider.id),
     [providerTemplates],
   );
+  // A Chinese UI leads with mainland providers, every other UI leads with the
+  // international ones. Both keep the full list, only the order changes.
+  const preferredProviderRegion: ProviderRegion = i18n.language.toLowerCase().startsWith('zh') ? 'cn' : 'global';
   const providers = useMemo(() => {
-    const sorted = Object.values(providerTemplates).sort((a, b) => {
-      const indexA = providerOrder.indexOf(a.id);
-      const indexB = providerOrder.indexOf(b.id);
-      return (indexA === -1 ? 999 : indexA) - (indexB === -1 ? 999 : indexB);
-    });
-    
+    const regionRank = (region: ProviderRegion) => {
+      if (region === 'any') return 0;
+      return region === preferredProviderRegion ? 1 : 2;
+    };
+
     // Dynamically get translated name and description
-    return sorted.map(provider => ({
-      ...provider,
-      name: t(`providers.${provider.id}.name`),
-      description: t(`providers.${provider.id}.description`)
-    }));
-  }, [providerOrder, providerTemplates, t]);
+    return Object.values(providerTemplates)
+      .map(provider => {
+        const localizedName = t(`providers.${provider.id}.name`);
+        const localizedDescription = t(`providers.${provider.id}.description`);
+        return {
+          ...provider,
+          name: localizedName,
+          description: localizedDescription,
+          // Keeps the catalog's English name searchable while a CJK locale renders the localized one.
+          searchText: [provider.id, provider.name, localizedName, localizedDescription, ...provider.models]
+            .join(' ')
+            .toLowerCase(),
+        };
+      })
+      .sort((left, right) => (
+        regionRank(left.region ?? 'any') - regionRank(right.region ?? 'any')
+        || (left.displayOrder ?? 999) - (right.displayOrder ?? 999)
+        || left.name.localeCompare(right.name)
+      ));
+  }, [preferredProviderRegion, providerTemplates, t]);
+
+  const normalizedProviderQuery = providerQuery.trim().toLowerCase();
+  const matchedProviders = useMemo(() => (
+    normalizedProviderQuery
+      ? providers.filter(provider => provider.searchText.includes(normalizedProviderQuery))
+      : providers
+  ), [normalizedProviderQuery, providers]);
+  // Searching always reveals every hit; only the resting list stays short.
+  const canToggleProviderList = !normalizedProviderQuery
+    && matchedProviders.length > COLLAPSED_PROVIDER_COUNT;
+  const isProviderListCollapsed = canToggleProviderList && !showAllProviders;
+  const visibleProviders = isProviderListCollapsed
+    ? matchedProviders.slice(0, COLLAPSED_PROVIDER_COUNT)
+    : matchedProviders;
 
   // Current template with translations (must be at top level, before any conditional returns)
   const currentTemplate = useMemo(() => {
@@ -611,6 +690,24 @@ const AIModelConfig: React.FC = () => {
     lastRemoteFetchSignatureRef.current = null;
     activeRemoteFetchSignatureRef.current = null;
   }, []);
+
+  const getOpenCodePlanLabel = useCallback((plan: OpenCodePlan): string => (
+    plan === 'go'
+      ? t('subscriptionAuth.openCodePlans.go.label')
+      : t('subscriptionAuth.openCodePlans.zen.label')
+  ), [t]);
+
+  const getOpenCodePlanDescription = useCallback((plan: OpenCodePlan): string => (
+    plan === 'go'
+      ? t('subscriptionAuth.openCodePlans.go.description')
+      : t('subscriptionAuth.openCodePlans.zen.description')
+  ), [t]);
+
+  const getOpenCodeFormatLabel = useCallback((format: SubscriptionApiOffering['format']): string => {
+    if (format === 'responses') return t('subscriptionAuth.openCodeFormats.responses');
+    if (format === 'anthropic') return t('subscriptionAuth.openCodeFormats.messages');
+    return t('subscriptionAuth.openCodeFormats.chatCompletions');
+  }, [t]);
 
   const syncSelectedModelDrafts = (
     modelNames: string[],
@@ -888,18 +985,33 @@ const AIModelConfig: React.FC = () => {
     setManualModelInput('');
     setShowApiKey(false);
     setSelectedProviderId(null);
+    setProviderQuery('');
+    setShowAllProviders(false);
     setCreationMode('selection');
   };
 
-  const handleImportFromSubscription = useCallback((account: SubscriptionAccount) => {
+  const handleImportFromSubscription = useCallback((
+    account: SubscriptionAccount,
+    offering?: SubscriptionApiOffering,
+  ) => {
     resetRemoteModelDiscovery();
+    const offeringModels = (offering?.models || []).map((model) => ({
+      id: model.id,
+      display_name: model.display_name || undefined,
+    }));
+    if (offeringModels.length > 0) {
+      setRemoteModelOptions(offeringModels);
+      setHasAttemptedRemoteFetch(true);
+    }
     setManualModelInput('');
     setShowApiKey(false);
     setSelectedProviderId(null);
     setEditingConfig({
-      name: account.display_label,
-      provider: account.suggested_format,
-      base_url: account.suggested_base_url,
+      name: offering
+        ? getOpenCodePlanLabel(offering.plan)
+        : account.display_label,
+      provider: offering?.format || account.suggested_format,
+      base_url: offering?.base_url || account.suggested_base_url,
       // Leave request_url + model_name empty so the user must pick a model
       // from the live list. We never inject a hard-coded default slug.
       request_url: '',
@@ -912,14 +1024,18 @@ const AIModelConfig: React.FC = () => {
       recommended_for: [],
       metadata: {},
       inline_think_in_text: true,
-      auth: { type: 'subscription', provider: account.provider },
+      auth: {
+        type: 'subscription',
+        provider: account.provider,
+        ...(offering ? { plan: offering.plan } : {}),
+      },
     });
     setSelectedModelDrafts([]);
     setEditingProviderModelIds(new Set());
     setShowAdvancedSettings(false);
     setCreationMode('form');
     setIsEditing(true);
-  }, [resetRemoteModelDiscovery]);
+  }, [getOpenCodePlanLabel, resetRemoteModelDiscovery]);
 
   const loginCoordinatorRef = React.useRef(new SubscriptionLoginCoordinator());
   const subscriptionLoginMountedRef = React.useRef(true);
@@ -1340,6 +1456,7 @@ const AIModelConfig: React.FC = () => {
       skip_ssl_verify: config.skip_ssl_verify ?? false,
       custom_request_body: config.custom_request_body,
       custom_request_body_mode: config.custom_request_body_mode,
+      auth: config.auth || { type: 'api_key' },
     });
     setSelectedModelDrafts(createDraftsFromConfigs(configuredProviderModels));
     setShowAdvancedSettings(
@@ -1756,6 +1873,8 @@ const AIModelConfig: React.FC = () => {
     setEditingConfig(null);
     setCreationMode(null);
     setSelectedProviderId(null);
+    setProviderQuery('');
+    setShowAllProviders(false);
     setReasoningPanelDraftKey(null);
   };
 
@@ -1806,13 +1925,13 @@ const AIModelConfig: React.FC = () => {
               data-testid="settings-model-custom-config-btn"
               data-provider-id="custom"
               variant="default"
-              padding="medium"
+              padding="small"
               interactive
               className="bitfun-ai-model-config__custom-option"
               onClick={handleSelectCustom}
             >
               <div className="bitfun-ai-model-config__custom-option-content" data-bf-component="ai-model-config" data-bf-part="customOption">
-                <Settings size={24} />
+                <Settings size={18} />
                 <div>
                   <div className="bitfun-ai-model-config__custom-option-title" data-bf-component="ai-model-config" data-bf-part="customOptionTitle">{t('providerSelection.customTitle')}</div>
                   <div className="bitfun-ai-model-config__custom-option-description" data-bf-component="ai-model-config" data-bf-part="customOptionDescription">{t('providerSelection.customDescription')}</div>
@@ -1825,58 +1944,94 @@ const AIModelConfig: React.FC = () => {
               <span>{t('providerSelection.orSelectProvider')}</span>
             </div>
 
-            
-            <div className="bitfun-ai-model-config__provider-grid" data-bf-component="ai-model-config" data-bf-part="providerGrid">
-              {providers.map(provider => (
-                <Card
+
+            <Search
+              size="small"
+              className="bitfun-ai-model-config__provider-search"
+              data-testid="settings-model-provider-search"
+              data-bf-component="ai-model-config"
+              data-bf-part="providerSearch"
+              value={providerQuery}
+              placeholder={t('providerSelection.searchProviders')}
+              inputAriaLabel={t('providerSelection.searchProviders')}
+              onChange={setProviderQuery}
+              onSearch={() => {
+                const firstMatch = visibleProviders[0];
+                if (normalizedProviderQuery && firstMatch) handleSelectProvider(firstMatch.id);
+              }}
+            />
+
+
+            <div className="bitfun-ai-model-config__provider-list" data-bf-component="ai-model-config" data-bf-part="providerList">
+              {visibleProviders.map(provider => (
+                // The help link is a sibling of the select button, not a child:
+                // a button may not contain interactive content.
+                <div
                   key={provider.id}
-                  data-testid="settings-model-provider-option"
-                  data-provider-id={provider.id}
-                  variant="default"
-                  padding="medium"
-                  interactive
-                  className="bitfun-ai-model-config__provider-card"
-                  onClick={() => handleSelectProvider(provider.id)}
+                  className="bitfun-ai-model-config__provider-row"
+                  data-bf-component="ai-model-config"
+                  data-bf-part="providerRow"
                 >
-                  <div className="bitfun-ai-model-config__provider-card-content" data-bf-component="ai-model-config" data-bf-part="providerCard">
-                    <div className="bitfun-ai-model-config__provider-name" data-bf-component="ai-model-config" data-bf-part="providerName">{provider.name}</div>
-                    <div className="bitfun-ai-model-config__provider-description" data-bf-component="ai-model-config" data-bf-part="providerDescription">{provider.description}</div>
-                    <div className="bitfun-ai-model-config__provider-models" data-bf-component="ai-model-config" data-bf-part="providerModels">
-                      {provider.models.slice(0, 3).map(model => (
-                        <span key={model} className="bitfun-ai-model-config__provider-model-tag" data-bf-component="ai-model-config" data-bf-part="providerTag">{model}</span>
-                      ))}
-                      {provider.models.length > 3 && (
-                        <span className="bitfun-ai-model-config__provider-model-tag bitfun-ai-model-config__provider-model-tag--more" data-bf-component="ai-model-config" data-bf-part="providerTag">
-                          +{provider.models.length - 3}
-                        </span>
-                      )}
-                    </div>
-                    {provider.helpUrl && (
-                      <a
-                        href={provider.helpUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="bitfun-ai-model-config__provider-help-link"
-                        onClick={async (e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          try {
-                            await systemAPI.openExternal(provider.helpUrl!);
-                          } catch (error) {
-                            console.error('[AIModelConfig] Failed to open external URL:', error);
-                          }
-                        }}
-                      >
-                        <ExternalLink size={12} />
-                        {t('providerSelection.getApiKey')}
-                      </a>
-                    )}
-                  </div>
-                </Card>
+                  <button
+                    type="button"
+                    data-testid="settings-model-provider-option"
+                    data-provider-id={provider.id}
+                    className="bitfun-ai-model-config__provider-select"
+                    data-bf-component="ai-model-config"
+                    data-bf-part="providerSelect"
+                    onClick={() => handleSelectProvider(provider.id)}
+                  >
+                    <span className="bitfun-ai-model-config__provider-name" data-bf-component="ai-model-config" data-bf-part="providerName">{provider.name}</span>
+                    <span className="bitfun-ai-model-config__provider-description" data-bf-component="ai-model-config" data-bf-part="providerDescription">{provider.description}</span>
+                  </button>
+                  {provider.helpUrl && (
+                    <a
+                      href={provider.helpUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="bitfun-ai-model-config__provider-help-link"
+                      onClick={async (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        try {
+                          await systemAPI.openExternal(provider.helpUrl!);
+                        } catch (error) {
+                          console.error('[AIModelConfig] Failed to open external URL:', error);
+                        }
+                      }}
+                    >
+                      <ExternalLink size={12} />
+                      {t('providerSelection.getApiKey')}
+                    </a>
+                  )}
+                  <ChevronRight size={14} className="bitfun-ai-model-config__provider-chevron" aria-hidden="true" />
+                </div>
               ))}
+
+              {visibleProviders.length === 0 && (
+                <div className="bitfun-ai-model-config__provider-empty" data-bf-component="ai-model-config" data-bf-part="providerEmpty">
+                  {t('providerSelection.noProviderMatches')}
+                </div>
+              )}
+
+              {canToggleProviderList && (
+                <button
+                  type="button"
+                  data-testid="settings-model-provider-expand-btn"
+                  className="bitfun-ai-model-config__provider-more"
+                  data-bf-component="ai-model-config"
+                  data-bf-part="providerMore"
+                  onClick={() => setShowAllProviders(previous => !previous)}
+                >
+                  {isProviderListCollapsed
+                    ? t('providerSelection.showAllProviders', { count: matchedProviders.length })
+                    : t('providerSelection.collapseProviders')}
+                  {isProviderListCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                </button>
+              )}
             </div>
 
-            
+
             <div className="bitfun-ai-model-config__selection-actions" data-bf-component="ai-model-config" data-bf-part="selectionActions">
               <Button variant="secondary" onClick={() => setCreationMode(null)}>
                 {t('actions.cancel')}
@@ -2218,14 +2373,22 @@ const AIModelConfig: React.FC = () => {
     const authIsSubscription = authType === 'subscription';
     const selectedSubscriptionProvider: SubscriptionProvider | undefined =
       editingConfig.auth?.type === 'subscription' ? editingConfig.auth.provider : undefined;
+    const selectedOpenCodePlan: OpenCodePlan | undefined =
+      editingConfig.auth?.type === 'subscription'
+      && editingConfig.auth.provider === 'opencode'
+        ? editingConfig.auth.plan || 'zen'
+        : undefined;
     const authSelectValue = authIsSubscription
-      ? `subscription:${selectedSubscriptionProvider || 'codex'}`
+      ? selectedSubscriptionProvider === 'opencode'
+        ? `subscription:opencode:${selectedOpenCodePlan || 'zen'}`
+        : `subscription:${selectedSubscriptionProvider || 'codex'}`
       : 'api_key';
     const authOptions: SelectOption[] = [
       { value: 'api_key', label: t('subscriptionAuth.options.apiKey') },
       { value: 'subscription:codex', label: t('subscriptionAuth.options.codex') },
       { value: 'subscription:antigravity', label: t('subscriptionAuth.options.antigravity') },
-      { value: 'subscription:opencode', label: t('subscriptionAuth.options.opencode') },
+      { value: 'subscription:opencode:zen', label: t('subscriptionAuth.options.opencodeZen') },
+      { value: 'subscription:opencode:go', label: t('subscriptionAuth.options.opencodeGo') },
     ];
     const matchedSubscription = selectedSubscriptionProvider
       ? subscriptionAccounts.find((account) => account.provider === selectedSubscriptionProvider)
@@ -2242,11 +2405,33 @@ const AIModelConfig: React.FC = () => {
                 setEditingConfig((prev) => ({ ...prev, auth: { type: 'api_key' } }));
                 return;
               }
-              const provider = next.replace('subscription:', '') as SubscriptionProvider;
-              setEditingConfig((prev) => ({
-                ...prev,
-                auth: { type: 'subscription', provider },
-              }));
+              const [, providerValue, planValue] = next.split(':');
+              const provider = providerValue as SubscriptionProvider;
+              const plan = provider === 'opencode'
+                ? (planValue || 'zen') as OpenCodePlan
+                : undefined;
+              setEditingConfig((prev) => {
+                if (!prev) return prev;
+                if (provider !== 'opencode') {
+                  return {
+                    ...prev,
+                    auth: { type: 'subscription', provider },
+                  };
+                }
+                const format = ['openai', 'responses', 'anthropic'].includes(prev.provider || '')
+                  ? prev.provider || 'openai'
+                  : 'openai';
+                const baseUrl = plan === 'go'
+                  ? 'https://opencode.ai/zen/go/v1'
+                  : 'https://opencode.ai/zen/v1';
+                return {
+                  ...prev,
+                  provider: format,
+                  base_url: baseUrl,
+                  request_url: resolveRequestUrl(baseUrl, format, prev.model_name || ''),
+                  auth: { type: 'subscription', provider, plan },
+                };
+              });
             }}
             options={authOptions}
             size="small"
@@ -2913,6 +3098,15 @@ const AIModelConfig: React.FC = () => {
     )
     ? resolveDraftCatalogEntry(reasoningPanelDraft)?.reasoning
     : undefined;
+  const modelsDevSourceLabel = modelsDevStatus
+    ? t(`modelsDevCatalog.source.${modelsDevStatus.active_source}`)
+    : t('modelsDevCatalog.loading');
+  const modelsDevUpdatedAt = modelsDevStatus?.cache_updated_at_ms
+    ? i18nService.formatDate(new Date(modelsDevStatus.cache_updated_at_ms), {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      })
+    : t('modelsDevCatalog.noCache');
 
   
   return (
@@ -2997,6 +3191,21 @@ const AIModelConfig: React.FC = () => {
                 ? Math.max(0, Math.ceil((loginPanel.deadlineMs - subscriptionLoginClock) / 1000))
                 : 0;
               const countdown = `${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, '0')}`;
+              const openCodePlanRows = account.provider === 'opencode'
+                ? (['zen', 'go'] as const).map((plan) => {
+                    const planOfferings = (account.api_offerings || [])
+                      .filter((offering) => offering.plan === plan);
+                    const populatedOfferings = planOfferings
+                      .filter((offering) => offering.models.length > 0);
+                    return {
+                      plan,
+                      offerings: populatedOfferings.length > 0
+                        ? populatedOfferings
+                        : planOfferings,
+                    };
+                  }).filter((row) => row.offerings.length > 0)
+                : [];
+              const hasOpenCodeOfferings = openCodePlanRows.length > 0;
               return (
                 <React.Fragment key={account.provider}>
                   <ConfigPageRow
@@ -3031,14 +3240,16 @@ const AIModelConfig: React.FC = () => {
                           >
                             {t('subscriptionAuth.logout')}
                           </Button>
-                          <Button
-                            size="small"
-                            variant="primary"
-                            disabled={anyLoginInProgress}
-                            onClick={() => handleImportFromSubscription(account)}
-                          >
-                            {t('subscriptionAuth.import')}
-                          </Button>
+                          {(account.provider !== 'opencode' || !hasOpenCodeOfferings) && (
+                            <Button
+                              size="small"
+                              variant="primary"
+                              disabled={anyLoginInProgress}
+                              onClick={() => handleImportFromSubscription(account)}
+                            >
+                              {t('subscriptionAuth.import')}
+                            </Button>
+                          )}
                         </>
                       ) : account.vault_unavailable ? (
                         <Button
@@ -3072,6 +3283,39 @@ const AIModelConfig: React.FC = () => {
                       )}
                     </div>
                   </ConfigPageRow>
+
+                  {account.connected && openCodePlanRows.map(({ plan, offerings }) => (
+                    <ConfigPageRow
+                      key={`${account.provider}:${plan}`}
+                      label={getOpenCodePlanLabel(plan)}
+                      description={getOpenCodePlanDescription(plan)}
+                      className="bitfun-ai-model-config__opencode-plan"
+                      align="center"
+                    >
+                      <div className="bitfun-ai-model-config__cli-actions bitfun-ai-model-config__opencode-plan-actions">
+                        {offerings.map((offering) => {
+                          const formatLabel = getOpenCodeFormatLabel(offering.format);
+                          const label = offering.models.length > 0
+                            ? t('subscriptionAuth.useFormatWithCount', {
+                                format: formatLabel,
+                                modelCount: i18nService.formatNumber(offering.models.length),
+                              })
+                            : t('subscriptionAuth.useFormat', { format: formatLabel });
+                          return (
+                            <Button
+                              key={`${offering.plan}:${offering.format}`}
+                              size="small"
+                              variant="secondary"
+                              disabled={anyLoginInProgress}
+                              onClick={() => handleImportFromSubscription(account, offering)}
+                            >
+                              {label}
+                            </Button>
+                          );
+                        })}
+                      </div>
+                    </ConfigPageRow>
+                  ))}
 
                   {loginPanel && (
                     <div
@@ -3201,6 +3445,40 @@ const AIModelConfig: React.FC = () => {
           )}
         </ConfigPageSection>
 
+        {modelsDevStatusAvailable && <ConfigPageSection
+          title={t('modelsDevCatalog.title')}
+          description={t('modelsDevCatalog.description')}
+          mouseGlowSurface={false}
+          extra={(
+            <div className="bitfun-ai-model-config__catalog-actions">
+              <IconButton
+                variant="ghost"
+                size="small"
+                tooltip={t('modelsDevCatalog.viewDetails')}
+                onClick={() => setShowModelsDevDetails(true)}
+              >
+                <Eye size={14} aria-hidden="true" />
+              </IconButton>
+              <IconButton
+                variant="ghost"
+                size="small"
+                tooltip={t(isRefreshingModelsDev
+                  ? 'modelsDevCatalog.refreshing'
+                  : 'modelsDevCatalog.refreshNow')}
+                onClick={() => void handleRefreshModelsDev()}
+                disabled={isRefreshingModelsDev}
+              >
+                <RefreshCw
+                  size={14}
+                  className={isRefreshingModelsDev ? 'bitfun-ai-model-config__spin' : ''}
+                />
+              </IconButton>
+            </div>
+          )}
+        >
+          <span />
+        </ConfigPageSection>}
+
         <ConfigPageSection
           title={t('streamIdleTimeout.title')}
           description={t('streamIdleTimeout.effectiveNextRound')}
@@ -3314,6 +3592,85 @@ const AIModelConfig: React.FC = () => {
       </ConfigPageContent>
 
       <Modal
+        isOpen={showModelsDevDetails}
+        onClose={() => setShowModelsDevDetails(false)}
+        title={t('modelsDevCatalog.detailsTitle')}
+        size="small"
+      >
+        <div className="bitfun-ai-model-config__catalog-details">
+          <ConfigPageRow label={t('modelsDevCatalog.activeSource')} align="center">
+            <span className="bitfun-ai-model-config__catalog-status-value">{modelsDevSourceLabel}</span>
+          </ConfigPageRow>
+          <ConfigPageRow label={t('modelsDevCatalog.catalogSize')} align="center">
+            <span className="bitfun-ai-model-config__catalog-status-value">
+              {modelsDevStatus
+                ? t('modelsDevCatalog.catalogSizeValue', {
+                    providers: i18nService.formatNumber(modelsDevStatus.provider_count),
+                    models: i18nService.formatNumber(modelsDevStatus.reasoning_model_count),
+                  })
+                : t('modelsDevCatalog.loading')}
+            </span>
+          </ConfigPageRow>
+          <ConfigPageRow label={t('modelsDevCatalog.cacheUpdatedAt')} align="center">
+            <span className="bitfun-ai-model-config__catalog-status-value">{modelsDevUpdatedAt}</span>
+          </ConfigPageRow>
+          <ConfigPageRow label={t('modelsDevCatalog.cachePath')} align="center" wide>
+            <div className="bitfun-ai-model-config__catalog-path">
+              <code title={modelsDevStatus?.cache_path}>{modelsDevStatus?.cache_path || '—'}</code>
+              <IconButton
+                variant="ghost"
+                size="small"
+                tooltip={t('modelsDevCatalog.reveal')}
+                onClick={() => {
+                  void aiApi.revealModelsDevCacheDirectory().catch((error) => {
+                    log.warn('Failed to reveal models.dev cache', { error });
+                    notification.error(t('modelsDevCatalog.revealFailed'));
+                  });
+                }}
+              >
+                <FolderOpen size={14} aria-hidden="true" />
+              </IconButton>
+            </div>
+          </ConfigPageRow>
+          <ConfigPageRow label={t('modelsDevCatalog.revision')} align="center">
+            <code className="bitfun-ai-model-config__catalog-revision" title={modelsDevStatus?.revision}>
+              {modelsDevStatus?.revision ? `${modelsDevStatus.revision.slice(0, 12)}…` : '—'}
+            </code>
+          </ConfigPageRow>
+          <div className="bitfun-ai-model-config__catalog-offline-help" role="note">
+            <Info size={15} aria-hidden="true" />
+            <div>
+              <strong>{t('modelsDevCatalog.offlineTitle')}</strong>
+              <p>{t('modelsDevCatalog.offlineDescription')}</p>
+              <div className="bitfun-ai-model-config__catalog-offline-actions">
+                <Button
+                  variant="ghost"
+                  size="small"
+                  onClick={() => void systemAPI.openExternal(MODELS_DEV_DOWNLOAD_URL)}
+                >
+                  <ExternalLink size={14} aria-hidden="true" />
+                  {t('modelsDevCatalog.downloadOriginal')}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="small"
+                  onClick={() => {
+                    void aiApi.revealModelsDevCacheDirectory().catch((error) => {
+                      log.warn('Failed to reveal models.dev cache directory', { error });
+                      notification.error(t('modelsDevCatalog.revealFailed'));
+                    });
+                  }}
+                >
+                  <FolderOpen size={14} aria-hidden="true" />
+                  {t('modelsDevCatalog.openCacheDirectory')}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
         isOpen={!!subscriptionLogoutRequest}
         onClose={() => setSubscriptionLogoutRequest(null)}
         title={t('subscriptionAuth.logoutConfirmTitle')}
@@ -3379,6 +3736,7 @@ const AIModelConfig: React.FC = () => {
             key={reasoningPanelDraft.key}
             value={reasoningPanelDraft.reasoning}
             generatedProjection={reasoningPanelProjection}
+            modelsDevReasoningCatalog={modelCatalog?.models_dev_reasoning_catalog}
             onCancel={() => setReasoningPanelDraftKey(null)}
             onApply={(reasoning) => {
               updateModelDraft(reasoningPanelDraft.modelName, {
