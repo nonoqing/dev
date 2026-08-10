@@ -49,7 +49,6 @@ Complete local index: [`extensions/README.md`](extensions/README.md). Hot entry:
 |---|---|
 | OpenCode compatibility (incl. **current P0 runtime guardrail**) | [`extensions/opencode-extension-compatibility.md`](extensions/opencode-extension-compatibility.md) |
 | External AI work sources | [`extensions/external-ai-work-sources-design.md`](extensions/external-ai-work-sources-design.md) |
-| External AI app connection experience | [`extensions/external-ai-app-connection-experience-design.md`](extensions/external-ai-app-connection-experience-design.md) |
 | Capability runtime integration | [`extensions/capability-runtime-integration-design.md`](extensions/capability-runtime-integration-design.md) |
 | Plugin runtime and host | [`extensions/plugin-runtime-design.md`](extensions/plugin-runtime-design.md) |
 | OpenCode config assets | [`extensions/opencode-config-assets-adapter-design.md`](extensions/opencode-config-assets-adapter-design.md) |

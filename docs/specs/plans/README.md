@@ -23,5 +23,4 @@ Template: [`../templates/plan.md`](../templates/plan.md).
 | [`2026-07-21-subscription-auth-as-model-api-plan.md`](2026-07-21-subscription-auth-as-model-api-plan.md) | in-progress |
 | [`2026-07-22-cargo-target-latest-only-gc-plan.md`](2026-07-22-cargo-target-latest-only-gc-plan.md) | in-progress |
 | [`computer-use-refactor-plan.md`](computer-use-refactor-plan.md) | in-progress |
-| [`external-ai-app-connection-experience-plan.md`](external-ai-app-connection-experience-plan.md) | in-progress |
 | [`tui-app-server-decoupling-refactor-plan.md`](tui-app-server-decoupling-refactor-plan.md) | in-progress |

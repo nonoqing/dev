@@ -52,7 +52,6 @@
 | Desktop window fullscreen | in-progress | [`plans/desktop-window-fullscreen-plan.md`](plans/desktop-window-fullscreen-plan.md) | 桌面主窗口系统全屏 |
 | Edit constraint guard | in-progress | [`plans/edit-constraint-guard-plan.md`](plans/edit-constraint-guard-plan.md) | 编辑约束护栏 |
 | Computer use refactor | in-progress | [`plans/computer-use-refactor-plan.md`](plans/computer-use-refactor-plan.md) | Computer Use 重构计划 |
-| External AI app connection experience | in-progress | [`plans/external-ai-app-connection-experience-plan.md`](plans/external-ai-app-connection-experience-plan.md) | 外部 AI 应用连接体验实施计划 |
 | TUI App Server decoupling | in-progress | [`plans/tui-app-server-decoupling-refactor-plan.md`](plans/tui-app-server-decoupling-refactor-plan.md) | TUI 与 App Server 解耦重构计划 |
 
 状态含义：`draft` / `in-progress` = 可改；`stable` = 已交付仍约束实现；`completed` = 仅存档。

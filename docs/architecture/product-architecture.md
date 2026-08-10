@@ -7,10 +7,8 @@
 内置扩展边界见 [`product-customization-blueprint.md`](product-customization-blueprint.md)；CLI 产品入口和配置
 兼容见 [`cli-product-line-design.md`](cli-product-line-design.md)；HarmonyOS PC 原生 CLI/TUI 平台规约见
 [`platform-portability-design.md`](platform-portability-design.md)。跨专题实施顺序见
-[`../specs/plans/product-architecture-evolution-plan.md`](../specs/plans/product-architecture-evolution-plan.md)。外部 AI 工作内容架构、应用级连接详细设计与对应执行计划分别见
-[`external-ai-work-sources-design.md`](extensions/external-ai-work-sources-design.md)、
-[`external-ai-app-connection-experience-design.md`](extensions/external-ai-app-connection-experience-design.md)和
-[`../specs/plans/external-ai-app-connection-experience-plan.md`](../specs/plans/external-ai-app-connection-experience-plan.md)；OpenCode 扩展总矩阵、配置资产、插件执行、
+[`../specs/plans/product-architecture-evolution-plan.md`](../specs/plans/product-architecture-evolution-plan.md)。外部 AI 工作内容架构见
+[`external-ai-work-sources-design.md`](extensions/external-ai-work-sources-design.md)；OpenCode 扩展总矩阵、配置资产、插件执行、
 终端插件和外部集成适配分别见
 [`opencode-extension-compatibility.md`](extensions/opencode-extension-compatibility.md)、
 [`opencode-config-assets-adapter-design.md`](extensions/opencode-config-assets-adapter-design.md)、
@@ -663,9 +661,9 @@ transport 层不同。是否用 Shared App Server 替换 v17，仍取决于鉴�
 - 插件运行时主机只负责类型化调用、期限、取消、有界队列、逻辑 target 状态、响应校验和故障状态；
   物理进程健康、资源预算与进程树回收属于脚本执行服务。
 - 外部来源的 Command、Tool、Subagent、MCP 仍保留能力专属 DTO 和 owner，但它们的发现调度统一由
-  `ExternalSourceControlPlane` 持有；当前 Desktop/TUI/Peer 的控制事实只通过版本化 product-domain 投影共享，
-  不复制生态 payload、界面状态机或远端专用 DTO。Server 的 external-source helper 当前未接入 App Server schema，生产 `/ws`
-  返回 `method_not_found`；只有完成 V1 read-only schema、handler/client translation 和 WebSocket round-trip 后，Server 才进入该共享边界。
+  `ExternalSourceControlPlane` 持有；当前 Desktop/TUI/Peer 的控制事实只通过版本化的 product-domain 只读视图共享，
+  不复制生态 payload、界面状态机或远端专用 DTO。App Server 已注册 external-source schema、handler 和 client translation；Embedded Host
+  注入 management owner 后可以调用。通用 Server `/ws` 当前没有绑定可信工作区的 management owner，因此返回类型化 `unsupported`；只有注入 Host 持有的作用域化 owner 并通过 WebSocket round-trip 后，Server 才交付该共享边界。
 - 每个生态适配层独立保留该生态的外部格式、来源顺序和调用语义，并映射到 BitFun 归属模块；它本身不成为新的
   业务归属模块，也不能依赖或修改兄弟生态 adapter。通用目录、生命周期协调器和能力 owner 只依赖开放生态 ID、
   来源限定身份与能力专属 provider 契约，不按 OpenCode、Codex 或 Claude Code 分支行为。
@@ -760,6 +758,8 @@ flowchart LR
 - 声明一个 Delivery Profile、生成测试计划或通过 crate 单测，不等于该产品形态已经接入生产。只有入口实际提交
   唯一 profile、消费组装结果和统一能力可用性，并通过入口级行为验证后，才能把该 profile 标为已接入。
 - 产品入口向组装根提交唯一 Delivery Profile；组装根只校验并派生静态计划，不在内部再次选择交付形态。
+- 入口必须在任何配置规范化或全局工具 registry 首次读取之前提交 Delivery Profile，避免进程级 registry 被兼容默认值提前锁定。Desktop 提交 `Desktop`；当前 loopback Server Host 仍承载完整兼容能力，因此提交 `ProductFull`，空的 `Server` profile 仍表示尚未交付的独立 Server 产品形态。
+- Agent Runtime 的最小工具计划不是 Delivery Profile。Product Assembly 单独生成 `ProductToolPlan`，显式列出工具 owner；基线只选择 `Basic` 与 `AgentControl`，完整交付计划由已提交的 Delivery Profile 派生。
 - Runtime Configuration 承载用户、项目、工作区和本次运行的可变配置；不能启用产品定义
   未组装的能力，也不能放宽产品或组织策略。
 - Capability Availability 是根据产品计划、服务健康和当前策略计算出的能力状态；所有入口读取同一状态，
@@ -782,20 +782,27 @@ flowchart LR
 
 | 产品形态 | 当前扩展能力 | 入口行为 |
 |---|---|---|
-| Desktop / product-full | 生产入口仍依赖 `bitfun-core/product-full` 作为兼容组装层；Beta“外部 AI 应用”设置消费版本化 control/catalog 同代快照，显示正交生命周期、审批、冲突、诊断和 Host 能力，并可切换易失 Safe Mode；MCP 原生清单优先展示，外部候选保持独立来源、作用域和覆盖状态；Skills 场景显示已发现 Skill 的生态来源、用户/项目作用域与覆盖结果；目标增加应用级读模型、默认连接事实和批量确认 DTO | 当前四条可执行纵向切片由事实所在 Host 执行；本机 Desktop 使用本机 Host，Peer 控制界面代理 Peer Host，不在控制端回退发现或执行。Safe Mode 只撤下外部 Tool/Subagent/MCP 新调用，不改写来源偏好、不停止发现也不取消在途调用；状态仅在当前 Host 进程/执行域有效，重启或切换 Host 后关闭，所有产品面必须明确提示。Rich Client App Server 迁移尚未完成。Skill 仍使用独立 Registry；受管 package plugin 仍只有静态预览 |
-| CLI | 入口仍以 `bitfun-core/product-full` 作为执行兼容 owner；交互式 TUI 已可执行受支持的 Prompt Command，`/extensions` 的 status、refresh、Safe Mode 与 source enable/disable 消费同一 v1 控制 DTO，`/hooks` 异步读取与 Desktop 相同的只读 Hook 快照并遵循既有命令冲突策略，`/tools` 与 `/agents` 继续承载能力专属查看和操作；命令结果复用现有异步事件循环和 Discovery Lane，不新增调度器。Skill 列表显示来源，模式配置按实际选择结果说明覆盖来源 | 交互式 TUI 通过 private in-process App Server 使用 Embedded Runtime，Headless、Peer 保留独立 adapter，可显式使用 Shared TUI。已批准的 standalone Tool 进入现有 Tool Runtime；已批准的外部 Subagent 只支持 fresh single-run。应用级摘要、首次连接、`/extensions review` 批量确认和任务相关 `action-required` 仍是目标能力，完成条件以对应详细设计和 P6 端到端证据为准。CLI/TUI 不解析生态文件、不启动第二套 worker/Agent owner；Hook 的 coverage mapping 只表示契约覆盖，不表示外部 handler 已加载、激活或执行。Safe Mode 操作后重读权威 catalog 再更新命令路由。非交互入口和 SSH Remote 未接入时不得借本机 TUI 路径代执行；其余 Runtime Parts/Rust Runtime SDK、会话和工作区 owner 边界保持不变 |
-| HarmonyOS PC 原生 CLI/TUI | 未来平台目标，当前未实现 | 目标、问题和风险见平台规约；具体适配另立专题，HAP、手机 Remote App 与远端代执行均不替代 |
-| HarmonyOS PC GUI | 完整 HarmonyOS PC 支持的另一目标形态，当前未实现 | 与 CLI/TUI 共享稳定能力和 Runtime 语义，但独立设计宿主、界面与发布验证；Web、Remote 或现有 Tauri Desktop 均不能替代 |
-| HarmonyOS 手机 Remote App | `src/apps/mobile/harmonyos` 是 phone-only ArkTS 远程入口，不持有本地 Rust Agent Runtime | 保持当前能力并按移动端专题独立演进；本轮不提前设计移动 Runtime/TUI/GUI，也不能据此宣称 HarmonyOS PC 本地能力 |
-| ACP | CLI 托管的服务端仍以 `bitfun-core/product-full` 作为兼容执行层 | 入口已选择 `DeliveryProfile::Acp` 并消费 Runtime Parts；组装层在入队前原子拒绝忙碌会话，不改变其他产品入口的排队行为；活动会话模型与模式写入走 Agent Runtime API。`session/load` 先校验和建立临时 MCP，再恢复 Core，在历史回放成功后才发布活动状态；失败会卸载本次内存状态而不删除历史。同 ID 的重叠打开/关闭被明确拒绝。成功的 `session/close` 阻止新轮次、排空队列和后台子会话，再卸载临时 Core 状态并回收 MCP 与连接；失败保留会话所有权和历史，返回可重试阶段。持久化历史仍可重新加载。完整历史、模型/模式目录与配置读取仍留在现有 Core/ACP 归属，不据此宣称完整解耦 |
-| Server / Remote | 当前 HTTP Server 使用 `product-full` 组装 Embedded Runtime，并通过 `/ws` 暴露 App Server；它固定绑定 loopback，只有 Origin allowlist，没有每连接认证和 user/workspace/execution-domain 绑定。Server 可返回共享 v1 control/catalog 快照，`hostCapabilities` 明确为只读，并在解析 mutation payload 前 fail closed，但 external-source 方法尚未进入 App Server schema、当前返回 `method_not_found`；Peer Host 代理同一读写控制动作与既有能力专属操作，连接旧 Peer 时读路径降级到 legacy catalog、来源启停降级到既有 mutation，Safe Mode 明确要求升级 Host；SSH Remote 工作区的外部来源发现与执行仍未实现 | 控制端用 Host 身份与工作区共同隔离异步结果。Peer Host 只处理 Host 上的真实工作区，不在控制端替远端发现。Server external-source 只读投影须先完成真实 App Server 接线；当前只能视为本机单用户 App Server Host，loopback 单用户边界不扩展到远程/多用户，也不能据此宣称公开 Server Agent API 已交付；SSH Remote 未接入时返回明确不支持且不回退本机来源 |
-| Web / Mobile Web | 依赖现有后端入口，不持有插件执行单元 | 对应 profile 当前为空计划或未接入生产，不能据枚举值宣称独立产品能力 |
-| Public Agent SDK | Python/TypeScript 产品尚未交付；Rust Runtime SDK 是内部 preview。本地 SDK Host 协议与独立 `bitfun-sdk-host` 进程只有实现候选，在跨内部调用、Headless CLI 与 Host 的同一 Query golden fixture 通过前不称为已交付 preview | SDK Host 独立选择 SDK profile/source；能力集合从共享产品事实生成，不依赖或冒充 CLI。目标为一个 `AgentClient`、query/session 和 callback 产品，Python/TypeScript 只是同一 SDK 的语言绑定；双语言可安装、核心 Query/Session 闭环和协议一致性是 Preview 门槛，仓库外消费者与冻结竞品能力矩阵是 GA 门槛，具体定义以 Agent SDK 专题为准 |
+| Desktop | 使用 `product-full`；Settings 从现有来源目录和 integration policy 生成简短应用概览，具体审批与冲突仍进入 Tool、Agent、MCP 或 Hook owner | 可执行能力在事实所在 Host 运行；Safe Mode 只阻止新调用，不改来源、不取消正在运行的调用 |
+| CLI / TUI | 使用显式 Core owner closure：`agent-runtime` 基线、实际 service owner（包括 Remote Connect、DeepResearch、LSP、external/plugin source 与 SSH）以及九组 `tools-*`；`/extensions` 只提供状态、启停和刷新，`/hooks`、`/tools`、`/agent` 和 `/mcp` 处理各自能力 | `agent-runtime` 不再隐式携带完整 MCP/Remote/Browser/Web/Git/LSP/模型目录闭包；非交互不等待权限输入，生态解析仍在适配器，远程能力未接入时不回退本机 |
+| ACP | 使用 `DeliveryProfile::Acp`、Runtime Parts、`agent-runtime` 基线、所需 service owner 与九组 `tools-*`，但不选择 CLI 的 plugin runtime 和 Remote Connect owner | load 成功后才发布活动状态；close 排空后再卸载；完整历史、Canvas 工具物化、兼容指令来源和配置仍由 Core/ACP 管理；未选择的能力不得借 Cargo feature union 偶然出现 |
+| Peer / Server | Peer Host 执行真实工作区操作；通用 HTTP Server 未绑定可信 workspace owner 时明确返回不支持 | 控制端不替远端发现或执行；loopback 单用户边界不扩展到远程/多用户；SSH Remote 未接入时返回不支持 |
+| Web / Mobile Web | 依赖现有后端入口 | 不持有插件执行单元，也不能据空 profile 宣称独立能力 |
+| HarmonyOS 手机 Remote | phone-only ArkTS 远程入口 | 不等于 HarmonyOS PC 本地 Runtime、CLI/TUI 或 GUI |
+
+| 目标形态 | 当前状态 | 设计边界 |
+|---|---|---|
+| HarmonyOS PC CLI/TUI | 未实现 | HAP、手机 Remote App 和远端代执行均不能替代 |
+| HarmonyOS PC GUI | 未实现 | 与 CLI/TUI 共享 Runtime 语义，但独立验证宿主、界面和发布 |
+| Public Agent SDK | Python/TypeScript 尚未交付；Rust Runtime SDK 是内部 preview | 一个 `AgentClient`、多个语言绑定；SDK Host 不依赖或冒充 CLI |
+
+Shared Agent Runtime 是第一方多实例的目标部署，不是上表新增的当前产品形态。当前文档中表示“事实实际所在位置”的泛称 Host
+可能仍指 Desktop 进程、Peer、Server 或 Remote execution host，不能据此推断 Shared deployment、多 Client Session 单写或
+跨进程重连已经交付；完成条件以
+[`agent-runtime-deployment-design.md`](agent-runtime-deployment-design.md) 为准。
 
 底层来源与能力继续使用[外部 AI 工作内容设计](extensions/external-ai-work-sources-design.md#7-状态与提示规则)定义的
 已发现、已应用、可用、需确认、更新中、沿用上一版本、部分受限、暂时过期、已移除/已停用和不可用，并附带
-原因与恢复建议。目标状态下，Settings 首页和 TUI `/extensions` 将消费[应用级连接详细设计](extensions/external-ai-app-connection-experience-design.md#34-面向用户的应用级状态)派生的五种摘要；当前生产入口仍消费 V1 来源/能力控制事实，不能据目标文档宣称应用级连接已经交付。目标摘要不能替代底层事实，宿主也不能自行重算优先级。Host 的准备完成、重启、暂停、不支持或失败只作为详情映射，不能形成第二套并列产品状态。
-现有代码中的过渡状态只能展示为“静态预览、未执行”，不能因为进入来源清单就误报为已应用、已连接或可用。
+原因与恢复建议。Settings 首页和 TUI 可以把这些事实压缩为简短应用/来源概览，但不能建立第二套连接、审批或任务结果状态机，也不能因为进入来源清单就误报为已应用或可用。
 
 ## 7. 完成判定
 

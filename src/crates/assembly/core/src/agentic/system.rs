@@ -17,7 +17,7 @@ use crate::infrastructure::try_get_path_manager_arc;
 use crate::runtime_ownership::CoreRuntimeOwnership;
 use crate::service::token_usage::{TokenUsageService, TokenUsageSubscriber};
 use bitfun_observability::Telemetry;
-use bitfun_product_capabilities::DeliveryProfile;
+pub use bitfun_product_capabilities::DeliveryProfile;
 
 /// Agentic runtime state shared by host adapters.
 #[derive(Clone)]
@@ -27,7 +27,12 @@ pub struct AgenticSystem {
     pub token_usage_service: Arc<TokenUsageService>,
 }
 
-/// Initialize the agentic runtime and register the global coordinator.
+/// Initialize the full compatibility Agent Runtime and register the global
+/// coordinator.
+///
+/// Narrow product hosts must use `init_agentic_system_for_profile` so their
+/// explicit assembly plan remains the only capability authority.
+#[cfg(feature = "product-full")]
 pub async fn init_agentic_system() -> Result<AgenticSystem> {
     init_agentic_system_for_profile(DeliveryProfile::ProductFull).await
 }

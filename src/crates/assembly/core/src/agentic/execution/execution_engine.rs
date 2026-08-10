@@ -59,6 +59,7 @@ use crate::util::types::ToolDefinition;
 use crate::util::{elapsed_ms_u64, truncate_at_char_boundary};
 use bitfun_agent_runtime::output_surface::TOOL_CONTEXT_INLINE_MARKDOWN_IMAGE_DISPLAY_KEY;
 use bitfun_agent_runtime::remote_file_delivery::TOOL_CONTEXT_REMOTE_FILE_DELIVERY_KEY;
+use bitfun_agent_runtime::thread_goal_tools::ensure_thread_goal_tools;
 use bitfun_ai_adapters::ModelExchangeTraceConfig;
 use bitfun_core_types::SessionModelBindingPolicy;
 use bitfun_observability::domains::{
@@ -92,6 +93,12 @@ fn compression_source_class(source: &str) -> CompressionSource {
         "model" => CompressionSource::Model,
         "local_fallback" => CompressionSource::LocalFallback,
         _ => CompressionSource::None,
+    }
+}
+
+fn ensure_primary_session_goal_tools(allowed_tools: &mut Vec<String>, is_subagent: bool) {
+    if !is_subagent {
+        ensure_thread_goal_tools(allowed_tools);
     }
 }
 
@@ -2321,7 +2328,11 @@ impl ExecutionEngine {
                     .map(|workspace| workspace.root_path()),
             )
             .await;
-        let allowed_tools = tool_policy.allowed_tools.clone();
+        let mut allowed_tools = tool_policy.allowed_tools.clone();
+        ensure_primary_session_goal_tools(
+            &mut allowed_tools,
+            context.subagent_parent_info.is_some(),
+        );
         let enable_tools = context
             .context
             .get("enable_tools")
@@ -3425,7 +3436,11 @@ impl ExecutionEngine {
                     .map(|workspace| workspace.root_path()),
             )
             .await;
-        let allowed_tools = tool_policy.allowed_tools.clone();
+        let mut allowed_tools = tool_policy.allowed_tools.clone();
+        ensure_primary_session_goal_tools(
+            &mut allowed_tools,
+            context.subagent_parent_info.is_some(),
+        );
         let enable_tools = context
             .context
             .get("enable_tools")
@@ -4817,7 +4832,7 @@ impl ExecutionEngine {
         // successfully, renumber `cit_XXX` references in the final report
         // into consecutive `[N]` display IDs. Two gates apply (agent type +
         // dialog success) so other agents and failed turns are unaffected.
-        #[cfg(feature = "agent-runtime")]
+        #[cfg(feature = "deep-research")]
         {
             if bitfun_agent_runtime::deep_research::should_post_process_research_report(
                 &agent_type,
@@ -4960,8 +4975,9 @@ impl ExecutionEngine {
 #[cfg(test)]
 mod tests {
     use super::{
-        activate_conditional_instructions_after_round, manual_compaction_terminal_error,
-        ContextHealthSnapshot, ExecutionEngine, RoundResult, TurnPromptScaffold,
+        activate_conditional_instructions_after_round, ensure_primary_session_goal_tools,
+        manual_compaction_terminal_error, ContextHealthSnapshot, ExecutionEngine, RoundResult,
+        TurnPromptScaffold,
     };
     use crate::agentic::agents::{
         PrependedPromptReminders, PromptBuilderContext, UserContextPolicy,
@@ -4981,6 +4997,7 @@ mod tests {
     use crate::service::config::types::AIModelConfig;
     use crate::service::remote_ssh::workspace_state::workspace_session_identity;
     use crate::util::types::ToolDefinition;
+    use bitfun_agent_runtime::thread_goal_tools::THREAD_GOAL_TOOL_NAMES;
     use bitfun_runtime_ports::{WorkspaceDirEntry, WorkspaceFileSystem, WorkspacePathKind};
     use serde_json::json;
     use sha2::{Digest, Sha256};
@@ -4989,6 +5006,19 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn primary_session_tool_policy_restores_goal_tools_but_subagents_stay_scoped() {
+        let mut primary_tools = vec!["Read".to_string()];
+        ensure_primary_session_goal_tools(&mut primary_tools, false);
+        for tool_name in THREAD_GOAL_TOOL_NAMES {
+            assert!(primary_tools.iter().any(|tool| tool == tool_name));
+        }
+
+        let mut subagent_tools = vec!["Read".to_string()];
+        ensure_primary_session_goal_tools(&mut subagent_tools, true);
+        assert_eq!(subagent_tools, vec!["Read".to_string()]);
+    }
 
     #[test]
     fn manual_compaction_preserves_cancellation_as_a_terminal_cancellation() {

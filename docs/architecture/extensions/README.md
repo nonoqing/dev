@@ -10,7 +10,6 @@
 | Topic | Authority |
 |---|---|
 | Capability runtime integration | [`capability-runtime-integration-design.md`](capability-runtime-integration-design.md) |
-| External AI app connection experience | [`external-ai-app-connection-experience-design.md`](external-ai-app-connection-experience-design.md) |
 | External AI work sources | [`external-ai-work-sources-design.md`](external-ai-work-sources-design.md) |
 | OpenCode config assets | [`opencode-config-assets-adapter-design.md`](opencode-config-assets-adapter-design.md) |
 | OpenCode compatibility overview | [`opencode-extension-compatibility.md`](opencode-extension-compatibility.md) |
