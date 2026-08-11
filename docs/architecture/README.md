@@ -39,7 +39,6 @@ marked as proposed and must not be presented as shipped behavior.
 | Model request cache reuse | [`model-request-cache-reuse.md`](model-request-cache-reuse.md) |
 | Observability telemetry | [`observability-telemetry-design.md`](observability-telemetry-design.md) |
 | Observability implementation guide | [`observability-implementation-guide.md`](observability-implementation-guide.md) |
-| DevEco observability alignment | [`deveco-observability-alignment-contract.md`](deveco-observability-alignment-contract.md) |
 
 ## Extensions
 

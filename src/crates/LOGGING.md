@@ -159,10 +159,18 @@ writer failure must not block or recursively log through the same failing sink.
 explicit, reviewed telemetry contract. Do not attach a generic OpenTelemetry
 layer that exports all existing events.
 
-Telemetry must use typed domain facts, registered finite attributes, bounded
-cardinality, and authoritative operation ownership. Raw error messages,
-business IDs, provider or model names, paths, prompts, payloads, tool names,
-tool inputs, and tool outputs must not be exported.
+Safe Trace, Metric, and Log telemetry must use typed domain facts, registered
+finite attributes, bounded cardinality, and authoritative operation ownership.
+Raw error messages, business IDs, provider or model names, paths, prompts,
+payloads, tool names, tool inputs, and tool outputs must not be exported through
+that channel.
+
+The only remote content-bearing exception is the separately authorized
+`TelemetryLevel::Debug` Log channel. Callers must use one of its closed
+owner-specific record variants; they must not serialize ordinary `log` or
+`tracing` events into it. Credentials and identity remain prohibited, known
+secret shapes are whole-value redacted, and unknown secrets in free text can
+still evade pattern redaction.
 
 ## Verification
 

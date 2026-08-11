@@ -20,7 +20,7 @@
 
 
 
-本文所说的“打点”，是在关键业务边界记录操作何时发生、持续多久、结果如何以及少量安全属性。它不等于增加普通日志，也不要求上传用户输入或业务内容。
+本文所说的安全“打点”，是在关键业务边界记录操作何时发生、持续多久、结果如何以及少量安全属性。它不等于增加普通日志。另有显式授权、独立隔离的 Debug 敏感日志通道用于远程排障；该通道不改变安全 Trace、Metric 和 Log 的类型与字段边界。
 
 
 
@@ -51,7 +51,7 @@ BitFun 当前已经有日志、事件和局部耗时统计，但缺少统一上�
 
 - 本地日志用于当前设备排障，可能包含较详细错误信息，它不自动上传。
 
-- Telemetry 用于跨版本、平台和大量运行实例分析质量、性能和稳定性，只能发送登记过的安全 Trace、Metric 和 OTel Log。
+- Telemetry 用于跨版本、平台和大量运行实例分析质量、性能和稳定性：默认只发送登记过的安全 Trace、Metric 和 OTel Log；Debug 另需独立授权并只发送封闭敏感记录。
 
 - Hook 是业务执行链上的扩展点，可以检查、变换或拒绝调用。
 
@@ -95,7 +95,7 @@ BitFun 当前已经有日志、事件和局部耗时统计，但缺少统一上�
 |并发与上下文|为 GUI、CLI/TUI、WebServer、Relay、远程开发和移动端定义请求级上下文隔离、显式传播、Trace Link、可信跨端传播和能力降级规则|
 |接口与扩展|提供平台无关的统一入口、类型化静态定义、OTel 适配器、发送器和配置模型，使新业务不依赖 OTel SDK，SDK 或后端可替换|
 |异常与崩溃|统一业务错误、超时、取消、发送器故障、Rust panic 和异常退出的分类与记录方式，并保证 Telemetry 不影响主流程|
-|隐私与控制|通过字段白名单、出站校验、匿名安装 ID、遥测级别和关闭语义，禁止 Prompt、响应、路径及用户或机器身份外发|
+|隐私与控制|通过字段白名单、出站校验、匿名安装 ID、遥测级别和关闭语义，保证安全信号不外发 Prompt、响应、路径及用户或机器身份；Debug 仅在独立授权后发送经过脱敏和截断的封闭敏感记录|
 |行为一致性|统一不同入口的字段、生命周期和错误语义，并规定关闭、并发、新旧版本和能力缺失时的安全降级方式|
 |数据交付|采用 OTLP/Collector、有界内存、批处理、重试、限流、丢弃、重配置和健康状态，保证交付行为及数据去向可解释|
 
@@ -121,7 +121,7 @@ BitFun 当前已经有日志、事件和局部耗时统计，但缺少统一上�
 
 - 是否新增点位以 BitFun 当前功能和隐私边界为准。
 
-- 本地日志只保存在用户设备，用于排查当前实例；模型交换调试文件可能包含完整模型请求和响应，只用于显式本地诊断；远程 Telemetry 只发送登记过的安全统计和结构化记录。三者使用不同入口和存储，前两类数据不会自动上传。
+- 本地日志只保存在用户设备，用于排查当前实例；模型交换调试文件可能包含完整模型请求和响应，只用于显式本地诊断。普通远程 Telemetry 只发送登记过的安全统计和结构化记录；只有用户或运维明确授权的 Debug 敏感日志会通过独立 scope 和队列上传，且不会转发普通日志。
 
 - Telemetry 服务端和数据存储分析平台属于配套建设，它们独立设计和部署，通过标准 OTLP 与 BitFun 客户端解耦。
 
@@ -174,7 +174,7 @@ OpenCode 使用 Effect OpenTelemetry 和 OTLP/HTTP，在 Agent、Tool、Plugin�
 |Metric|独立 Metric client|当前以 Log/Trace 为主|第一阶段提供 Counter/Histogram（累计计数、耗时分布、当前值 \+ 低频进程资源采样）|
 |Log|默认关闭；白名单业务事件可进入 OTLP Logs，字段范围较宽|默认本地；配置 endpoint 后通用 Effect Log 可同时进入 OTLP|本地原始日志与结构化 OTel Log 分离|
 |配置|信号独立、批处理、HTTP/gRPC|环境变量主导|产品 consent \+ 信号、采样、批处理和 OTLP HTTP endpoint 配置|
-|内容|Prompt 默认关闭但可开启|LLM 默认元数据，应用日志仍有内容风险|任何级别都不发送 Prompt、模型响应、Tool/Hook 输入输出或文件内容；该限制不能由配置放开|
+|内容|Prompt 默认关闭但可开启|LLM 默认元数据，应用日志仍有内容风险|Basic/Diagnostic 不发送内容；Debug 经独立授权后只允许封闭业务记录发送脱敏、截断的 Prompt、模型响应和 Tool 内容，身份与凭据仍禁止|
 |身份|可含账号、邮箱、host|可含 username/session|仅伪匿名安装 ID 和短期运行 ID|
 
 
@@ -197,8 +197,8 @@ BitFun 不是从零建设。当前代码已经有大量事实和计时，核心�
 |CLI/Server/Relay 日志|已使用 `tracing` / `tracing-subscriber`|复用 registry，增加只消费已登记 Log descriptor 的 OTel layer|
 |Native/Web 启动计时|已有 `DesktopStartupTrace`、`startupTrace`|投影固定阶段和聚合耗时，不上传任意属性|
 |Agent 生命周期|`AgenticEvent` 已覆盖 Turn、Round、Token、Tool、压缩等|仅安全投影 Metric，禁止整体序列化外发|
-|模型交换调试|`ModelExchangeTraceSink` 可包含完整请求和响应|保持本地独立，禁止连接远程 exporter|
-|配置|`app.telemetry: bool`，默认 `false`|迁移为 `off/basic/diagnostic` 版本化配置|
+|模型交换调试|`ModelExchangeTraceSink` 可包含完整请求和响应|本地文件仍独立且不直接连接 exporter；Debug 授权时由同一 Model Exchange owner 另行构造封闭的 Inference 记录|
+|配置|`app.telemetry: bool`，默认 `false`|已迁移为 V2 `off/basic/diagnostic/debug` 配置，Debug 另需敏感内容同意|
 |Round/Tool/Token 耗时|owner 已有大量权威耗时和终态|直接复用，避免 Telemetry 再建第二套状态|
 
 
@@ -314,11 +314,11 @@ observation.finish(turn_finish_facts(&result));
 
 
 
-这段伪代码表达四件事：`start_turn` 记录开始时间和安全起始属性；`child_parent` 供 Round、Inference、Tool 等子操作建立父子关系；原有业务流程保持不变；`finish` 记录唯一终态、计数和耗时。facts 只能包含类型化安全值，业务代码不能提交任意 attribute、JSON、EventName、日志正文或原始错误。
+这段伪代码表达四件事：`start_turn` 记录开始时间和安全起始属性；`child_parent` 供 Round、Inference、Tool 等子操作建立父子关系；原有业务流程保持不变；`finish` 记录唯一终态、计数和耗时。安全 facts 只能包含类型化安全值，业务代码不能借此提交任意 attribute、JSON、EventName、日志正文或原始错误。Debug 使用另一套封闭记录枚举，只有真实 owner 可以构造固定 Turn/Inference/Tool/Approval 变体。Slash command 使用普通安全 facts，Recovery 事实则归回各自业务 owner，两者都不建 Debug 事件变体。
 
 
 
-静态 descriptor 声明信号类型、字段、枚举、单位、基数、采样、保留类别和消费者；Schema Registry 是允许进入任何 Exporter 的唯一字段事实源。第一版固定 `opentelemetry 0.32.0`、`opentelemetry_sdk 0.32.1` 和 `opentelemetry-otlp 0.32.0`，只启用 Trace、Metric、Log、HTTP和 gzip 所需 feature。上层 contract 和插件 ABI 不暴露 OTel 类型，从而把 SDK Beta/RC API 的升级影响限制在 concrete service 内。
+静态 descriptor 声明安全信号类型、字段、枚举、单位、基数、采样、保留类别和消费者；Schema Registry 是允许安全记录进入 Exporter 的唯一字段事实源。Debug 记录使用固定版本的封闭 schema，不加入任意字段注册。第一版固定 `opentelemetry 0.32.0`、`opentelemetry_sdk 0.32.1` 和 `opentelemetry-otlp 0.32.0`，只启用 Trace、Metric、Log、HTTP和 gzip 所需 feature。上层 contract 和插件 ABI 不暴露 OTel 类型，从而把 SDK Beta/RC API 的升级影响限制在 concrete service 内。
 
 
 
@@ -330,13 +330,13 @@ observation.finish(turn_finish_facts(&result));
 
 |位置|作用|
 |---|---|
-|业务入口|类型化接口只接受登记过的枚举、布尔值和数值，不提供任意字段、JSON、日志正文或错误原文入口。调用方无法通过正常 API 构造未定义数据|
-|Telemetry 运行组件|按字段注册表、遥测级别、采样、速率和容量判断是否接收。拒绝接受只丢弃 Telemetry 并记录安全计数，不等待网络或影响业务|
-|网络出口|发送前再次确认授权、字段规则和当前服务配置。用户关闭、降低级别或切换出口时停止发送并清空旧实例队列<br>|
+|业务入口|安全接口只接受登记过的枚举、布尔值和数值。Debug 只接受封闭的 owner 记录，不接受任意事件名或任意 JSON 事件|
+|Telemetry 运行组件|安全信号按字段注册表、级别、采样、速率和容量准入；Debug 先做结构化整值替换、自由文本模式脱敏和 256 KiB 头尾截断，再进入独立有界队列。拒绝只丢 Telemetry，不等待网络或影响业务|
+|网络出口|发送前再次确认授权和当前 generation。用户关闭、降低级别或切换出口时撤销旧 generation；离开 Debug 立即清空未发送的敏感记录<br>|
 
 
 
-`off/basic/diagnostic` 只能缩小采集范围，不能放宽这条规则。Collector 的校验只是数据离开设备后的服务端防御，不能替代客户端检查。
+`off/basic/diagnostic` 只能缩小安全采集范围，不能放宽安全 schema。`debug` 也不能绕过封闭记录、脱敏、截断、身份排除和容量限制。Collector 的校验只是数据离开设备后的服务端防御，不能替代客户端检查。
 
 
 
@@ -621,7 +621,7 @@ flowchart LR
 |`AgenticEvent` / `EventRouter`|继续作为 UI/host 业务事件；不序列化整个事件，也不重建终态遥测|
 |Round/Tool/Token/Startup 已有耗时|复用为 Metric 事实源|
 |`DesktopStartupTrace` / Web `startupTrace`|保留本地时间线，只投影固定阶段|
-|`ModelExchangeTraceSink`|保留本地，禁止连接 Telemetry exporter|
+|`ModelExchangeTraceSink`|本地文件保留且不直接连接 Telemetry exporter；Debug Inference 记录由其 owner 经封闭 API 发送|
 |Desktop/CLI 本地日志|保留本地，禁止通用 Log bridge 外发|
 |OTel Provider、OTLP Exporter、和 HTTP 客户端|复用 `opentelemetry 0.32.0`、`opentelemetry_sdk 0.32.1` 和 `opentelemetry-otlp 0.32.0`，只启用 Trace、Metric、Log、HTTP 和 gzip 所需功能；不自研 OTLP 协议和三类信号数据模型|
 |OTel SDK 默认 `BatchSpanProcessor` / `BatchLogProcessor`|现有实现可复用其单队列、定时批量和 drop-new 基础能力，但同一信号一次只发送一个批次，并且只按记录数限制容量|
@@ -730,13 +730,20 @@ Metric 禁止使用 Trace ID、Session ID、路径、URL、用户定义名称、
 |---|---|
 |本地原始日志|继续使用现有 `log` / `tracing` 文件和控制台，可以保留本地诊断所需细节，但不自动进入远程 OTel Log 发送器|
 |结构化 OTel Log|业务 owner 从类型安全事实生成 `LogRecord`，经隐私校验门和字段注册表后通过 OTLP `/v1/logs` 发送|
+|Debug 敏感 OTel Log|业务 owner 构造封闭 `DebugTelemetryRecord`，经脱敏和截断后使用独立 scope/队列通过同一 `/v1/logs` 发送|
 |LogRecord|事件时间、客户端观察时间、事件名、严重级别、固定正文、类型安全属性，以及可选 TraceId/SpanId|
 |事件名 / 正文|事件名来自版本化静态定义；正文只能使用静态定义中的固定模板，调用方不能提交自由文本|
-|严重级别与采样|Error/Warn 不做概率采样；低频状态变化 Info 全量；高频成功 Info 按静态规则采样；Debug 仅在 `diagnostic` 下采样发送；所有级别仍受速率上限和队列容量保护|
+|严重级别与采样|安全 Error/Warn 不做概率采样；低频状态变化 Info 全量；高频成功 Info 按静态规则采样。`TelemetryLevel::Debug` 的敏感记录不做概率采样，使用独立容量保护；它与普通日志的 DEBUG severity 不是同一个概念|
 |Trace 关联|处于活动 Span 中的 LogRecord 自动带 TraceId/SpanId；跨 Trace 的后台状态不伪造父子关系|
-|禁止字段|`error.to_string()` 产生的错误原文、调用栈、路径、URL、请求体、Prompt、模型输出、Tool 参数/结果、用户和机器身份|
+|禁止字段|安全 Log 禁止 `error.to_string()` 原文、调用栈、路径、URL、请求体、Prompt、模型输出、Tool 参数/结果、用户和机器身份；Debug 仍禁止调用栈、独立用户/机器身份和未脱敏凭据|
 |发送实现|生产配置只提供 `none`（不发送）和 `otlp_http`；`local_safe_jsonl`、`in_memory` 仅由开发和测试环境注入，不是用户可配置出口|
 |生产链路|按标准 OTLP HTTP 的三类信号通道发送到 Collector，再做后端路由和协议转换|
+
+Debug 敏感 Log 与安全信号复用业务操作事件名，例如 `bitfun.agent.turn`、`bitfun.inference.request`、`bitfun.inference.attempt`、`bitfun.tool.execute` 和 `bitfun.permission.*`；生命周期阶段由封闭记录的 `record_type` 区分。独立 instrumentation scope、`data_class=debug_sensitive` 和 `bitfun.debug.*` 信封元数据负责通道隔离，不另建一套 `bitfun.debug.<domain>.*` 业务命名空间。
+
+内容字段统一使用 `DebugContentField { value, original_size_bytes, truncated }`。脱敏发生在截断之前，所有内容字段共享确定性的记录预算，外层记录再执行 256 KiB 兜底。路径、命令和业务关联 ID 只允许出现在这一通道；账号、邮箱、组织、设备身份和凭据仍禁止。Turn 修改路径由当前 Turn Snapshot 事实生成，Tool `part_index` 由 `tool_call_order` 生成，均不从普通日志或 Display 文本反推。
+
+Compression 的压缩后 Token 是本地估算时，字段必须命名为 `tokens_after_estimate`；没有 provider 精确值时不得冒充 `truePostCompactTokenCount`。模型压缩调用的 Usage 仅在 provider 返回时透传，本地 fallback 保持缺失。
 
 
 
@@ -939,19 +946,19 @@ TraceId、SpanId、ParentSpanId、Span 时间、Metric DataPoint 时间和 Log T
 
 
 
-### C.5 永不进入远程 Telemetry 的数据
+### C.5 安全遥测禁止数据与 Debug 硬边界
 
 
 
 |类别|禁止内容|
 |---|---|
-|模型|API 请求/响应、请求头、URL 查询参数、Prompt、输出、思考/推理内容|
-|Tool|参数、结果、命令、终端输入输出、拒绝和取消原文|
-|文件与项目|文件内容、代码差异、路径、工作目录、仓库 URL、分支名、远端机器名|
+|模型|Basic/Diagnostic 禁止 API 请求/响应、请求头、URL 查询参数、Prompt、输出、思考/推理内容；Debug 可发送脱敏和截断后的封闭请求/响应记录|
+|Tool|Basic/Diagnostic 禁止参数、结果、命令、终端输入输出、拒绝和取消原文；Debug 可发送 owner 构造的 Tool/Approval 固定记录|
+|文件与项目|Basic/Diagnostic 禁止文件内容、代码差异、路径、工作目录、仓库 URL、分支名、远端机器名；Debug 可发送排障所需路径、仓库根、分支和基线提交，不发送独立机器身份|
 |用户与设备|用户名、邮箱、账号、组织、机器名、设备 ID、IP、MAC|
 |凭据|API key、令牌、Cookie、身份凭据和环境变量|
-|错误|原文、调用栈、模型服务商原始响应|
-|扩展|Skill/Agent/Hook 文本、插件传输内容、MCP 参数/结果、自定义名称|
+|错误|Basic/Diagnostic 禁止原文、调用栈、模型服务商原始响应；Debug 可发送脱敏和截断后的 owner 原始错误，不发送调用栈|
+|扩展|Basic/Diagnostic 禁止 Skill/Agent/Hook 文本、插件传输内容、MCP 参数/结果、自定义名称；Debug 只允许固定 Tool/Inference 字段，不提供插件任意事件接口|
 |媒体|图片、音频、附件内容和文件名|
 
 
@@ -982,14 +989,15 @@ TraceId、SpanId、ParentSpanId、Span 时间、Metric DataPoint 时间和 Log T
 
 
 
-现有 `app.telemetry: bool` 兼容迁移：`false -> off`、`true -> basic`，保存后只写版本化配置。
+现有 `app.telemetry: bool` 兼容迁移：`false -> off`、`true -> basic`，保存后写 V2 版本化配置。V1 保持可读；未知新版本保留原值但按 `off` 执行。
 
 
 
 |配置|默认|语义与校验|重配置|
 |---|---|---|---|
-|`version`|`1`|未知高版本拒绝启用并保留原配置|否|
-|`level`|`off`|`off`（关闭）/`basic`（基础聚合）/`diagnostic`（增加采样 Trace 和调试事件）|降低立即生效；提高在新运行实例就绪后生效|
+|`version`|`2`|未知高版本拒绝启用并保留原配置|否|
+|`level`|`off`|`off`（关闭）/`basic`（基础聚合）/`diagnostic`（增加采样 Trace）/`debug`（增加独立敏感 Log）|降低立即撤销 generation；离开 Debug 清空未发送敏感记录|
+|`sensitive_content_consent`|`false`|Desktop Debug 必须为 `true`；Server/Relay 仅把 `BITFUN_TELEMETRY_LEVEL=debug` 视为显式运维授权|随 level 重配置|
 |`signals.traces`|`true`|仍受 level 限制|可重载|
 |`signals.metrics`|`true`|仍受 level 限制|可重载|
 |`signals.logs`|`true`|控制结构化 OTel Log；仍受遥测级别和隐私校验门限制|可重载|
@@ -1089,7 +1097,7 @@ TraceId、SpanId、ParentSpanId、Span 时间、Metric DataPoint 时间和 Log T
 
 3. 按第 1.1 节选择成本最低且语义充分的信号，在附录 C.3 的受限领域中定义稳定的静态信号描述、单位、结果分类、安全错误类型、指标维度上限和最低遥测级别；新增领域必须先登记，不能在调用点临时创建。
 
-4. 对所有字段执行隐私分类；Prompt、响应、参数、内容、路径、身份、凭据和错误原文没有例外入口。
+4. 对所有字段执行隐私分类；Prompt、响应、参数、内容、路径和错误原文只能进入明确授权的封闭 Debug 记录；身份和凭据没有例外入口。
 
 5. 定义并发、异步派生、取消、超时、重试和跨进程时的上下文规则；不依赖全局当前请求。
 
@@ -1110,11 +1118,11 @@ TraceId、SpanId、ParentSpanId、Span 时间、Metric DataPoint 时间和 Log T
 |测试|必须覆盖|
 |---|---|
 |字段规则|类型安全事实的快照、OTel 标准/BitFun 扩展字段分类、必填 Key、产品保留 Key、受限领域/子领域、机器可读字段清单生成、未知枚举兜底、维度组合/长度限制和不兼容版本变更|
-|敏感数据探针|将 Prompt、响应、Tool 内容、路径、用户名、机器名、Authorization、API key 和插件自定义字段作为测试输入，确认三类远程信号均不可见|
+|敏感数据探针|确认 Prompt、响应、Tool 内容、路径和业务 ID 在 Off/Basic/Diagnostic 三类安全信号均不可见；Debug 授权后内容按固定记录可见，但用户名、机器名、Authorization、Cookie、Token、API key、私钥和插件任意字段仍不可见|
 |插件边界|插件二进制接口不暴露 Telemetry/OTel/发送器；插件日志、参数、结果和自定义事件不能进入宿主 Telemetry；宿主产生的插件运行事实仍经过业务入口、运行组件和网络出口三处控制|
 |Trace|Agent Dialog Turn、CLI 命令、Server 请求和后台任务分别作为可选根操作；父子关系、两个并发根请求隔离、创建异步任务时显式传播、重试、取消、超时、提前返回、未正常完成和 Trace Link；运行组件不读取 `turn_id` 或假设所有信号都有根 Trace|
 |Metric|不重复计数、投影器丢弃 ID/内容、维度组合数受限；CPU/进程物理内存在支持平台有值，不可用平台省略且不伪造 `0`|
-|OTel Log|严重级别、Info/Debug 采样、固定正文、Trace 关联、自由文本拒绝、原始日志不进入远程发送器|
+|OTel Log|安全 Log 的严重级别、成功采样、固定正文、Trace 关联和自由文本拒绝；Debug Log 的独立 scope、固定 schema、Trace 关联、全采集、脱敏、截断和原始日志不进入远程发送器|
 |TUI / 多入口一致性|TUI 输入和重绘不继承业务 Trace；GUI/Host、客户端/服务端、本地/远端和移动端前后台任务不串线；共享静态定义在 Desktop GUI、CLI/TUI、WebServer、Relay、Web/Mobile 和远程执行端的名称、单位和结果分类一致；结果 Metric 只由真实 owner 记录一次|
 |形态能力降级|各适配器声明的信号、进程资源、发送器所有权和可信上下文传播能力可组合测试；旧端、能力缺失和未知规则版本安全降级为空实现或独立链路，不伪造字段、不重复计量、不影响产品功能|
 |异常和崩溃|业务错误、取消和超时的稳定分类；panic 回调不联网；正常/panic/无法确认的退出标记；故障发生时或当前为 `off` 均不补报|
@@ -1126,8 +1134,8 @@ TraceId、SpanId、ParentSpanId、Span 时间、Metric DataPoint 时间和 Log T
 |批次隔离和并发|Span 结束后独立入队、同一 Trace 跨批次、不同 Trace 共批次、批次封闭后不可追加；批次 A 重试时批次 B 可成功且互不改写；Trace/Log 各最多两个在途批次、Metric 最多一个，进程总 OTLP 请求不超过五个；全部名额占用时只排队或 drop-new|
 |丢弃时机|入队前拒绝、容量申请失败、完整成功、`partial_success`、不可重试、重试耗尽、正常退出超时和运行实例撤销分别释放正确范围；可能送达的数据只记 `ambiguous`，不能同时记 `locally_dropped`|
 |资源保险丝|定义总量 `512`、活动上下文 `4096/1 MiB`、缺少速率预算和 `aggregate_only` 逐条信号无法注册；单操作 `64/256/128`、活动 Span `1024/4 MiB`、Trace/Log 入口默认值与安全上限、Log 75% 低优先级截止、Metric `256/4096/4 MiB`、临时缓冲 `4 MiB` 均独立触发且只影响 Telemetry|
-|配置和身份|旧布尔配置迁移、非法配置、ID 并发生成/损坏/重置、密钥不出现在日志和健康状态中|
-|依赖边界|OTel 类型不进入稳定契约或插件二进制接口；模型交换调试、普通日志、Hook 输入输出、完整产品事件和审计记录不连接发送器；Telemetry 成败不触发 Hook、权限决定或产品事件|
+|配置和身份|旧布尔、V1、V2、未知版本迁移/降级，Debug 授权和环境变量，ID 并发生成/损坏/重置，以及 endpoint、密钥和安装身份不出现在状态接口中|
+|依赖边界|OTel 类型不进入稳定契约或插件二进制接口；模型交换调试文件、普通日志、Hook 输入输出、完整产品事件和审计记录不连接发送器；Debug 只复用 Model Exchange 边界的权威内存事实，不读取本地文件；Telemetry 成败不触发 Hook、权限决定或产品事件|
 
 
 
@@ -1139,11 +1147,11 @@ TraceId、SpanId、ParentSpanId、Span 时间、Metric DataPoint 时间和 Log T
 
 - Metric 更新不等待网络，不复制或序列化完整 `AgenticEvent`。
 
-- OTel Log 生成不格式化原始错误和业务对象；未采样的 Info/Debug 在构造 Attributes 前丢弃。
+- 安全 OTel Log 不格式化原始错误和业务对象；未采样的成功 Log 在构造 Attributes 前丢弃。Debug 记录在 owner 边界构造，发送前必须先脱敏和截断，且不做概率采样。
 
 - 未采样 Span 尽早进入空实现，不继续构造记录。
 
-- Trace 与 Log 分别受记录数和估算编码字节数双重约束；单记录、属性数、字符串长度、Metric 维度组合数和单次业务操作 Span/Log 数有硬上限，超限只丢 Telemetry，不限制业务。
+- Trace、安全 Log 与 Debug Log 分别受记录数和估算编码字节数双重约束；Debug 单记录上限 256 KiB、队列上限 256 条/8 MiB。单记录、属性数、字符串长度、Metric 维度组合数和单次业务操作 Span/Log 数有硬上限，超限只丢 Telemetry，不限制业务。
 
 - 运行组件不按 Turn、Session、请求 ID 或其他业务对象创建队列、发送器、Metric 维度和长期状态；可选操作上下文只持有有界计数和 Trace 关系。
 

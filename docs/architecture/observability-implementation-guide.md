@@ -8,7 +8,7 @@ Status：implemented（按当前实现维护）
 
 Authority language：Chinese
 
-Related：[`observability-telemetry-design.md`](observability-telemetry-design.md)、[`deveco-observability-alignment-contract.md`](deveco-observability-alignment-contract.md)、[`logging.md`](../development/logging.md)
+Related：[`observability-telemetry-design.md`](observability-telemetry-design.md)、[`logging.md`](../development/logging.md)
 
 ## 1. 先建立整体认识
 
@@ -21,8 +21,8 @@ Related：[`observability-telemetry-design.md`](observability-telemetry-design.m
 
 | Crate | 职责 | 不负责什么 |
 |---|---|---|
-| `bitfun-observability` | 强类型领域事实、Trace 上下文、静态 Descriptor、隐私校验、采样、信号投影、准入控制、SDK 无关的 `TelemetrySink` | 不依赖 OTel SDK，不读产品配置，不访问网络 |
-| `bitfun-observability-otel` | 配置验证、安装标识、OTel SDK 映射、Metric 聚合、Trace/Log 有界队列、OTLP HTTP、重试、健康状态、重配置和关闭 | 不接收任意业务字段，不转发普通日志、Prompt、Tool 输入输出或产品事件 |
+| `bitfun-observability` | 强类型安全领域事实、Trace 上下文、静态 Descriptor、隐私校验、采样、信号投影、准入控制，以及封闭的 Debug 敏感记录和脱敏/截断；SDK 无关的 `TelemetrySink` | 不依赖 OTel SDK，不读产品配置，不访问网络，不提供任意事件名/JSON 接口 |
+| `bitfun-observability-otel` | 配置验证、安装标识、OTel SDK 映射、Metric 聚合、安全 Trace/Log 与 Debug Log 的独立有界队列、OTLP HTTP、重试、健康状态、重配置和关闭 | 不转发普通日志或产品事件，不放宽安全 Trace/Metric/Log schema |
 
 ```mermaid
 flowchart LR
@@ -70,7 +70,7 @@ Host owns TelemetryRuntimeHandle
 
 ### 2.2 Owner 使用统一的 `start -> execute -> finish`
 
-以 Turn 为例，真正的 Owner 是 `ExecutionEngine::execute_dialog_turn`，源码入口在 [`execution_engine.rs`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3107)：
+以 Turn 为例，真正的 Owner 是 `ExecutionEngine::execute_dialog_turn`，源码入口在 [`execution_engine.rs`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3114)：
 
 ```rust
 let turn_observation = start_turn_with_relation(
@@ -93,11 +93,11 @@ turn_observation.finish(finish_facts);
 
 对应的准确位置是：
 
-- 创建 Turn Observation：[`start_turn_with_relation`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3138)。
-- 取得并下传父上下文：[`turn_observation.context()`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3148)。
-- 执行原有业务：[`execute_dialog_turn_impl`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3153)。
-- 从真实 `Result` 构造终态：[`TurnFinishFacts`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3173)。
-- 唯一结束点：[`turn_observation.finish`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3199)。
+- 创建 Turn Observation：[`start_turn_with_relation_and_content_facts`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3156)。
+- 取得并下传父上下文：[`turn_observation.context()`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3168)。
+- 执行原有业务：[`execute_dialog_turn_impl`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3220)。
+- 从真实 `Result` 构造终态：[`TurnFinishFacts`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3239)。
+- 唯一结束点：[`turn_observation.finish_with_output_length`](../../src/crates/assembly/core/src/agentic/execution/execution_engine.rs#L3276)。
 
 这里最重要的不是调用形式，而是 Owner 语义：谁最终知道操作成功、失败、取消或超时，谁就负责结束 Observation。中间事件、UI 事件和下游回调都不能替 Owner 猜测终态。
 
@@ -123,21 +123,21 @@ Round 在 [`RoundExecutor::execute_round`](../../src/crates/assembly/core/src/ag
 
 Inference 和每次 Attempt 在相同的 Round Owner 内建立：
 
-- Inference Request：[`start_inference`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L387)。
-- 取得 Inference Context：[`inference_observation.context()`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L396)。
-- 每次实际请求建立 Attempt：[`start_inference_attempt`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L421)。
-- Attempt 通过一次性 `Option::take()` 闭包确保只结束一次：[`finish_attempt`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L428)。
-- Request 成功终态包含 TTFT 和 Token：[`InferenceFinishFacts`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L1080)。
-- Request 失败终态保留安全错误分类、HTTP 状态分类和可重试性：[`InferenceFinishFacts`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L1098)。
+- Inference Request：[`start_inference_with_request_facts`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L394)。
+- 取得 Inference Context：[`inference_observation.context()`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L412)。
+- 每次实际请求建立 Attempt：[`start_inference_attempt`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L437)。
+- Attempt 通过一次性 `Option::take()` 闭包确保只结束一次：[`finish_attempt`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L444)。
+- Request 成功终态包含 TTFT、Token、响应长度和部分恢复标记：[`finish_with_response_facts`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L1095)。
+- Request 失败终态保留安全错误分类、HTTP 状态分类和可重试性：[`InferenceFinishFacts`](../../src/crates/assembly/core/src/agentic/execution/round_executor.rs#L1127)。
 
 Tool 和 Permission 的 Owner 位于 `ToolPipeline`：
 
-- 权限策略评估：[`draft_permission_plan`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L719) 中调用 [`start_permission_evaluation`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L731)。
-- 用户确认等待：[`await_permission_execution_plan`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L1201) 中调用 [`start_permission_confirmation`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L1222)。
-- 单个 Tool 的真实执行边界：[`execute_single_tool`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L1790)。
-- Tool Observation 创建和 Context 下传：[`start_tool`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L1800)。
-- 从任务状态和类型化错误统一决定完成状态、失败来源、各阶段耗时和退出分类：[`ToolFinishFacts`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L1822)。
-- Tool 唯一结束点：[`observation.finish`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L1856)。
+- 权限策略评估：[`draft_permission_plan`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L759) 中调用 [`start_permission_evaluation`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L773)。
+- 用户确认等待：[`await_permission_execution_plan`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L1267) 中调用 [`start_permission_confirmation`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L1295)。
+- 单个 Tool 的真实执行边界：[`execute_single_tool`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L1883)。
+- Tool Observation 创建和 Context 下传：[`start_tool`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L1899)。
+- 从任务状态和类型化错误统一决定完成状态、失败来源、各阶段耗时和退出分类：[`ToolFinishFacts`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L2027)。
+- Tool 唯一结束点：[`observation.finish`](../../src/crates/assembly/core/src/agentic/tools/pipeline/tool_pipeline.rs#L2088)。
 
 其他真实 Owner：
 
@@ -160,27 +160,36 @@ Tool 和 Permission 的 Owner 位于 `ToolPipeline`：
 - Provider 和协议分类：[`inference_classes`](../../src/crates/assembly/core/src/agentic/observability.rs#L274)。
 - Tool class/source/kind 分类：[`tool_identity`](../../src/crates/assembly/core/src/agentic/observability.rs#L296)。
 
-按照当前决策，Tool kind 仍保留有限的工具名匹配名单；已知名称映射到 `Filesystem/Search/Shell/Git/Browser/ComputerUse/Protocol/Task`，未知名称回退为 `Other`，未知 MCP Tool 回退为 `Protocol`。原始 Tool 名称本身不会进入遥测记录。
+按照当前决策，安全 Tool kind 仍保留有限的工具名精确匹配名单；已知名称映射到 `Filesystem/Search/Shell/Git/Browser/ComputerUse/Protocol/Task`，未知名称回退为 `Other`，未知 MCP Tool 回退为 `Protocol`。原始 Tool 名称不会进入安全 Attribute/Metric，只会在明确授权的 Debug Tool 记录中出现。
 
 ### 2.5 业务层实际调用的是领域 API，不是通用 `record()`
 
-所有领域 API 都集中在 [`domains.rs`](../../src/crates/execution/observability/src/domains.rs#L1)，其中只暴露有限枚举、布尔值、计数和时长，不提供 Prompt、路径、业务 ID、任意名称或原始错误的槽位。
+所有安全领域 API 都集中在 [`domains.rs`](../../src/crates/execution/observability/src/domains.rs#L1)，其中只暴露有限枚举、布尔值、计数和时长，不提供 Prompt、路径、业务 ID、任意名称或原始错误的槽位。
 
 主要入口：
 
-- Startup：[`start_startup`](../../src/crates/execution/observability/src/domains.rs#L331)。
-- Session：[`start_session`](../../src/crates/execution/observability/src/domains.rs#L355)。
-- Turn：[`start_turn_with_relation`](../../src/crates/execution/observability/src/domains.rs#L446)。
-- Round：[`start_round`](../../src/crates/execution/observability/src/domains.rs#L496)。
-- Inference Attempt：[`start_inference_attempt`](../../src/crates/execution/observability/src/domains.rs#L624)。
-- Inference Request：[`start_inference`](../../src/crates/execution/observability/src/domains.rs#L641)。
-- Token Usage：[`record_inference_usage`](../../src/crates/execution/observability/src/domains.rs#L676)。
-- Tool：[`start_tool`](../../src/crates/execution/observability/src/domains.rs#L765)。
-- Permission Evaluate：[`start_permission_evaluation`](../../src/crates/execution/observability/src/domains.rs#L846)。
-- Permission Confirmation：[`start_permission_confirmation`](../../src/crates/execution/observability/src/domains.rs#L886)。
-- Compression：[`start_compression`](../../src/crates/execution/observability/src/domains.rs#L960)。
+- Startup：[`start_startup`](../../src/crates/execution/observability/src/domains.rs#L355)。
+- Session：[`start_session`](../../src/crates/execution/observability/src/domains.rs#L379)。
+- Session 配置：[`record_session_config`](../../src/crates/execution/observability/src/domains.rs)。
+- Slash command：[`record_slash_command`](../../src/crates/execution/observability/src/domains.rs#L404)。
+- 图片附件批次：[`record_image_attachments`](../../src/crates/execution/observability/src/domains.rs)。
+- Turn：[`start_turn_with_relation_and_content_facts`](../../src/crates/execution/observability/src/domains.rs#L535)。
+- Round：[`start_round`](../../src/crates/execution/observability/src/domains.rs#L580)。
+- Inference Attempt：[`start_inference_attempt`](../../src/crates/execution/observability/src/domains.rs#L773)。
+- Inference Request：[`start_inference_with_request_facts`](../../src/crates/execution/observability/src/domains.rs#L814)。
+- Token Usage：[`record_inference_usage`](../../src/crates/execution/observability/src/domains.rs#L863)。
+- Tool：[`start_tool`](../../src/crates/execution/observability/src/domains.rs#L965)。
+- Permission Evaluate：[`start_permission_evaluation`](../../src/crates/execution/observability/src/domains.rs#L1051)。
+- Permission Confirmation：[`start_permission_confirmation`](../../src/crates/execution/observability/src/domains.rs#L1092)。
+- Compression：[`start_compression`](../../src/crates/execution/observability/src/domains.rs#L1173)。
 
-领域层使用 [`observation!` 宏](../../src/crates/execution/observability/src/domains.rs#L300) 为每个操作生成专用 Observation。专用 `finish(FinishFacts)` 先把领域事实转为有限 Attribute、`SpanStatus` 和 `Severity`，再进入通用 `TelemetrySpan::finish_terminal`。
+领域层使用 [`observation!` 宏](../../src/crates/execution/observability/src/domains.rs#L324) 为每个操作生成专用 Observation。专用 `finish(FinishFacts)` 先把领域事实转为有限 Attribute、`SpanStatus` 和 `Severity`，再进入通用 `TelemetrySpan::finish_terminal`。
+
+Debug 走另一套封闭 API：[`DebugTelemetryRecord`](../../src/crates/execution/observability/src/debug.rs) 只有 Turn、Inference、Tool 和 Approval 固定变体；真实 owner 调用 [`Telemetry::record_debug`](../../src/crates/execution/observability/src/facade.rs)，不能传入任意事件名。Debug 不修改上述安全领域 API。
+
+Debug Log 复用所属业务操作的事件名：Turn 使用 `bitfun.agent.turn`，Inference 使用 `bitfun.inference.request` / `bitfun.inference.attempt`，Tool 使用 `bitfun.tool.execute`，Approval 使用 `bitfun.permission.evaluate` / `bitfun.permission.confirmation`。请求、响应、结果和失败由封闭正文中的 `record_type` 区分。Slash command 是普通类型化事件 `bitfun.agent.slash_command`，只记录有限命令类别、来源和是否带参数，不记录原始命令或参数。Recovery 不建独立事件：重试、部分恢复、参数修复、上下文溢出等事实归回 Inference、Tool 或 Compression owner；原始错误和原始参数仅作为对应 owner Debug 记录的内容。`bitfun.debug.*` 只用于 Debug 通道的 schema、原始大小和截断元数据。
+
+每个 Debug 内容字段使用 [`DebugContentField`](../../src/crates/execution/observability/src/debug.rs) 包装，固定包含 `value`、`original_size_bytes` 和 `truncated`。先对结构化秘密键做整值替换，再对自由文本做模式脱敏，最后按共享内容预算做确定性的头尾截断；序列化后的整条记录仍受 256 KiB 上限保护。Turn 结果中的修改文件路径只来自当前 Turn Snapshot 文件操作事实，Tool 的 `part_index` 只来自类型化 `tool_call_order`。
 
 ## 3. Observability 底座本身如何实现
 
@@ -205,7 +214,7 @@ pub enum AttributeValue {
 }
 ```
 
-没有任意 `String`、JSON、错误链或 payload。`Attribute` 的构造函数是 crate-private，产品代码不能绕过领域 Facts 创建任意字段。隐私控制的第一道门因此是 Rust 类型系统，而不是发送前的字符串替换。
+安全 Attribute 没有任意 `String`、JSON、错误链或 payload。`Attribute` 的构造函数是 crate-private，产品代码不能绕过领域 Facts 创建任意字段。安全信号隐私控制的第一道门因此是 Rust 类型系统，而不是发送前的字符串替换。Debug 的 String/JSON 仅存在于封闭记录内部，并在 [`prepare_debug_record`](../../src/crates/execution/observability/src/debug.rs) 中先做结构化整值替换、自由文本模式脱敏和有界截断。
 
 ### 3.2 Trace ID、父子关系和跨进程传播
 
@@ -231,7 +240,7 @@ Root Span 使用 UUID 生成 Trace ID，并用 Trace ID 的前 64 位做稳定�
 - Metric 单位或固定 Log body。
 - 业务 Owner、频率等级和单操作上限。
 
-各领域字段白名单从 [`STARTUP_FIELDS`](../../src/crates/execution/observability/src/schema.rs#L274) 开始。Descriptor 通过 [`descriptors!` 宏](../../src/crates/execution/observability/src/schema.rs#L643) 注册；普通 Operation 通常对应四个描述符：
+各领域字段白名单从 [`STARTUP_FIELDS`](../../src/crates/execution/observability/src/schema.rs#L298) 开始。Descriptor 通过 [`descriptors!` 宏](../../src/crates/execution/observability/src/schema.rs#L728) 注册；普通 Operation 通常对应四个描述符：
 
 ```text
 bitfun.tool.execute             Trace Span
@@ -240,9 +249,9 @@ bitfun.tool.execute.duration    Histogram，单位秒
 bitfun.tool.execute             OTel Log，固定正文
 ```
 
-完整注册表位于 [`descriptor_registry`](../../src/crates/execution/observability/src/schema.rs#L909)。Token 用量另外注册四个聚合 Histogram。
+完整注册表位于 [`descriptor_registry`](../../src/crates/execution/observability/src/schema.rs#L1020)。Token 用量另外注册四个聚合 Histogram。
 
-每条记录发送前都经过 [`validate`](../../src/crates/execution/observability/src/schema.rs#L1021)：
+每条记录发送前都经过 [`validate`](../../src/crates/execution/observability/src/schema.rs#L1141)：
 
 1. Descriptor 必须已注册。
 2. Attribute 不能超过 32 个。
@@ -256,7 +265,7 @@ bitfun.tool.execute             OTel Log，固定正文
 
 ### 3.4 `Telemetry` 门面维护策略和 Observation 生命周期
 
-门面构建入口是 [`Telemetry::build_with_resource`](../../src/crates/execution/observability/src/facade.rs#L184)。内部保存：
+门面构建入口是 [`Telemetry::build_with_resource`](../../src/crates/execution/observability/src/facade.rs#L187)。内部保存：
 
 ```text
 TelemetryResource
@@ -269,19 +278,20 @@ AdmissionController
 accepted / rejected / skipped 诊断计数
 ```
 
-开始操作进入 [`start_operation_with_relation`](../../src/crates/execution/observability/src/facade.rs#L249)：
+开始操作进入 [`start_operation_with_relation`](../../src/crates/execution/observability/src/facade.rs#L252)：
 
 - `Off`：返回完全禁用的 guard，不构造 Attribute。
 - `Basic`：不创建 Trace，只保留可用于最终 Metric/Log 的终态 guard。
 - `Diagnostic`：在 Trace 开启且采样命中后创建带 Context 的 Span guard。
+- `Debug`：保留 Diagnostic 的安全信号行为，并允许单独授权的 Debug 敏感 Log；敏感记录本身不做概率采样。
 - Parent 复用父操作预算；Link 创建新操作预算。
 - 采样未命中或 Span 准入失败时，降级为 terminal-only guard，Metric/Log 仍可工作。
 
-持有状态的 [`TelemetrySpan`](../../src/crates/execution/observability/src/facade.rs#L596) 保存开始时间、起始属性、Trace Context、parent、links、policy revision、操作预算和关闭标志。
+持有状态的 [`TelemetrySpan`](../../src/crates/execution/observability/src/facade.rs#L686) 保存开始时间、起始属性、Trace Context、parent、links、policy revision、操作预算和关闭标志。
 
 ### 3.5 一次终态如何生成 Span、Metric 和 Log
 
-领域 Observation 最终调用 [`TelemetrySpan::finish_terminal`](../../src/crates/execution/observability/src/facade.rs#L676)：
+领域 Observation 最终调用 [`TelemetrySpan::finish_terminal`](../../src/crates/execution/observability/src/facade.rs#L766)：
 
 1. 根据单调时钟计算 `duration_ms`。
 2. 合并 Start Facts 和 Finish Facts。
@@ -289,20 +299,20 @@ accepted / rejected / skipped 诊断计数
 4. 对承担终态投影的 Operation 调用 `record_terminal_projection_at_revision`。
 5. 标记 guard 已关闭，重复 `finish` 不会再次发出记录。
 
-终态投影实现在 [`record_terminal_projection_at_revision`](../../src/crates/execution/observability/src/facade.rs#L352)：
+终态投影实现在 [`record_terminal_projection_at_revision`](../../src/crates/execution/observability/src/facade.rs#L433)：
 
 - 总数：`xxx.total += 1`。
 - 耗时：`xxx.duration` Histogram，内部从毫秒换算为秒。
 - 日志：失败/警告保留，成功日志按 `success_log_sample_ratio` 采样；正文来自静态 Descriptor。
 - 若存在采样 Span Context，Log 带 Trace ID/Span ID；Basic 模式不会伪造 Trace Context。
 
-一个重要的当前实现例外是：`InferenceAttempt` 的 `terminal_active` 被设为 `false`，见 [`TelemetrySpan` 构造](../../src/crates/execution/observability/src/facade.rs#L312) 和 [`terminal_only`](../../src/crates/execution/observability/src/facade.rs#L647)。因此 Attempt 当前只在 Diagnostic 且采样命中时产生 Span，不直接投影 Attempt Metric/Log；请求级 Inference 负责请求聚合终态和 Token Metric。
+一个重要的当前实现例外是：`InferenceAttempt` 的 `terminal_active` 被设为 `false`，见 [`TelemetrySpan` 构造](../../src/crates/execution/observability/src/facade.rs#L333) 和 [`terminal_only`](../../src/crates/execution/observability/src/facade.rs#L737)。因此 Attempt 当前只在 Diagnostic 且采样命中时产生 Span，不直接投影 Attempt Metric/Log；请求级 Inference 负责请求聚合终态和 Token Metric。
 
-如果 active guard 没有显式结束就被 Drop，[`TelemetrySpan::drop`](../../src/crates/execution/observability/src/facade.rs#L724) 会用 `outcome=incomplete` 关闭 Span，并在该 Operation 承担终态投影时生成警告终态，避免悬空的活跃 Span。
+如果 active guard 没有显式结束就被 Drop，[`TelemetrySpan::drop`](../../src/crates/execution/observability/src/facade.rs#L815) 会用 `outcome=incomplete` 关闭 Span，并在该 Operation 承担终态投影时生成警告终态，避免悬空的活跃 Span。
 
 ### 3.6 每条记录的最终内核出口
 
-所有内部记录都经过 [`emit_if_allowed`](../../src/crates/execution/observability/src/facade.rs#L490)：
+所有安全内部记录都经过 [`emit_if_allowed`](../../src/crates/execution/observability/src/facade.rs#L571)：
 
 ```text
 核对 policy revision
@@ -314,6 +324,8 @@ accepted / rejected / skipped 诊断计数
 ```
 
 `catch_unwind` 隔离 Sink panic；Exporter 或 Sink 的异常不会冒泡到产品控制流。
+
+Debug 入口 [`record_debug`](../../src/crates/execution/observability/src/facade.rs) 先检查 `level == Debug` 和 policy revision，再执行脱敏/截断并调用 `TelemetrySink::emit_debug`。它不经过普通 Descriptor/Attribute 通道，也不使用普通成功采样；revision 在准备前后各检查一次，避免降级竞态把旧敏感记录交给新 generation。
 
 ### 3.7 Admission 如何防止遥测自身失控
 
@@ -337,7 +349,9 @@ SDK 无关的出口只有 [`TelemetrySink`](../../src/crates/execution/observabi
 pub trait TelemetrySink: Send + Sync + 'static {
     fn configure_resource(&self, resource: TelemetryResource) {}
     fn emit(&self, record: ValidatedRecord);
+    fn emit_debug(&self, record: DebugLogRecord) {}
     fn discard_pending(&self) {}
+    fn discard_debug_pending(&self) {}
 }
 ```
 
@@ -355,7 +369,7 @@ Telemetry
        -> Option<Arc<OtelGeneration>>
 ```
 
-`RuntimeRouter::emit` 只把已经通过内核验证的 `ValidatedRecord` 路由到当前 Generation。没有有效 Generation 时直接忽略，不让业务失败。
+`RuntimeRouter::emit` 只把已经通过内核验证的 `ValidatedRecord` 路由到当前 Generation；`emit_debug` 只接受已经脱敏和截断的 `DebugLogRecord`。没有有效 Generation 时都直接忽略，不让业务失败。
 
 ### 4.2 配置验证和匿名安装标识
 
@@ -370,7 +384,7 @@ Telemetry
 - 重试次数、退避时间和总预算有上限。
 - Secret Header 名称和值受限，且不能覆盖 `traceparent`、`baggage` 等保留 Header。
 
-部署配置结构在 [`TelemetryDeploymentConfig`](../../src/crates/services/observability-otel/src/settings.rs#L110)，Product Host 从编译期产品配置读取，Server/Relay 从部署环境读取；用户配置不能指定 Collector 或密钥。
+部署配置结构在 [`TelemetryDeploymentConfig`](../../src/crates/services/observability-otel/src/settings.rs#L110)，Product Host 从编译期产品配置读取，Server/Relay 从部署环境读取；用户配置不能指定 Collector 或密钥。持久化配置是 [`TelemetryUserConfigV2`](../../src/crates/execution/observability/src/config.rs)，保存 `level` 和 `sensitive_content_consent`；legacy bool、V1 与未知新版本都按 fail-closed 规则迁移/执行。Desktop 选择 Debug 时由 [`TelemetryConfigSection`](../../src/web-ui/src/infrastructure/config/components/TelemetryConfigSection.tsx) 显示风险确认；Server/Relay 只把 `BITFUN_TELEMETRY_LEVEL=debug` 当作显式运维授权。
 
 Runtime 只在配置有效且遥测启用后创建本地 root identity。它使用 receiver audience 做 HMAC，产生 receiver-scoped 的匿名 ID；本地 root 永远不进入 `TelemetryResource`。实现在 [`InstallationIdentityStore::scoped_id`](../../src/crates/services/observability-otel/src/identity.rs#L30)。
 
@@ -383,34 +397,36 @@ Resource 字段白名单在 [`resource.rs`](../../src/crates/execution/observabi
 1. 验证新配置并构建新 Generation。
 2. `TelemetryControl::close_admission` 暂停新记录。
 3. `RuntimeRouter` 原子替换当前 Generation。
-4. revoke、discard 并关闭旧 Generation。
+4. revoke、discard 并关闭旧 Generation；离开 Debug 时立即清空敏感队列。
 5. 应用新 `PolicySnapshot`，递增 policy revision，再开放准入。
 
 已开始的 Observation 记录了旧 policy revision；它稍后结束时会在 `emit_if_allowed` 被判为 stale。网络侧还有 [`GenerationGate`](../../src/crates/services/observability-otel/src/transport.rs#L23)，旧 Generation 正在等待请求或退避时也能被撤销。
 
-### 4.4 三种 Signal 的管线不同
+### 4.4 四种 Signal 的管线不同
 
-[`OtelGeneration::build`](../../src/crates/services/observability-otel/src/pipeline.rs#L153) 根据有效能力分别建立三条管线；统一入口是 [`OtelGeneration::emit`](../../src/crates/services/observability-otel/src/pipeline.rs#L278)：
+[`OtelGeneration::build`](../../src/crates/services/observability-otel/src/pipeline.rs#L161) 根据有效能力分别建立三条管线；统一入口是 [`OtelGeneration::emit`](../../src/crates/services/observability-otel/src/pipeline.rs#L333)：
 
 | Signal | 内部处理 |
 |---|---|
 | Trace | `SpanRecord -> SpanData -> BoundedBatchScheduler -> SpanExporter` |
 | Metric | `MetricRecord -> Counter/Histogram -> SdkMeterProvider/PeriodicReader -> MetricExporter` |
-| Log | `LogRecord -> SdkLogRecord -> QueueLogProcessor -> BoundedBatchScheduler -> LogExporter` |
+| Safe Log | `LogRecord -> SdkLogRecord -> QueueLogProcessor -> BoundedBatchScheduler -> LogExporter` |
+| Debug Log | `DebugLogRecord -> SdkLogRecord -> 独立 QueueLogProcessor/BoundedBatchScheduler -> LogExporter` |
 
 映射入口：
 
-- Span：[`span_data`](../../src/crates/services/observability-otel/src/pipeline.rs#L413)，保留 ID、Parent、Links、起止时间、安全 Attribute 和安全状态文本 `operation_failed`。
-- Log：[`log_data`](../../src/crates/services/observability-otel/src/pipeline.rs#L444)，映射事件名、时间、Severity、固定正文、安全 Attribute 和可选 Trace Context。
+- Span：[`span_data`](../../src/crates/services/observability-otel/src/pipeline.rs#L502)，保留 ID、Parent、Links、起止时间、安全 Attribute 和安全状态文本 `operation_failed`。
+- Log：[`log_data`](../../src/crates/services/observability-otel/src/pipeline.rs#L533)，映射事件名、时间、Severity、固定正文、安全 Attribute 和可选 Trace Context。
+- Debug Log：[`debug_log_data`](../../src/crates/services/observability-otel/src/pipeline.rs)，使用独立 `bitfun.observability.debug` instrumentation scope 和固定 `data_class=debug_sensitive`，并附原始字节数与截断标志。
 - Metric：[`MetricInstruments`](../../src/crates/services/observability-otel/src/pipeline.rs#L77)，按注册名称缓存 Counter/Histogram instrument。
-- Resource：[`otel_resource`](../../src/crates/services/observability-otel/src/pipeline.rs#L474)。
-- Attribute：[`otel_attributes`](../../src/crates/services/observability-otel/src/pipeline.rs#L526)。
+- Resource：[`otel_resource`](../../src/crates/services/observability-otel/src/pipeline.rs#L600)。
+- Attribute：[`otel_attributes`](../../src/crates/services/observability-otel/src/pipeline.rs#L652)。
 
-Metric 使用 Cumulative Temporality 和 PeriodicReader。[`metric_view`](../../src/crates/services/observability-otel/src/pipeline.rs#L559) 为秒、Token 和一般数值提供固定 Histogram bucket，并再次设置 256 的 cardinality limit。
+Metric 使用 Cumulative Temporality 和 PeriodicReader。[`metric_view`](../../src/crates/services/observability-otel/src/pipeline.rs#L685) 为秒、Token 和一般数值提供固定 Histogram bucket，并再次设置 256 的 cardinality limit。
 
 ### 4.5 Trace/Log 为什么不会阻塞 Agent
 
-Trace 和 Log 使用自研的 [`BoundedBatchScheduler`](../../src/crates/services/observability-otel/src/scheduler.rs#L55)，每个队列同时限制保留记录数和估算字节数。
+Trace、安全 Log 和 Debug Log 使用自研的 [`BoundedBatchScheduler`](../../src/crates/services/observability-otel/src/scheduler.rs#L55)。Debug 有独立的 `256` 条/`8 MiB` 内存队列、`1 MiB` batch 上限，不与安全 Log 争用容量，也不增加磁盘重试缓存。每个队列同时限制保留记录数和估算字节数。
 
 业务线程只调用 [`try_enqueue`](../../src/crates/services/observability-otel/src/scheduler.rs#L129)：
 
@@ -429,8 +445,8 @@ Trace 和 Log 使用自研的 [`BoundedBatchScheduler`](../../src/crates/service
 
 Exporter 构建入口：
 
-- Trace：[`build_span_exporter`](../../src/crates/services/observability-otel/src/pipeline.rs#L636)。
-- Log：[`build_log_exporter`](../../src/crates/services/observability-otel/src/pipeline.rs#L656)。
+- Trace：[`build_span_exporter`](../../src/crates/services/observability-otel/src/pipeline.rs#L785)。
+- Log：[`build_log_exporter`](../../src/crates/services/observability-otel/src/pipeline.rs#L808)。
 - Metric：[`MetricExporter::builder`](../../src/crates/services/observability-otel/src/pipeline.rs#L233)。
 
 它们通过 OTLP HTTP 发送到：
@@ -500,13 +516,13 @@ ToolPipeline 掌握真实 Result 和任务状态
   -> Collector 确认、部分拒绝或客户端记为 dropped/ambiguous
 ```
 
-过程中不会出现：原始命令、Tool 参数、Tool 输出、文件路径、完整错误消息、Session ID、用户 ID 或 Collector 密钥。
+安全 Span/Metric/Log 中不会出现：原始命令、Tool 参数、Tool 输出、文件路径、完整错误消息、Session ID、用户 ID 或 Collector 密钥。若 Debug 已明确授权，同一个 Tool owner 还会恰好产生一次 `ToolRequest` 和一次 `ToolResult/ToolFailure` 敏感记录；已知凭据会整值替换，记录超过 256 KiB 会头尾截断，账号/设备身份和 Collector 密钥仍不会进入。
 
 ## 6. 三个容易误解的边界
 
 ### 6.1 它不是普通日志上报
 
-普通 `log` / `tracing` 仍是本地诊断。Observability 只消费强类型领域 Facts，不安装“把所有日志发送到 OTel”的桥接层。模型交换 Trace、Prompt、Tool payload 和文件内容也不进入该管线。
+普通 `log` / `tracing` 仍是本地诊断。Observability 不安装“把所有日志发送到 OTel”的桥接层。安全通道只消费强类型领域 Facts；Debug 通道只消费真实业务 owner 构造的封闭记录，模型交换边界直接复用其权威 request/response 事实，而不是读取本地模型交换文件或日志。
 
 ### 6.2 Metric/Log 不依赖 Trace 一定被采样
 
@@ -526,8 +542,9 @@ Basic 模式不创建 Trace，但仍能生成 Metric 和经过采样的结构化
 4. 看 Descriptor 和字段白名单：[`schema.rs`](../../src/crates/execution/observability/src/schema.rs#L643)。
 5. 看 Observation 如何采样和投影：[`start_operation_with_relation`](../../src/crates/execution/observability/src/facade.rs#L249) 与 [`finish_terminal`](../../src/crates/execution/observability/src/facade.rs#L676)。
 6. 看 Runtime 如何切换 Generation：[`apply_config`](../../src/crates/services/observability-otel/src/runtime.rs#L249)。
-7. 看三种 Signal 如何映射到 OTel：[`OtelGeneration::build`](../../src/crates/services/observability-otel/src/pipeline.rs#L153)。
+7. 看四种 Signal 如何映射到 OTel：[`OtelGeneration::build`](../../src/crates/services/observability-otel/src/pipeline.rs#L161)。
 8. 看有界批处理：[`try_enqueue`](../../src/crates/services/observability-otel/src/scheduler.rs#L129)。
 9. 最后看网络确认和重试：[`send_with_retry`](../../src/crates/services/observability-otel/src/transport.rs#L137)。
+10. Debug 排障链路看封闭记录与脱敏：[`debug.rs`](../../src/crates/execution/observability/src/debug.rs)，再看 [`record_debug`](../../src/crates/execution/observability/src/facade.rs) 和 [`debug_log_data`](../../src/crates/services/observability-otel/src/pipeline.rs)。
 
 读完这条路径后，再按需要进入 Session、Permission、Compression 或各 Host 的具体 Owner。
