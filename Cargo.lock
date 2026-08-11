@@ -11181,6 +11181,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "vte",
+ "windows 0.61.3",
 ]
 
 [[package]]

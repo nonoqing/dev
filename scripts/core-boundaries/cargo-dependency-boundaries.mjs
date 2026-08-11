@@ -243,37 +243,41 @@ function reqwestDependencyFeatureReferences(references) {
   );
 }
 
-const REQWEST_TRANSPORT_FEATURES = [
-  'form',
-  'http2',
-  'json',
-  'multipart',
-  'query',
-  'stream',
-];
 const REQWEST_PACKAGE_PROFILES = new Map([
-  ['bitfun-core', { dependencyFeatures: REQWEST_TRANSPORT_FEATURES, optional: true }],
+  ['bitfun-core', { dependencyFeatures: [], optional: true }],
   ['bitfun-services-integrations', {
-    dependencyFeatures: REQWEST_TRANSPORT_FEATURES,
+    dependencyFeatures: ['http2'],
     optional: true,
     servicesOwners: true,
   }],
   ['bitfun-ai-adapters', {
-    dependencyFeatures: [...REQWEST_TRANSPORT_FEATURES, 'rustls', 'socks'],
+    dependencyFeatures: ['http2', 'json', 'rustls', 'socks', 'stream'],
     optional: false,
-    allowedPackageFeatureRefs: new Set(['reqwest/rustls']),
+    allowedPackageFeatureRefs: new Set(['reqwest/form']),
+    requiredPackageFeatureRefs: new Map([
+      ['subscription-auth', new Set(['reqwest/form'])],
+    ]),
   }],
-  ...[
-    'bitfun-cli',
-    'bitfun-desktop',
-    'bitfun-miniapp-market-service',
-    'bitfun-observability-otel',
-    'bitfun-skin-market-service',
-  ].map((packageName) => [packageName, {
-    dependencyFeatures: [...REQWEST_TRANSPORT_FEATURES, 'rustls'],
+  ['bitfun-cli', {
+    dependencyFeatures: ['http2', 'rustls', 'stream'],
     optional: false,
-    allowedPackageFeatureRefs: new Set(['reqwest/rustls']),
-  }]),
+  }],
+  ['bitfun-desktop', {
+    dependencyFeatures: ['http2', 'json', 'query', 'rustls', 'stream'],
+    optional: false,
+  }],
+  ['bitfun-miniapp-market-service', {
+    dependencyFeatures: ['form', 'http2', 'json', 'rustls'],
+    optional: false,
+  }],
+  ['bitfun-observability-otel', {
+    dependencyFeatures: ['rustls'],
+    optional: false,
+  }],
+  ['bitfun-skin-market-service', {
+    dependencyFeatures: ['http2', 'json', 'rustls'],
+    optional: false,
+  }],
 ]);
 
 function findReqwestPackageProfileViolations(pkg, profile) {
@@ -353,6 +357,18 @@ function findReqwestPackageProfileViolations(pkg, profile) {
             line: 1,
             message:
               `${pkg.name}:${featureName} has unreviewed Reqwest feature reference ${reference}`,
+          });
+        }
+      }
+    }
+    for (const [featureName, requiredReferences] of profile.requiredPackageFeatureRefs ?? []) {
+      const actualReferences = new Set(pkg.features?.[featureName] ?? []);
+      for (const reference of requiredReferences) {
+        if (!actualReferences.has(reference)) {
+          violations.push({
+            path: pkg.manifest_path,
+            line: 1,
+            message: `${pkg.name}:${featureName} is missing Reqwest feature reference ${reference}`,
           });
         }
       }
@@ -512,6 +528,20 @@ export function findServicesIntegrationsReqwestFeatureViolations(pkg) {
   const violations = [];
   const featureGraph = pkg.features ?? {};
   const ownerFeatures = new Set(servicesReqwestOwnerFeatures);
+  const ownerFeatureReferences = new Map([
+    ['announcement', ['reqwest/json']],
+    ['browser-control', ['reqwest/json']],
+    ['debug-log', ['reqwest/json']],
+    ['mcp', ['reqwest/json', 'reqwest/stream']],
+    ['miniapp-market', ['reqwest/json', 'reqwest/query', 'reqwest/stream']],
+    ['miniapp-runtime', ['reqwest/stream']],
+    ['models-dev', ['reqwest/system-proxy']],
+    ['remote-connect', ['reqwest/json', 'reqwest/multipart', 'reqwest/query']],
+    ['remote-ssh-concrete', ['reqwest/stream']],
+    ['review-platform', ['reqwest/json', 'reqwest/query', 'reqwest/stream']],
+    ['speech', ['reqwest/stream']],
+    ['web-tools', ['reqwest/json']],
+  ]);
 
   for (const featureName of servicesReqwestOwnerFeatures) {
     const references = featureGraph[featureName];
@@ -537,6 +567,15 @@ export function findServicesIntegrationsReqwestFeatureViolations(pkg) {
         message: `${pkg.name}:${featureName} is missing reqwest/rustls`,
       });
     }
+    for (const reference of ownerFeatureReferences.get(featureName) ?? []) {
+      if (!references.includes(reference)) {
+        violations.push({
+          path: pkg.manifest_path,
+          line: 1,
+          message: `${pkg.name}:${featureName} is missing Reqwest feature reference ${reference}`,
+        });
+      }
+    }
   }
 
   for (const [featureName, references] of Object.entries(featureGraph)) {
@@ -557,12 +596,15 @@ export function findServicesIntegrationsReqwestFeatureViolations(pkg) {
       });
       continue;
     }
+    const allowedReferences = new Set([
+      'reqwest',
+      'dep:reqwest',
+      'reqwest/rustls',
+      ...(ownerFeatureReferences.get(featureName) ?? []),
+    ]);
     for (const reference of reqwestReferences) {
       if (
-        reference !== 'reqwest'
-        && reference !== 'dep:reqwest'
-        && reference !== 'reqwest/rustls'
-        && !(featureName === 'models-dev' && reference === 'reqwest/system-proxy')
+        !allowedReferences.has(reference)
       ) {
         violations.push({
           path: pkg.manifest_path,
@@ -774,6 +816,8 @@ export function findProductEntrypointCoreFeatureViolations(
   const reviewedCoreFeatureClosures = new Map([
     ['bitfun-cli', [
       'agent-runtime',
+      'document-read',
+      'subscription-auth',
       'remote-connect',
       'deep-research',
       'lsp',
@@ -792,6 +836,8 @@ export function findProductEntrypointCoreFeatureViolations(
     ]],
     ['bitfun-acp', [
       'agent-runtime',
+      'document-read',
+      'subscription-auth',
       'deep-research',
       'lsp',
       'external-sources',
@@ -818,6 +864,7 @@ export function findProductEntrypointCoreFeatureViolations(
     'browser-control',
     'canvas-runtime',
     'deep-research',
+    'document-read',
     'external-sources',
     'file-watch',
     'filesystem',
@@ -835,6 +882,7 @@ export function findProductEntrypointCoreFeatureViolations(
     'scheduled-jobs',
     'script-tool-runtime',
     'ssh-remote',
+    'subscription-auth',
     'terminal',
     'tool-packs',
     'tools-agent-control',

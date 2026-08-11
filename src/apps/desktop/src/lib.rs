@@ -1112,6 +1112,16 @@ pub async fn run() {
                 step_started,
             );
 
+            // Reattach to a browser that is already running with remote
+            // debugging on, so a BitFun restart does not drop the connection.
+            let step_started = Instant::now();
+            api::browser_control_api::init_on_startup();
+            startup_trace.record_elapsed_step(
+                "native_setup",
+                "browser_control_init_on_startup",
+                step_started,
+            );
+
             {
                 let step_started = Instant::now();
                 let _terminal_state: tauri::State<'_, api::terminal_api::TerminalState> =
@@ -1854,8 +1864,8 @@ pub async fn run() {
             api::browser_control_api::browser_control_list_browsers,
             api::browser_control_api::browser_control_get_status,
             api::browser_control_api::browser_control_launch,
+            api::browser_control_api::browser_control_enable_default_cdp,
             api::browser_control_api::browser_control_restart_with_cdp,
-            api::browser_control_api::browser_control_create_launcher,
             // Insights API
             api::insights_api::generate_insights,
             api::insights_api::get_latest_insights,
