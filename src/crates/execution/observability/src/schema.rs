@@ -147,11 +147,20 @@ pub(crate) enum OperationKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventKind {
+    SlashCommand,
+    SessionConfig,
+    InputAttachment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenMetricKind {
     Input,
     Output,
     Reasoning,
     CacheRead,
+    CacheCreation,
+    Total,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -159,6 +168,12 @@ pub(crate) struct OperationSchema {
     pub span: &'static DescriptorView,
     pub total: &'static DescriptorView,
     pub duration: &'static DescriptorView,
+    pub log: &'static DescriptorView,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EventSchema {
+    pub total: &'static DescriptorView,
     pub log: &'static DescriptorView,
 }
 
@@ -217,6 +232,16 @@ const PROTOCOL_CLASSES: &[&str] = &[
     "gemini",
     "other",
 ];
+const INFERENCE_CONTEXT_CLASSES: &[&str] = &["turn", "session", "standalone"];
+const INFERENCE_AUTH_CLASSES: &[&str] = &["api_key", "subscription"];
+const INFERENCE_STREAM_OUTCOMES: &[&str] = &[
+    "complete",
+    "interrupted",
+    "partial_recovered",
+    "no_effective_output",
+    "retry_exhausted",
+];
+const TOOL_ARGUMENT_RECOVERIES: &[&str] = &["repaired", "invalid", "retry_exhausted"];
 const STATUS_CLASSES: &[&str] = &["none", "2xx", "3xx", "4xx", "5xx", "network"];
 const TOOL_CLASSES: &[&str] = &["built_in", "custom"];
 const TOOL_SOURCE_CLASSES: &[&str] = &["builtin", "mcp", "skill", "plugin", "external", "custom"];
@@ -241,9 +266,53 @@ const TOOL_FAILURE_SOURCES: &[&str] = &[
     "internal",
     "other",
 ];
+const TOOL_ARGUMENT_STATES: &[&str] = &["unchanged", "repaired", "invalid"];
+const PROGRAMMING_LANGUAGE_CLASSES: &[&str] = &[
+    "rust",
+    "typescript",
+    "javascript",
+    "python",
+    "go",
+    "java",
+    "kotlin",
+    "swift",
+    "csharp",
+    "cpp",
+    "ruby",
+    "php",
+    "vue",
+    "svelte",
+    "markdown",
+    "json",
+    "yaml",
+    "toml",
+    "xml",
+    "html",
+    "css",
+    "shell",
+    "powershell",
+    "sql",
+    "gradle",
+    "properties",
+    "dockerfile",
+    "makefile",
+];
+const PERMISSION_UI_SURFACES: &[&str] = &["tool_permission", "other"];
 const EXIT_STATUS_CLASSES: &[&str] = &["success", "nonzero", "signal", "unknown"];
 const SESSION_OPERATIONS: &[&str] = &["create", "resume", "delete"];
 const SESSION_CLASSES: &[&str] = &["standard", "subagent", "internal", "transient"];
+const SLASH_COMMAND_CLASSES: &[&str] = &[
+    "session",
+    "model",
+    "agent",
+    "workspace",
+    "configuration",
+    "diagnostic",
+    "external",
+    "other",
+];
+const SLASH_COMMAND_SOURCES: &[&str] = &["builtin", "external", "unknown"];
+const IMAGE_ATTACHMENT_OUTCOMES: &[&str] = &["accepted", "rejected"];
 const COUNT_BUCKETS: &[&str] = &["0", "1", "2", "3_plus"];
 const PERMISSION_DECISIONS: &[&str] = &[
     "allow",
@@ -289,12 +358,66 @@ const SESSION_FIELDS: &[FieldView] = &[
     u64_field("bitfun.agent.session.duration_ms", false),
     enum_field("error.type", false, ERROR_TYPES, true),
 ];
+const SLASH_COMMAND_FIELDS: &[FieldView] = &[
+    enum_field(
+        "bitfun.agent.slash_command.class",
+        true,
+        SLASH_COMMAND_CLASSES,
+        true,
+    ),
+    enum_field(
+        "bitfun.agent.slash_command.source",
+        true,
+        SLASH_COMMAND_SOURCES,
+        true,
+    ),
+    bool_field("bitfun.agent.slash_command.has_arguments", true, true),
+];
+const SESSION_CONFIG_FIELDS: &[FieldView] = &[
+    u64_field("bitfun.agent.session.config.max_context_tokens", true),
+    u64_field("bitfun.agent.session.config.max_turns", true),
+    bool_field("bitfun.agent.session.config.auto_compact", true, false),
+    bool_field(
+        "bitfun.agent.session.config.context_compression_enabled",
+        true,
+        false,
+    ),
+];
+const INPUT_ATTACHMENT_FIELDS: &[FieldView] = &[
+    enum_field(
+        "bitfun.agent.input_attachment.outcome",
+        true,
+        IMAGE_ATTACHMENT_OUTCOMES,
+        true,
+    ),
+    u64_field("bitfun.agent.input_attachment.image_count", true),
+    u64_field("bitfun.agent.input_attachment.image_size_known_count", true),
+    u64_field(
+        "bitfun.agent.input_attachment.image_dimensions_known_count",
+        true,
+    ),
+    u64_field(
+        "bitfun.agent.input_attachment.image_total_size_bytes",
+        false,
+    ),
+    u64_field("bitfun.agent.input_attachment.image_max_size_bytes", false),
+    u64_field("bitfun.agent.input_attachment.image_max_width", false),
+    u64_field("bitfun.agent.input_attachment.image_max_height", false),
+    bool_field("bitfun.agent.input_attachment.image_has_png", true, true),
+    bool_field("bitfun.agent.input_attachment.image_has_jpeg", true, true),
+    bool_field("bitfun.agent.input_attachment.image_has_webp", true, true),
+    bool_field("bitfun.agent.input_attachment.image_has_gif", true, true),
+    bool_field("bitfun.agent.input_attachment.image_has_other", true, true),
+];
 
 const TURN_FIELDS: &[FieldView] = &[
     enum_field("bitfun.agent.turn.mode_class", false, MODE_CLASSES, true),
     enum_field("bitfun.agent.turn.trigger", false, TURN_TRIGGERS, true),
     bool_field("bitfun.agent.turn.remote", false, true),
     bool_field("bitfun.agent.turn.subagent", false, true),
+    u64_field("bitfun.agent.turn.sequence", false),
+    u64_field("bitfun.agent.turn.input_length", false),
+    u64_field("bitfun.agent.turn.output_length", false),
     enum_field("bitfun.agent.turn.outcome", true, OUTCOMES, true),
     enum_field(
         "bitfun.agent.turn.finish_reason",
@@ -345,6 +468,18 @@ const INFERENCE_FIELDS: &[FieldView] = &[
         true,
     ),
     enum_field(
+        "bitfun.inference.context_class",
+        true,
+        INFERENCE_CONTEXT_CLASSES,
+        true,
+    ),
+    enum_field(
+        "bitfun.inference.auth_class",
+        false,
+        INFERENCE_AUTH_CLASSES,
+        true,
+    ),
+    enum_field(
         "bitfun.inference.attempt.index_bucket",
         false,
         ATTEMPT_BUCKETS,
@@ -360,10 +495,44 @@ const INFERENCE_FIELDS: &[FieldView] = &[
     bool_field("bitfun.inference.request.retryable", false, true),
     u64_field("bitfun.inference.request.duration_ms", false),
     u64_field("bitfun.inference.request.ttft_ms", false),
+    u64_field("bitfun.inference.request.message_count", false),
+    u64_field("bitfun.inference.request.tool_count", false),
+    enum_field(
+        "bitfun.inference.response.finish_reason",
+        false,
+        FINISH_REASONS,
+        true,
+    ),
+    bool_field("bitfun.inference.response.has_tool_calls", false, true),
+    bool_field("bitfun.inference.response.reasoning_present", false, true),
+    enum_field(
+        "bitfun.inference.response.stream_outcome",
+        false,
+        INFERENCE_STREAM_OUTCOMES,
+        true,
+    ),
+    enum_field(
+        "bitfun.inference.response.tool_argument_recovery",
+        false,
+        TOOL_ARGUMENT_RECOVERIES,
+        true,
+    ),
+    u64_field("bitfun.inference.response.output_length", false),
+    u64_field("bitfun.inference.response.reasoning_length", false),
+    u64_field("bitfun.inference.response.output_line_count", false),
+    u64_field("bitfun.inference.response.reasoning_first_ms", false),
+    u64_field("bitfun.inference.response.reasoning_duration_ms", false),
     u64_field("bitfun.inference.usage.input_tokens", false),
     u64_field("bitfun.inference.usage.output_tokens", false),
     u64_field("bitfun.inference.usage.reasoning_tokens", false),
     u64_field("bitfun.inference.usage.cache_read_tokens", false),
+    u64_field("bitfun.inference.usage.cache_creation_tokens", false),
+    u64_field("bitfun.inference.usage.total_tokens", false),
+    u64_field("bitfun.inference.request.context_window_tokens", false),
+    u64_field(
+        "bitfun.inference.request.tool_definition_tokens_estimate",
+        false,
+    ),
     enum_field("error.type", false, ERROR_TYPES, true),
 ];
 const INFERENCE_ATTEMPT_FIELDS: &[FieldView] = &[
@@ -380,6 +549,18 @@ const INFERENCE_ATTEMPT_FIELDS: &[FieldView] = &[
         true,
     ),
     bool_field("bitfun.inference.attempt.retryable", false, true),
+    enum_field(
+        "bitfun.inference.attempt.stream_outcome",
+        false,
+        INFERENCE_STREAM_OUTCOMES,
+        true,
+    ),
+    enum_field(
+        "bitfun.inference.attempt.tool_argument_recovery",
+        false,
+        TOOL_ARGUMENT_RECOVERIES,
+        true,
+    ),
     enum_field("bitfun.inference.attempt.outcome", true, OUTCOMES, true),
     u64_field("bitfun.inference.attempt.ttft_ms", false),
     u64_field("bitfun.inference.attempt.duration_ms", false),
@@ -392,6 +573,13 @@ const TOOL_FIELDS: &[FieldView] = &[
     bool_field("bitfun.tool.execute.parallel", false, true),
     bool_field("bitfun.tool.execute.remote", false, true),
     bool_field("bitfun.tool.execute.background", false, true),
+    enum_field(
+        "bitfun.tool.arguments.state",
+        false,
+        TOOL_ARGUMENT_STATES,
+        true,
+    ),
+    bool_field("bitfun.tool.arguments.truncated", false, true),
     enum_field("bitfun.tool.execute.outcome", true, OUTCOMES, true),
     u64_field("bitfun.tool.execute.duration_ms", false),
     u64_field("bitfun.tool.execute.queue_ms", false),
@@ -408,6 +596,15 @@ const TOOL_FIELDS: &[FieldView] = &[
         "bitfun.tool.execute.exit_status_class",
         false,
         EXIT_STATUS_CLASSES,
+        true,
+    ),
+    u64_field("bitfun.tool.content.length", false),
+    bool_field("bitfun.tool.content.truncated", false, true),
+    bool_field("bitfun.tool.execute.retryable", false, true),
+    enum_field(
+        "bitfun.tool.programming_language",
+        false,
+        PROGRAMMING_LANGUAGE_CLASSES,
         true,
     ),
     enum_field("error.type", false, ERROR_TYPES, true),
@@ -445,6 +642,12 @@ const PERMISSION_CONFIRMATION_FIELDS: &[FieldView] = &[
     ),
     bool_field("bitfun.permission.confirmation.auto_approve", true, true),
     enum_field(
+        "bitfun.permission.confirmation.ui_surface",
+        false,
+        PERMISSION_UI_SURFACES,
+        true,
+    ),
+    enum_field(
         "bitfun.permission.confirmation.decision",
         true,
         PERMISSION_DECISIONS,
@@ -472,6 +675,8 @@ const COMPRESSION_FIELDS: &[FieldView] = &[
         COMPRESSION_TRIGGERS,
         true,
     ),
+    u64_field("bitfun.agent.compression.threshold_tokens", false),
+    u64_field("bitfun.agent.compression.turns_since_last", false),
     enum_field(
         "bitfun.agent.compression.source",
         false,
@@ -480,7 +685,15 @@ const COMPRESSION_FIELDS: &[FieldView] = &[
     ),
     bool_field("bitfun.agent.compression.has_summary", false, true),
     u64_field("bitfun.agent.compression.tokens_before", false),
-    u64_field("bitfun.agent.compression.tokens_after", false),
+    u64_field("bitfun.agent.compression.tokens_after_estimate", false),
+    u64_field("bitfun.agent.compression.usage.input_tokens", false),
+    u64_field("bitfun.agent.compression.usage.output_tokens", false),
+    u64_field("bitfun.agent.compression.usage.total_tokens", false),
+    u64_field("bitfun.agent.compression.usage.cache_read_tokens", false),
+    u64_field(
+        "bitfun.agent.compression.usage.cache_creation_tokens",
+        false,
+    ),
     enum_field("bitfun.agent.compression.outcome", true, OUTCOMES, true),
     u64_field("bitfun.agent.compression.duration_ms", false),
     enum_field("error.type", false, ERROR_TYPES, true),
@@ -502,6 +715,23 @@ const SESSION_METRIC_FIELDS: &[FieldView] = &[
     enum_field("bitfun.agent.session.outcome", true, OUTCOMES, true),
     enum_field("error.type", false, ERROR_TYPES, true),
 ];
+const SLASH_COMMAND_METRIC_FIELDS: &[FieldView] = &[
+    enum_field(
+        "bitfun.agent.slash_command.class",
+        true,
+        SLASH_COMMAND_CLASSES,
+        true,
+    ),
+    enum_field(
+        "bitfun.agent.slash_command.source",
+        true,
+        SLASH_COMMAND_SOURCES,
+        true,
+    ),
+    bool_field("bitfun.agent.slash_command.has_arguments", true, true),
+];
+const SESSION_CONFIG_METRIC_FIELDS: &[FieldView] = SESSION_CONFIG_FIELDS;
+const INPUT_ATTACHMENT_METRIC_FIELDS: &[FieldView] = INPUT_ATTACHMENT_FIELDS;
 const TURN_METRIC_FIELDS: &[FieldView] = &[
     enum_field("bitfun.agent.turn.outcome", true, OUTCOMES, true),
     enum_field("bitfun.agent.turn.mode_class", false, MODE_CLASSES, true),
@@ -530,6 +760,24 @@ const INFERENCE_METRIC_FIELDS: &[FieldView] = &[
     ),
     enum_field("bitfun.inference.model_class", false, MODEL_CLASSES, true),
     enum_field(
+        "bitfun.inference.context_class",
+        true,
+        INFERENCE_CONTEXT_CLASSES,
+        true,
+    ),
+    enum_field(
+        "bitfun.inference.auth_class",
+        false,
+        INFERENCE_AUTH_CLASSES,
+        true,
+    ),
+    enum_field(
+        "bitfun.inference.response.stream_outcome",
+        false,
+        INFERENCE_STREAM_OUTCOMES,
+        true,
+    ),
+    enum_field(
         "bitfun.inference.request.http_status_class",
         false,
         STATUS_CLASSES,
@@ -551,6 +799,18 @@ const INFERENCE_ATTEMPT_METRIC_FIELDS: &[FieldView] = &[
         true,
     ),
     enum_field("bitfun.inference.attempt.outcome", true, OUTCOMES, true),
+    enum_field(
+        "bitfun.inference.attempt.stream_outcome",
+        false,
+        INFERENCE_STREAM_OUTCOMES,
+        true,
+    ),
+    enum_field(
+        "bitfun.inference.attempt.tool_argument_recovery",
+        false,
+        TOOL_ARGUMENT_RECOVERIES,
+        true,
+    ),
 ];
 const TOOL_METRIC_FIELDS: &[FieldView] = &[
     enum_field("bitfun.tool.execute.outcome", true, OUTCOMES, true),
@@ -570,6 +830,13 @@ const TOOL_METRIC_FIELDS: &[FieldView] = &[
         "bitfun.tool.execute.exit_status_class",
         false,
         EXIT_STATUS_CLASSES,
+        true,
+    ),
+    bool_field("bitfun.tool.execute.retryable", false, true),
+    enum_field(
+        "bitfun.tool.programming_language",
+        false,
+        PROGRAMMING_LANGUAGE_CLASSES,
         true,
     ),
     enum_field("error.type", false, ERROR_TYPES, true),
@@ -719,6 +986,78 @@ descriptors!(
     FrequencyClass::Low,
     1
 );
+static SLASH_COMMAND_TOTAL: DescriptorView = DescriptorView {
+    name: "bitfun.agent.slash_command.total",
+    version: 1,
+    signal: SignalKind::Metric,
+    minimum_level: TelemetryLevel::Basic,
+    fields: SLASH_COMMAND_METRIC_FIELDS,
+    metric_unit: Some(MetricUnit::One),
+    body: None,
+    owner: "interface-command-router",
+    frequency: FrequencyClass::Normal,
+    max_per_operation: 1,
+};
+static SLASH_COMMAND_LOG: DescriptorView = DescriptorView {
+    name: "bitfun.agent.slash_command",
+    version: 1,
+    signal: SignalKind::Log,
+    minimum_level: TelemetryLevel::Basic,
+    fields: SLASH_COMMAND_FIELDS,
+    metric_unit: None,
+    body: Some("Slash command invoked"),
+    owner: "interface-command-router",
+    frequency: FrequencyClass::Normal,
+    max_per_operation: 1,
+};
+static SESSION_CONFIG_TOTAL: DescriptorView = DescriptorView {
+    name: "bitfun.agent.session.config.total",
+    version: 1,
+    signal: SignalKind::Metric,
+    minimum_level: TelemetryLevel::Basic,
+    fields: SESSION_CONFIG_METRIC_FIELDS,
+    metric_unit: Some(MetricUnit::One),
+    body: None,
+    owner: "conversation-coordinator",
+    frequency: FrequencyClass::Low,
+    max_per_operation: 1,
+};
+static SESSION_CONFIG_LOG: DescriptorView = DescriptorView {
+    name: "bitfun.agent.session.config",
+    version: 1,
+    signal: SignalKind::Log,
+    minimum_level: TelemetryLevel::Basic,
+    fields: SESSION_CONFIG_FIELDS,
+    metric_unit: None,
+    body: Some("Agent session configuration resolved"),
+    owner: "conversation-coordinator",
+    frequency: FrequencyClass::Low,
+    max_per_operation: 1,
+};
+static INPUT_ATTACHMENT_TOTAL: DescriptorView = DescriptorView {
+    name: "bitfun.agent.input_attachment.total",
+    version: 1,
+    signal: SignalKind::Metric,
+    minimum_level: TelemetryLevel::Basic,
+    fields: INPUT_ATTACHMENT_METRIC_FIELDS,
+    metric_unit: Some(MetricUnit::One),
+    body: None,
+    owner: "dialog-scheduler",
+    frequency: FrequencyClass::Normal,
+    max_per_operation: 1,
+};
+static INPUT_ATTACHMENT_LOG: DescriptorView = DescriptorView {
+    name: "bitfun.agent.input_attachment",
+    version: 1,
+    signal: SignalKind::Log,
+    minimum_level: TelemetryLevel::Basic,
+    fields: INPUT_ATTACHMENT_FIELDS,
+    metric_unit: None,
+    body: Some("Agent input attachments submitted"),
+    owner: "dialog-scheduler",
+    frequency: FrequencyClass::Normal,
+    max_per_operation: 1,
+};
 
 descriptors!(
     TURN_SPAN,
@@ -858,6 +1197,14 @@ token_descriptor!(
     INFERENCE_CACHE_READ_TOKENS,
     "bitfun.inference.usage.cache_read_tokens"
 );
+token_descriptor!(
+    INFERENCE_CACHE_CREATION_TOKENS,
+    "bitfun.inference.usage.cache_creation_tokens"
+);
+token_descriptor!(
+    INFERENCE_TOTAL_TOKENS,
+    "bitfun.inference.usage.total_tokens"
+);
 
 static REGISTRY: &[DescriptorView] = &[
     STARTUP_SPAN,
@@ -868,6 +1215,12 @@ static REGISTRY: &[DescriptorView] = &[
     SESSION_TOTAL,
     SESSION_DURATION,
     SESSION_LOG,
+    SLASH_COMMAND_TOTAL,
+    SLASH_COMMAND_LOG,
+    SESSION_CONFIG_TOTAL,
+    SESSION_CONFIG_LOG,
+    INPUT_ATTACHMENT_TOTAL,
+    INPUT_ATTACHMENT_LOG,
     TURN_SPAN,
     TURN_TOTAL,
     TURN_DURATION,
@@ -904,6 +1257,8 @@ static REGISTRY: &[DescriptorView] = &[
     INFERENCE_OUTPUT_TOKENS,
     INFERENCE_REASONING_TOKENS,
     INFERENCE_CACHE_READ_TOKENS,
+    INFERENCE_CACHE_CREATION_TOKENS,
+    INFERENCE_TOTAL_TOKENS,
 ];
 
 pub fn descriptor_registry() -> &'static [DescriptorView] {
@@ -975,12 +1330,31 @@ pub(crate) fn operation_schema(kind: OperationKind) -> OperationSchema {
     }
 }
 
+pub(crate) const fn event_schema(kind: EventKind) -> EventSchema {
+    match kind {
+        EventKind::SlashCommand => EventSchema {
+            total: &SLASH_COMMAND_TOTAL,
+            log: &SLASH_COMMAND_LOG,
+        },
+        EventKind::SessionConfig => EventSchema {
+            total: &SESSION_CONFIG_TOTAL,
+            log: &SESSION_CONFIG_LOG,
+        },
+        EventKind::InputAttachment => EventSchema {
+            total: &INPUT_ATTACHMENT_TOTAL,
+            log: &INPUT_ATTACHMENT_LOG,
+        },
+    }
+}
+
 pub(crate) fn token_metric_descriptor(kind: TokenMetricKind) -> &'static DescriptorView {
     match kind {
         TokenMetricKind::Input => &INFERENCE_INPUT_TOKENS,
         TokenMetricKind::Output => &INFERENCE_OUTPUT_TOKENS,
         TokenMetricKind::Reasoning => &INFERENCE_REASONING_TOKENS,
         TokenMetricKind::CacheRead => &INFERENCE_CACHE_READ_TOKENS,
+        TokenMetricKind::CacheCreation => &INFERENCE_CACHE_CREATION_TOKENS,
+        TokenMetricKind::Total => &INFERENCE_TOTAL_TOKENS,
     }
 }
 
@@ -1107,8 +1481,9 @@ mod tests {
         for descriptor in descriptor_registry() {
             for forbidden in [
                 "prompt",
-                "response",
-                "tool.argument",
+                "inference.response.body",
+                "inference.response.content",
+                "tool.arguments.raw",
                 "tool.result",
                 ".path",
                 "user.",
@@ -1158,5 +1533,9 @@ mod tests {
                 .any(|descriptor| descriptor.name() == name
                     && descriptor.signal() == SignalKind::Trace));
         }
+        assert!(descriptor_registry().iter().any(|descriptor| {
+            descriptor.name() == "bitfun.agent.slash_command"
+                && descriptor.signal() == SignalKind::Log
+        }));
     }
 }

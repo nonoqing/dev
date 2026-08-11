@@ -96,7 +96,8 @@ use bitfun_agent_runtime::sdk::PermissionReply;
 use bitfun_agent_runtime::user_questions::USER_INPUT_AVAILABLE_CONTEXT_KEY;
 use bitfun_events::{ToolEventData, ToolEventIdentity};
 use bitfun_observability::domains::{
-    start_session, SessionClass, SessionFinishFacts, SessionOperation, SessionStartFacts,
+    record_session_config, start_session, SessionClass, SessionConfigFacts, SessionFinishFacts,
+    SessionOperation, SessionStartFacts,
 };
 use bitfun_observability::{Telemetry, TraceRelation};
 use bitfun_product_domains::external_sources::EcosystemId;
@@ -2170,6 +2171,22 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
         self
     }
 
+    pub(crate) fn telemetry(&self) -> Telemetry {
+        self.telemetry.clone()
+    }
+
+    fn record_session_config(&self, session: &Session) {
+        record_session_config(
+            &self.telemetry,
+            SessionConfigFacts {
+                max_context_tokens: session.config.max_context_tokens.min(u64::MAX as usize) as u64,
+                max_turns: session.config.max_turns.min(u64::MAX as usize) as u64,
+                auto_compact: session.config.auto_compact,
+                context_compression_enabled: session.config.enable_context_compression,
+            },
+        );
+    }
+
     async fn observe_session_operation<T, F>(
         &self,
         start_facts: SessionStartFacts,
@@ -2598,6 +2615,9 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
             crate::util::elapsed_ms_u64(started_at),
         )
         .await;
+        if let Ok(session) = &result {
+            self.record_session_config(session);
+        }
         result
     }
 
@@ -7335,6 +7355,9 @@ Update the persona files and delete BOOTSTRAP.md as soon as bootstrap is complet
             .await?;
         self.reconcile_session_revert_locked(&session_storage_path, session_id)
             .await?;
+        if let Some(session) = self.session_manager.get_session(session_id) {
+            self.record_session_config(&session);
+        }
         Ok(restored)
     }
 
@@ -13567,6 +13590,7 @@ mod tests {
             has_summary: true,
             summary_source: "model".to_string(),
             applied: true,
+            model_usage: None,
         };
         let mut turn = DialogTurnData::new_with_kind(
             DialogTurnKind::ManualCompaction,
@@ -13729,6 +13753,7 @@ mod tests {
                 has_summary: true,
                 summary_source: "model".to_string(),
                 applied: true,
+                model_usage: None,
             },
             128_000,
         )

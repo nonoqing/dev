@@ -8,7 +8,7 @@ use crate::agentic::workspace::WorkspaceServices;
 use crate::agentic::WorkspaceBinding;
 pub use bitfun_agent_runtime::events::FinishReason;
 use bitfun_agent_tools::LoadedDeferredToolSpec;
-use bitfun_observability::domains::ModelClass;
+use bitfun_observability::domains::{InferenceAuthClass, ModelClass};
 use bitfun_observability::{ObservationContext, TraceRelation};
 use bitfun_runtime_ports::{
     DelegationPolicy, PermissionConstraintLayer, PermissionDelegationContext,
@@ -85,6 +85,8 @@ pub struct RoundContext {
     pub primary_model_facts: PrimaryModelFacts,
     /// Privacy-safe model capability class resolved from typed configuration.
     pub telemetry_model_class: ModelClass,
+    /// Privacy-safe authentication source resolved from typed configuration.
+    pub telemetry_auth_class: Option<InferenceAuthClass>,
     pub agent_type: String,
     pub context_vars: HashMap<String, String>,
     pub permission_constraints: PermissionConstraintLayer,
@@ -140,8 +142,13 @@ pub struct ExecutionResult {
     pub new_messages: Vec<Message>,
     /// Why the execution finished
     pub finish_reason: FinishReason,
+    /// Last provider token usage observed in this turn, retained for the
+    /// authoritative Turn Debug record.
+    pub last_token_usage: Option<crate::util::types::ai::GeminiUsage>,
     pub first_result_ms: Option<u64>,
     pub modified_file_count: Option<u64>,
+    /// Snapshot-owned file paths modified by this Turn, for Debug telemetry only.
+    pub modified_file_paths: Option<Vec<String>>,
     pub added_lines: Option<u64>,
     pub deleted_lines: Option<u64>,
 }

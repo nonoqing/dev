@@ -7,10 +7,11 @@ use bitfun_events::{
 };
 use bitfun_observability::domains::{
     AgentModeClass, CompletionFacts, CountBucket, FinishReasonClass, InferenceProtocolClass,
-    ModelClass, Outcome, PermissionDecision, PermissionSource, ProviderClass, SafeErrorType,
-    SessionClass, SessionOperation, StatusClass, ToolClass, ToolFailureSource, ToolKind,
-    ToolSourceClass, TurnTrigger,
+    ModelClass, Outcome, PermissionDecision, PermissionSource, ProgrammingLanguageClass,
+    ProviderClass, SafeErrorType, SessionClass, SessionOperation, StatusClass, ToolClass,
+    ToolFailureSource, ToolKind, ToolSourceClass, TurnTrigger,
 };
+use std::path::Path;
 
 pub(crate) fn safe_terminal_completion(
     completion: CompletionFacts,
@@ -333,12 +334,88 @@ pub(crate) fn tool_identity(
     (class, source, kind)
 }
 
+pub(crate) fn programming_language_class_from_path(path: &str) -> Option<ProgrammingLanguageClass> {
+    let path = Path::new(path);
+    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+        match name.to_ascii_lowercase().as_str() {
+            "dockerfile" | "containerfile" => return Some(ProgrammingLanguageClass::Dockerfile),
+            "makefile" | "gnumakefile" => return Some(ProgrammingLanguageClass::Makefile),
+            "cargo.toml" | "cargo.lock" => return Some(ProgrammingLanguageClass::Rust),
+            _ => {}
+        }
+    }
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "ts" | "tsx" => ProgrammingLanguageClass::TypeScript,
+        "js" | "jsx" | "mjs" | "cjs" => ProgrammingLanguageClass::JavaScript,
+        "py" | "pyi" | "pyw" => ProgrammingLanguageClass::Python,
+        "rs" => ProgrammingLanguageClass::Rust,
+        "go" => ProgrammingLanguageClass::Go,
+        "java" => ProgrammingLanguageClass::Java,
+        "kt" | "kts" => ProgrammingLanguageClass::Kotlin,
+        "swift" => ProgrammingLanguageClass::Swift,
+        "cs" => ProgrammingLanguageClass::CSharp,
+        "cpp" | "cc" | "cxx" | "hpp" | "c" | "h" => ProgrammingLanguageClass::Cpp,
+        "rb" => ProgrammingLanguageClass::Ruby,
+        "php" => ProgrammingLanguageClass::Php,
+        "vue" => ProgrammingLanguageClass::Vue,
+        "svelte" => ProgrammingLanguageClass::Svelte,
+        "md" | "mdx" => ProgrammingLanguageClass::Markdown,
+        "json" | "jsonc" => ProgrammingLanguageClass::Json,
+        "yaml" | "yml" => ProgrammingLanguageClass::Yaml,
+        "toml" => ProgrammingLanguageClass::Toml,
+        "xml" => ProgrammingLanguageClass::Xml,
+        "html" | "htm" => ProgrammingLanguageClass::Html,
+        "css" | "scss" | "sass" | "less" => ProgrammingLanguageClass::Css,
+        "sh" | "bash" | "zsh" | "fish" => ProgrammingLanguageClass::Shell,
+        "ps1" => ProgrammingLanguageClass::PowerShell,
+        "sql" => ProgrammingLanguageClass::Sql,
+        "gradle" => ProgrammingLanguageClass::Gradle,
+        "properties" => ProgrammingLanguageClass::Properties,
+        _ => return None,
+    })
+}
+
+pub(crate) const fn programming_language_name(language: ProgrammingLanguageClass) -> &'static str {
+    match language {
+        ProgrammingLanguageClass::Rust => "Rust",
+        ProgrammingLanguageClass::TypeScript => "TypeScript",
+        ProgrammingLanguageClass::JavaScript => "JavaScript",
+        ProgrammingLanguageClass::Python => "Python",
+        ProgrammingLanguageClass::Go => "Go",
+        ProgrammingLanguageClass::Java => "Java",
+        ProgrammingLanguageClass::Kotlin => "Kotlin",
+        ProgrammingLanguageClass::Swift => "Swift",
+        ProgrammingLanguageClass::CSharp => "C#",
+        ProgrammingLanguageClass::Cpp => "C/C++",
+        ProgrammingLanguageClass::Ruby => "Ruby",
+        ProgrammingLanguageClass::Php => "PHP",
+        ProgrammingLanguageClass::Vue => "Vue",
+        ProgrammingLanguageClass::Svelte => "Svelte",
+        ProgrammingLanguageClass::Markdown => "Markdown",
+        ProgrammingLanguageClass::Json => "JSON",
+        ProgrammingLanguageClass::Yaml => "YAML",
+        ProgrammingLanguageClass::Toml => "TOML",
+        ProgrammingLanguageClass::Xml => "XML",
+        ProgrammingLanguageClass::Html => "HTML",
+        ProgrammingLanguageClass::Css => "CSS",
+        ProgrammingLanguageClass::Shell => "Shell",
+        ProgrammingLanguageClass::PowerShell => "PowerShell",
+        ProgrammingLanguageClass::Sql => "SQL",
+        ProgrammingLanguageClass::Gradle => "Gradle",
+        ProgrammingLanguageClass::Properties => "Properties",
+        ProgrammingLanguageClass::Dockerfile => "Dockerfile",
+        ProgrammingLanguageClass::Makefile => "Makefile",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bitfun_core_types::errors::AiProviderError;
     use bitfun_observability::domains::{
-        start_inference, AttemptBucket, InferenceFinishFacts, InferenceStartFacts,
+        start_inference, AttemptBucket, InferenceAuthClass, InferenceContextClass,
+        InferenceFinishFacts, InferenceStartFacts,
     };
     use bitfun_observability::{
         AttributeValue, InMemorySink, PolicySnapshot, Telemetry, TelemetryLevel,
@@ -359,6 +436,8 @@ mod tests {
                 provider_class: ProviderClass::OpenAiCompatible,
                 model_class: ModelClass::GeneralReasoning,
                 protocol_class: InferenceProtocolClass::Responses,
+                context_class: InferenceContextClass::Turn,
+                auth_class: Some(InferenceAuthClass::ApiKey),
             },
             None,
         )
@@ -372,6 +451,10 @@ mod tests {
             output_tokens: None,
             reasoning_tokens: None,
             cache_read_tokens: None,
+            cache_creation_tokens: None,
+            total_tokens: None,
+            context_window_tokens: None,
+            tool_definition_tokens_estimate: None,
         });
 
         let records = sink.records();
@@ -495,6 +578,27 @@ mod tests {
                 ModelClass::Other,
                 InferenceProtocolClass::Other,
             )
+        );
+    }
+
+    #[test]
+    fn programming_language_uses_only_validated_file_paths() {
+        assert_eq!(
+            programming_language_class_from_path("src/main.rs"),
+            Some(ProgrammingLanguageClass::Rust)
+        );
+        assert_eq!(
+            programming_language_class_from_path("web/App.tsx"),
+            Some(ProgrammingLanguageClass::TypeScript)
+        );
+        assert_eq!(
+            programming_language_class_from_path("Containerfile"),
+            Some(ProgrammingLanguageClass::Dockerfile)
+        );
+        assert_eq!(programming_language_class_from_path("README"), None);
+        assert_eq!(
+            programming_language_class_from_path("archive.unknown"),
+            None
         );
     }
 

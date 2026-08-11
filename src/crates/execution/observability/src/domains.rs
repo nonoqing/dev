@@ -4,7 +4,7 @@
 //! They deliberately have no slots for prompts, model payloads, tool arguments,
 //! paths, business identifiers, arbitrary names, or raw errors.
 
-use crate::schema::{OperationKind, TokenMetricKind};
+use crate::schema::{EventKind, OperationKind, TokenMetricKind};
 use crate::{
     Attribute, ObservationContext, Severity, SpanStatus, Telemetry, TelemetrySpan, TraceRelation,
 };
@@ -110,6 +110,27 @@ safe_enum!(InferenceProtocolClass {
     Gemini => "gemini",
     Other => "other",
 });
+safe_enum!(InferenceContextClass {
+    Turn => "turn",
+    Session => "session",
+    Standalone => "standalone",
+});
+safe_enum!(InferenceAuthClass {
+    ApiKey => "api_key",
+    Subscription => "subscription",
+});
+safe_enum!(InferenceStreamOutcomeClass {
+    Complete => "complete",
+    Interrupted => "interrupted",
+    PartialRecovered => "partial_recovered",
+    NoEffectiveOutput => "no_effective_output",
+    RetryExhausted => "retry_exhausted",
+});
+safe_enum!(ToolArgumentRecoveryClass {
+    Repaired => "repaired",
+    Invalid => "invalid",
+    RetryExhausted => "retry_exhausted",
+});
 safe_enum!(StatusClass {
     None => "none",
     Success => "2xx",
@@ -157,6 +178,45 @@ safe_enum!(ExitStatusClass {
     Signal => "signal",
     Unknown => "unknown",
 });
+safe_enum!(ToolArgumentState {
+    Unchanged => "unchanged",
+    Repaired => "repaired",
+    Invalid => "invalid",
+});
+safe_enum!(ProgrammingLanguageClass {
+    Rust => "rust",
+    TypeScript => "typescript",
+    JavaScript => "javascript",
+    Python => "python",
+    Go => "go",
+    Java => "java",
+    Kotlin => "kotlin",
+    Swift => "swift",
+    CSharp => "csharp",
+    Cpp => "cpp",
+    Ruby => "ruby",
+    Php => "php",
+    Vue => "vue",
+    Svelte => "svelte",
+    Markdown => "markdown",
+    Json => "json",
+    Yaml => "yaml",
+    Toml => "toml",
+    Xml => "xml",
+    Html => "html",
+    Css => "css",
+    Shell => "shell",
+    PowerShell => "powershell",
+    Sql => "sql",
+    Gradle => "gradle",
+    Properties => "properties",
+    Dockerfile => "dockerfile",
+    Makefile => "makefile",
+});
+safe_enum!(PermissionUiSurface {
+    ToolPermission => "tool_permission",
+    Other => "other",
+});
 safe_enum!(SessionOperation {
     Create => "create",
     Resume => "resume",
@@ -167,6 +227,25 @@ safe_enum!(SessionClass {
     Subagent => "subagent",
     Internal => "internal",
     Transient => "transient",
+});
+safe_enum!(SlashCommandClass {
+    Session => "session",
+    Model => "model",
+    Agent => "agent",
+    Workspace => "workspace",
+    Configuration => "configuration",
+    Diagnostic => "diagnostic",
+    External => "external",
+    Other => "other",
+});
+safe_enum!(SlashCommandSource {
+    BuiltIn => "builtin",
+    External => "external",
+    Unknown => "unknown",
+});
+safe_enum!(ImageAttachmentOutcome {
+    Accepted => "accepted",
+    Rejected => "rejected",
 });
 safe_enum!(CountBucket {
     Zero => "0",
@@ -371,6 +450,131 @@ pub fn start_session(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlashCommandFacts {
+    pub command_class: SlashCommandClass,
+    pub source: SlashCommandSource,
+    pub has_arguments: bool,
+}
+
+pub fn record_slash_command(telemetry: &Telemetry, facts: SlashCommandFacts) {
+    telemetry.record_instant_event(
+        EventKind::SlashCommand,
+        vec![
+            Attribute::enumeration(
+                "bitfun.agent.slash_command.class",
+                facts.command_class.as_str(),
+            ),
+            Attribute::enumeration("bitfun.agent.slash_command.source", facts.source.as_str()),
+            Attribute::boolean(
+                "bitfun.agent.slash_command.has_arguments",
+                facts.has_arguments,
+            ),
+        ],
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionConfigFacts {
+    pub max_context_tokens: u64,
+    pub max_turns: u64,
+    pub auto_compact: bool,
+    pub context_compression_enabled: bool,
+}
+
+pub fn record_session_config(telemetry: &Telemetry, facts: SessionConfigFacts) {
+    telemetry.record_instant_event(
+        EventKind::SessionConfig,
+        vec![
+            Attribute::u64(
+                "bitfun.agent.session.config.max_context_tokens",
+                facts.max_context_tokens,
+            ),
+            Attribute::u64("bitfun.agent.session.config.max_turns", facts.max_turns),
+            Attribute::boolean(
+                "bitfun.agent.session.config.auto_compact",
+                facts.auto_compact,
+            ),
+            Attribute::boolean(
+                "bitfun.agent.session.config.context_compression_enabled",
+                facts.context_compression_enabled,
+            ),
+        ],
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageAttachmentFacts {
+    pub outcome: ImageAttachmentOutcome,
+    pub count: u64,
+    pub size_known_count: u64,
+    pub dimensions_known_count: u64,
+    pub total_size_bytes: Option<u64>,
+    pub max_size_bytes: Option<u64>,
+    pub max_width: Option<u64>,
+    pub max_height: Option<u64>,
+    pub has_png: bool,
+    pub has_jpeg: bool,
+    pub has_webp: bool,
+    pub has_gif: bool,
+    pub has_other: bool,
+}
+
+pub fn record_image_attachments(telemetry: &Telemetry, facts: ImageAttachmentFacts) {
+    let mut attributes = vec![
+        Attribute::enumeration(
+            "bitfun.agent.input_attachment.outcome",
+            facts.outcome.as_str(),
+        ),
+        Attribute::u64("bitfun.agent.input_attachment.image_count", facts.count),
+        Attribute::u64(
+            "bitfun.agent.input_attachment.image_size_known_count",
+            facts.size_known_count,
+        ),
+        Attribute::u64(
+            "bitfun.agent.input_attachment.image_dimensions_known_count",
+            facts.dimensions_known_count,
+        ),
+        Attribute::boolean("bitfun.agent.input_attachment.image_has_png", facts.has_png),
+        Attribute::boolean(
+            "bitfun.agent.input_attachment.image_has_jpeg",
+            facts.has_jpeg,
+        ),
+        Attribute::boolean(
+            "bitfun.agent.input_attachment.image_has_webp",
+            facts.has_webp,
+        ),
+        Attribute::boolean("bitfun.agent.input_attachment.image_has_gif", facts.has_gif),
+        Attribute::boolean(
+            "bitfun.agent.input_attachment.image_has_other",
+            facts.has_other,
+        ),
+    ];
+    for (key, value) in [
+        (
+            "bitfun.agent.input_attachment.image_total_size_bytes",
+            facts.total_size_bytes,
+        ),
+        (
+            "bitfun.agent.input_attachment.image_max_size_bytes",
+            facts.max_size_bytes,
+        ),
+        (
+            "bitfun.agent.input_attachment.image_max_width",
+            facts.max_width,
+        ),
+        (
+            "bitfun.agent.input_attachment.image_max_height",
+            facts.max_height,
+        ),
+    ] {
+        if let Some(value) = value {
+            attributes.push(Attribute::u64(key, value));
+        }
+    }
+    telemetry.record_instant_event(EventKind::InputAttachment, attributes);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnStartFacts {
     pub mode_class: AgentModeClass,
     pub trigger: TurnTrigger,
@@ -424,6 +628,42 @@ impl TurnFinishFacts {
 
 observation!(TurnObservation, TurnFinishFacts);
 
+impl TurnObservation {
+    pub fn finish_with_output_length(self, facts: TurnFinishFacts, output_length: Option<u64>) {
+        let (mut attributes, status, severity) = facts.into_parts();
+        if let Some(output_length) = output_length {
+            attributes.push(Attribute::u64(
+                "bitfun.agent.turn.output_length",
+                output_length,
+            ));
+        }
+        self.0.finish_terminal(attributes, status, severity);
+    }
+}
+
+fn turn_start_attributes(
+    facts: TurnStartFacts,
+    sequence: Option<u64>,
+    input_length: Option<u64>,
+) -> Vec<Attribute> {
+    let mut attributes = vec![
+        Attribute::enumeration("bitfun.agent.turn.mode_class", facts.mode_class.as_str()),
+        Attribute::enumeration("bitfun.agent.turn.trigger", facts.trigger.as_str()),
+        Attribute::boolean("bitfun.agent.turn.remote", facts.remote),
+        Attribute::boolean("bitfun.agent.turn.subagent", facts.subagent),
+    ];
+    if let Some(sequence) = sequence {
+        attributes.push(Attribute::u64("bitfun.agent.turn.sequence", sequence));
+    }
+    if let Some(input_length) = input_length {
+        attributes.push(Attribute::u64(
+            "bitfun.agent.turn.input_length",
+            input_length,
+        ));
+    }
+    attributes
+}
+
 pub fn start_turn(
     telemetry: &Telemetry,
     facts: TurnStartFacts,
@@ -431,14 +671,7 @@ pub fn start_turn(
 ) -> TurnObservation {
     TurnObservation(telemetry.start_operation(
         OperationKind::Turn,
-        || {
-            vec![
-                Attribute::enumeration("bitfun.agent.turn.mode_class", facts.mode_class.as_str()),
-                Attribute::enumeration("bitfun.agent.turn.trigger", facts.trigger.as_str()),
-                Attribute::boolean("bitfun.agent.turn.remote", facts.remote),
-                Attribute::boolean("bitfun.agent.turn.subagent", facts.subagent),
-            ]
-        },
+        || turn_start_attributes(facts, None, None),
         parent,
     ))
 }
@@ -450,14 +683,21 @@ pub fn start_turn_with_relation(
 ) -> TurnObservation {
     TurnObservation(telemetry.start_operation_with_relation(
         OperationKind::Turn,
-        || {
-            vec![
-                Attribute::enumeration("bitfun.agent.turn.mode_class", facts.mode_class.as_str()),
-                Attribute::enumeration("bitfun.agent.turn.trigger", facts.trigger.as_str()),
-                Attribute::boolean("bitfun.agent.turn.remote", facts.remote),
-                Attribute::boolean("bitfun.agent.turn.subagent", facts.subagent),
-            ]
-        },
+        || turn_start_attributes(facts, None, None),
+        relation,
+    ))
+}
+
+pub fn start_turn_with_relation_and_content_facts(
+    telemetry: &Telemetry,
+    facts: TurnStartFacts,
+    relation: TraceRelation,
+    sequence: Option<u64>,
+    input_length: Option<u64>,
+) -> TurnObservation {
+    TurnObservation(telemetry.start_operation_with_relation(
+        OperationKind::Turn,
+        || turn_start_attributes(facts, sequence, input_length),
         relation,
     ))
 }
@@ -518,6 +758,14 @@ pub struct InferenceStartFacts {
     pub provider_class: ProviderClass,
     pub model_class: ModelClass,
     pub protocol_class: InferenceProtocolClass,
+    pub context_class: InferenceContextClass,
+    pub auth_class: Option<InferenceAuthClass>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InferenceRequestFacts {
+    pub message_count: Option<u64>,
+    pub tool_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -531,6 +779,24 @@ pub struct InferenceFinishFacts {
     pub output_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
+    pub cache_creation_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub context_window_tokens: Option<u64>,
+    pub tool_definition_tokens_estimate: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InferenceResponseFacts {
+    pub finish_reason: Option<FinishReasonClass>,
+    pub has_tool_calls: Option<bool>,
+    pub output_length: Option<u64>,
+    pub reasoning_length: Option<u64>,
+    pub output_line_count: Option<u64>,
+    pub reasoning_present: Option<bool>,
+    pub reasoning_first_ms: Option<u64>,
+    pub reasoning_duration_ms: Option<u64>,
+    pub stream_outcome: Option<InferenceStreamOutcomeClass>,
+    pub tool_argument_recovery: Option<ToolArgumentRecoveryClass>,
 }
 
 impl InferenceFinishFacts {
@@ -562,6 +828,19 @@ impl InferenceFinishFacts {
                 "bitfun.inference.usage.cache_read_tokens",
                 self.cache_read_tokens,
             ),
+            (
+                "bitfun.inference.usage.cache_creation_tokens",
+                self.cache_creation_tokens,
+            ),
+            ("bitfun.inference.usage.total_tokens", self.total_tokens),
+            (
+                "bitfun.inference.request.context_window_tokens",
+                self.context_window_tokens,
+            ),
+            (
+                "bitfun.inference.request.tool_definition_tokens_estimate",
+                self.tool_definition_tokens_estimate,
+            ),
         ] {
             if let Some(value) = value {
                 attributes.push(Attribute::u64(key, value));
@@ -580,6 +859,75 @@ impl InferenceFinishFacts {
 
 observation!(InferenceObservation, InferenceFinishFacts);
 
+impl InferenceObservation {
+    pub fn finish_with_response_facts(
+        self,
+        facts: InferenceFinishFacts,
+        response: InferenceResponseFacts,
+    ) {
+        let (mut attributes, status, severity) = facts.into_parts();
+        if let Some(finish_reason) = response.finish_reason {
+            attributes.push(Attribute::enumeration(
+                "bitfun.inference.response.finish_reason",
+                finish_reason.as_str(),
+            ));
+        }
+        for (key, value) in [
+            (
+                "bitfun.inference.response.has_tool_calls",
+                response.has_tool_calls,
+            ),
+            (
+                "bitfun.inference.response.reasoning_present",
+                response.reasoning_present,
+            ),
+        ] {
+            if let Some(value) = value {
+                attributes.push(Attribute::boolean(key, value));
+            }
+        }
+        for (key, value) in [
+            (
+                "bitfun.inference.response.output_length",
+                response.output_length,
+            ),
+            (
+                "bitfun.inference.response.reasoning_length",
+                response.reasoning_length,
+            ),
+            (
+                "bitfun.inference.response.output_line_count",
+                response.output_line_count,
+            ),
+            (
+                "bitfun.inference.response.reasoning_first_ms",
+                response.reasoning_first_ms,
+            ),
+            (
+                "bitfun.inference.response.reasoning_duration_ms",
+                response.reasoning_duration_ms,
+            ),
+        ] {
+            if let Some(value) = value {
+                attributes.push(Attribute::u64(key, value));
+            }
+        }
+        if let Some(stream_outcome) = response.stream_outcome {
+            attributes.push(Attribute::enumeration(
+                "bitfun.inference.response.stream_outcome",
+                stream_outcome.as_str(),
+            ));
+        }
+        if let Some(recovery) = response.tool_argument_recovery {
+            attributes.push(Attribute::enumeration(
+                "bitfun.inference.response.tool_argument_recovery",
+                recovery.as_str(),
+            ));
+        }
+        self.0.finish_terminal(attributes, status, severity);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InferenceAttemptStartFacts {
     pub attempt_bucket: AttemptBucket,
@@ -591,6 +939,8 @@ pub struct InferenceAttemptFinishFacts {
     pub status_class: Option<StatusClass>,
     pub retryable: Option<bool>,
     pub ttft_ms: Option<u64>,
+    pub stream_outcome: Option<InferenceStreamOutcomeClass>,
+    pub tool_argument_recovery: Option<ToolArgumentRecoveryClass>,
 }
 
 impl InferenceAttemptFinishFacts {
@@ -610,6 +960,18 @@ impl InferenceAttemptFinishFacts {
         }
         if let Some(ttft_ms) = self.ttft_ms {
             attributes.push(Attribute::u64("bitfun.inference.attempt.ttft_ms", ttft_ms));
+        }
+        if let Some(stream_outcome) = self.stream_outcome {
+            attributes.push(Attribute::enumeration(
+                "bitfun.inference.attempt.stream_outcome",
+                stream_outcome.as_str(),
+            ));
+        }
+        if let Some(recovery) = self.tool_argument_recovery {
+            attributes.push(Attribute::enumeration(
+                "bitfun.inference.attempt.tool_argument_recovery",
+                recovery.as_str(),
+            ));
         }
         completion_attributes(
             self.completion,
@@ -656,7 +1018,64 @@ pub fn start_inference(
                     "bitfun.inference.protocol_class",
                     facts.protocol_class.as_str(),
                 ),
+                Attribute::enumeration(
+                    "bitfun.inference.context_class",
+                    facts.context_class.as_str(),
+                ),
             ]
+            .into_iter()
+            .chain(facts.auth_class.map(|auth_class| {
+                Attribute::enumeration("bitfun.inference.auth_class", auth_class.as_str())
+            }))
+            .collect::<Vec<_>>()
+        },
+        parent,
+    ))
+}
+
+pub fn start_inference_with_request_facts(
+    telemetry: &Telemetry,
+    facts: InferenceStartFacts,
+    request: InferenceRequestFacts,
+    parent: Option<ObservationContext>,
+) -> InferenceObservation {
+    InferenceObservation(telemetry.start_operation(
+        OperationKind::Inference,
+        || {
+            let mut attributes = vec![
+                Attribute::enumeration(
+                    "bitfun.inference.provider_class",
+                    facts.provider_class.as_str(),
+                ),
+                Attribute::enumeration("bitfun.inference.model_class", facts.model_class.as_str()),
+                Attribute::enumeration(
+                    "bitfun.inference.protocol_class",
+                    facts.protocol_class.as_str(),
+                ),
+                Attribute::enumeration(
+                    "bitfun.inference.context_class",
+                    facts.context_class.as_str(),
+                ),
+            ];
+            if let Some(auth_class) = facts.auth_class {
+                attributes.push(Attribute::enumeration(
+                    "bitfun.inference.auth_class",
+                    auth_class.as_str(),
+                ));
+            }
+            if let Some(message_count) = request.message_count {
+                attributes.push(Attribute::u64(
+                    "bitfun.inference.request.message_count",
+                    message_count,
+                ));
+            }
+            if let Some(tool_count) = request.tool_count {
+                attributes.push(Attribute::u64(
+                    "bitfun.inference.request.tool_count",
+                    tool_count,
+                ));
+            }
+            attributes
         },
         parent,
     ))
@@ -671,6 +1090,8 @@ pub struct InferenceUsageFacts {
     pub output_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
+    pub cache_creation_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
 }
 
 pub fn record_inference_usage(telemetry: &Telemetry, facts: InferenceUsageFacts) {
@@ -697,6 +1118,16 @@ pub fn record_inference_usage(telemetry: &Telemetry, facts: InferenceUsageFacts)
     if let Some(cache_read_tokens) = facts.cache_read_tokens {
         telemetry.record_token_metric(TokenMetricKind::CacheRead, cache_read_tokens, attributes());
     }
+    if let Some(cache_creation_tokens) = facts.cache_creation_tokens {
+        telemetry.record_token_metric(
+            TokenMetricKind::CacheCreation,
+            cache_creation_tokens,
+            attributes(),
+        );
+    }
+    if let Some(total_tokens) = facts.total_tokens {
+        telemetry.record_token_metric(TokenMetricKind::Total, total_tokens, attributes());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -707,6 +1138,8 @@ pub struct ToolStartFacts {
     pub parallel: bool,
     pub remote: bool,
     pub background: bool,
+    pub argument_state: ToolArgumentState,
+    pub arguments_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -718,6 +1151,10 @@ pub struct ToolFinishFacts {
     pub execution_ms: Option<u64>,
     pub failure_source: Option<ToolFailureSource>,
     pub exit_status_class: Option<ExitStatusClass>,
+    pub content_length: Option<u64>,
+    pub content_truncated: Option<bool>,
+    pub retryable: Option<bool>,
+    pub programming_language: Option<ProgrammingLanguageClass>,
 }
 
 impl ToolFinishFacts {
@@ -756,6 +1193,27 @@ impl ToolFinishFacts {
                 exit_status_class.as_str(),
             ));
         }
+        if let Some(content_length) = self.content_length {
+            attributes.push(Attribute::u64("bitfun.tool.content.length", content_length));
+        }
+        if let Some(content_truncated) = self.content_truncated {
+            attributes.push(Attribute::boolean(
+                "bitfun.tool.content.truncated",
+                content_truncated,
+            ));
+        }
+        if let Some(retryable) = self.retryable {
+            attributes.push(Attribute::boolean(
+                "bitfun.tool.execute.retryable",
+                retryable,
+            ));
+        }
+        if let Some(language) = self.programming_language {
+            attributes.push(Attribute::enumeration(
+                "bitfun.tool.programming_language",
+                language.as_str(),
+            ));
+        }
         completion_attributes(self.completion, "bitfun.tool.execute.outcome", attributes)
     }
 }
@@ -777,6 +1235,11 @@ pub fn start_tool(
                 Attribute::boolean("bitfun.tool.execute.parallel", facts.parallel),
                 Attribute::boolean("bitfun.tool.execute.remote", facts.remote),
                 Attribute::boolean("bitfun.tool.execute.background", facts.background),
+                Attribute::enumeration(
+                    "bitfun.tool.arguments.state",
+                    facts.argument_state.as_str(),
+                ),
+                Attribute::boolean("bitfun.tool.arguments.truncated", facts.arguments_truncated),
             ]
         },
         parent,
@@ -867,6 +1330,7 @@ pub fn start_permission_evaluation(
 pub struct PermissionConfirmationStartFacts {
     pub request_count_bucket: CountBucket,
     pub auto_approve: bool,
+    pub ui_surface: Option<PermissionUiSurface>,
 }
 
 #[derive(Debug)]
@@ -891,7 +1355,7 @@ pub fn start_permission_confirmation(
     PermissionConfirmationObservation(telemetry.start_operation(
         OperationKind::PermissionConfirmation,
         || {
-            vec![
+            let mut attributes = vec![
                 Attribute::enumeration(
                     "bitfun.permission.confirmation.request_count_bucket",
                     facts.request_count_bucket.as_str(),
@@ -900,7 +1364,14 @@ pub fn start_permission_confirmation(
                     "bitfun.permission.confirmation.auto_approve",
                     facts.auto_approve,
                 ),
-            ]
+            ];
+            if let Some(ui_surface) = facts.ui_surface {
+                attributes.push(Attribute::enumeration(
+                    "bitfun.permission.confirmation.ui_surface",
+                    ui_surface.as_str(),
+                ));
+            }
+            attributes
         },
         parent,
     ))
@@ -909,6 +1380,8 @@ pub fn start_permission_confirmation(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionStartFacts {
     pub trigger: CompressionTrigger,
+    pub threshold_tokens: Option<u64>,
+    pub turns_since_last_compression: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -917,7 +1390,12 @@ pub struct CompressionFinishFacts {
     pub source: Option<CompressionSource>,
     pub has_summary: Option<bool>,
     pub tokens_before: Option<u64>,
-    pub tokens_after: Option<u64>,
+    pub tokens_after_estimate: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_creation_tokens: Option<u64>,
 }
 
 impl CompressionFinishFacts {
@@ -941,11 +1419,37 @@ impl CompressionFinishFacts {
                 tokens_before,
             ));
         }
-        if let Some(tokens_after) = self.tokens_after {
+        if let Some(tokens_after) = self.tokens_after_estimate {
             attributes.push(Attribute::u64(
-                "bitfun.agent.compression.tokens_after",
+                "bitfun.agent.compression.tokens_after_estimate",
                 tokens_after,
             ));
+        }
+        for (key, value) in [
+            (
+                "bitfun.agent.compression.usage.input_tokens",
+                self.input_tokens,
+            ),
+            (
+                "bitfun.agent.compression.usage.output_tokens",
+                self.output_tokens,
+            ),
+            (
+                "bitfun.agent.compression.usage.total_tokens",
+                self.total_tokens,
+            ),
+            (
+                "bitfun.agent.compression.usage.cache_read_tokens",
+                self.cache_read_tokens,
+            ),
+            (
+                "bitfun.agent.compression.usage.cache_creation_tokens",
+                self.cache_creation_tokens,
+            ),
+        ] {
+            if let Some(value) = value {
+                attributes.push(Attribute::u64(key, value));
+            }
         }
         completion_attributes(
             self.completion,
@@ -965,10 +1469,23 @@ pub fn start_compression(
     CompressionObservation(telemetry.start_operation(
         OperationKind::Compression,
         || {
-            vec![Attribute::enumeration(
+            let mut attributes = vec![Attribute::enumeration(
                 "bitfun.agent.compression.trigger",
                 facts.trigger.as_str(),
-            )]
+            )];
+            if let Some(threshold_tokens) = facts.threshold_tokens {
+                attributes.push(Attribute::u64(
+                    "bitfun.agent.compression.threshold_tokens",
+                    threshold_tokens,
+                ));
+            }
+            if let Some(turns_since_last_compression) = facts.turns_since_last_compression {
+                attributes.push(Attribute::u64(
+                    "bitfun.agent.compression.turns_since_last",
+                    turns_since_last_compression,
+                ));
+            }
+            attributes
         },
         parent,
     ))
@@ -1016,6 +1533,44 @@ mod tests {
                 AttributeValue::Enum(value) => Some(*value),
                 _ => None,
             })
+    }
+
+    fn u64_attribute(record: &ValidatedRecord, key: &str) -> Option<u64> {
+        record
+            .attributes()
+            .iter()
+            .find(|attribute| attribute.key() == key)
+            .and_then(|attribute| match attribute.value() {
+                AttributeValue::U64(value) => Some(*value),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn slash_command_is_safe_typed_telemetry_not_debug_content() {
+        let sink = Arc::new(InMemorySink::default());
+        let (telemetry, _) = Telemetry::build(
+            PolicySnapshot::new(TelemetryLevel::Basic).with_success_log_sample_ratio(1.0),
+            sink.clone(),
+        );
+
+        record_slash_command(
+            &telemetry,
+            SlashCommandFacts {
+                command_class: SlashCommandClass::Workspace,
+                source: SlashCommandSource::BuiltIn,
+                has_arguments: true,
+            },
+        );
+
+        let records = sink.records();
+        assert_eq!(records.len(), 2);
+        assert!(sink.debug_records().is_empty());
+        let encoded = serde_json::to_string(&records).unwrap();
+        assert!(encoded.contains("bitfun.agent.slash_command"));
+        assert!(encoded.contains("workspace"));
+        assert!(!encoded.contains("command_text"));
+        assert!(!encoded.contains("arguments_text"));
     }
 
     #[test]
@@ -1087,6 +1642,8 @@ mod tests {
                 provider_class: ProviderClass::AnthropicCompatible,
                 model_class: ModelClass::Code,
                 protocol_class: InferenceProtocolClass::Messages,
+                context_class: InferenceContextClass::Turn,
+                auth_class: Some(InferenceAuthClass::ApiKey),
             },
             None,
         )
@@ -1096,10 +1653,14 @@ mod tests {
             status_class: Some(StatusClass::ClientError),
             retryable: Some(true),
             ttft_ms: None,
-            input_tokens: None,
-            output_tokens: None,
+            input_tokens: Some(10),
+            output_tokens: Some(5),
             reasoning_tokens: None,
             cache_read_tokens: None,
+            cache_creation_tokens: Some(2),
+            total_tokens: Some(17),
+            context_window_tokens: Some(128_000),
+            tool_definition_tokens_estimate: Some(7),
         });
 
         let records = sink.records();
@@ -1124,6 +1685,21 @@ mod tests {
                 Some("messages")
             );
         }
+        assert!(records.iter().any(|record| {
+            u64_attribute(record, "bitfun.inference.usage.total_tokens") == Some(17)
+        }));
+        assert!(records.iter().any(|record| {
+            u64_attribute(record, "bitfun.inference.usage.cache_creation_tokens") == Some(2)
+        }));
+        assert!(records.iter().any(|record| {
+            u64_attribute(record, "bitfun.inference.request.context_window_tokens") == Some(128_000)
+        }));
+        assert!(records.iter().any(|record| {
+            u64_attribute(
+                record,
+                "bitfun.inference.request.tool_definition_tokens_estimate",
+            ) == Some(7)
+        }));
     }
 
     #[test]
@@ -1298,6 +1874,8 @@ mod tests {
                 parallel: false,
                 remote: false,
                 background: false,
+                argument_state: ToolArgumentState::Unchanged,
+                arguments_truncated: false,
             },
             None,
         )
@@ -1309,6 +1887,10 @@ mod tests {
             execution_ms: Some(5),
             failure_source: None,
             exit_status_class: Some(ExitStatusClass::Success),
+            content_length: Some(0),
+            content_truncated: Some(false),
+            retryable: None,
+            programming_language: None,
         });
         let records = sink.records();
         assert_eq!(records.len(), 3);
@@ -1320,7 +1902,14 @@ mod tests {
             0
         );
         let encoded = serde_json::to_string(&records).unwrap();
-        for forbidden in ["prompt", "argument", "result", "path", "session", "user"] {
+        for forbidden in [
+            "prompt_text",
+            "arguments_text",
+            "result_content",
+            "workspace_path",
+            "session_id",
+            "user_id",
+        ] {
             assert!(!encoded.contains(forbidden));
         }
     }
@@ -1402,6 +1991,8 @@ mod tests {
                 provider_class: ProviderClass::OpenAiCompatible,
                 model_class: ModelClass::Code,
                 protocol_class: InferenceProtocolClass::Responses,
+                context_class: InferenceContextClass::Turn,
+                auth_class: Some(InferenceAuthClass::Subscription),
             },
             Some(round_context.clone()),
         );
@@ -1418,6 +2009,8 @@ mod tests {
             status_class: Some(StatusClass::Success),
             retryable: Some(false),
             ttft_ms: Some(3),
+            stream_outcome: Some(InferenceStreamOutcomeClass::Complete),
+            tool_argument_recovery: None,
         });
         inference.finish(InferenceFinishFacts {
             completion: CompletionFacts::completed(),
@@ -1429,6 +2022,10 @@ mod tests {
             output_tokens: Some(5),
             reasoning_tokens: Some(2),
             cache_read_tokens: Some(1),
+            cache_creation_tokens: Some(1),
+            total_tokens: Some(19),
+            context_window_tokens: Some(128_000),
+            tool_definition_tokens_estimate: Some(4),
         });
 
         let tool = start_tool(
@@ -1440,6 +2037,8 @@ mod tests {
                 parallel: false,
                 remote: false,
                 background: false,
+                argument_state: ToolArgumentState::Unchanged,
+                arguments_truncated: false,
             },
             Some(round_context.clone()),
         );
@@ -1462,6 +2061,7 @@ mod tests {
             PermissionConfirmationStartFacts {
                 request_count_bucket: CountBucket::One,
                 auto_approve: false,
+                ui_surface: Some(PermissionUiSurface::ToolPermission),
             },
             Some(tool_context.clone()),
         );
@@ -1478,6 +2078,10 @@ mod tests {
             execution_ms: Some(4),
             failure_source: None,
             exit_status_class: Some(ExitStatusClass::Success),
+            content_length: Some(0),
+            content_truncated: Some(false),
+            retryable: Some(false),
+            programming_language: Some(ProgrammingLanguageClass::Rust),
         });
         round.finish(RoundFinishFacts {
             completion: CompletionFacts::completed(),

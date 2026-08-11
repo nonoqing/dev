@@ -10102,6 +10102,7 @@ mod tests {
                     CompressionState {
                         last_compression_at: None,
                         compression_count: 1,
+                        last_compression_turn_index: None,
                     },
                 )
                 .await
