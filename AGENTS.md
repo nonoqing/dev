@@ -77,7 +77,7 @@ Condition-triggered rules. Open only when the task matches; details stay in the 
 | Topic | Open when | Authority |
 |---|---|---|
 | Logging | Adding or changing log output / observability text | Repository-wide policy: [`docs/development/logging.md`](docs/development/logging.md); frontend API: [`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md); Rust API: [`src/crates/LOGGING.md`](src/crates/LOGGING.md) |
-| Tauri / platform / remote | Desktop commands, UI↔host boundaries, remote workspace support | [`docs/development/host-platform-and-remote.md`](docs/development/host-platform-and-remote.md); [`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md) |
+| Tauri / platform / remote / upgrade | Desktop commands, UI↔host boundaries, remote scenarios, and cross-version behavior | [`docs/development/host-platform-and-remote.md`](docs/development/host-platform-and-remote.md); [`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md) |
 | Agent loop | Agent loop, repeated tool calls, anti-loop safeguards | [`docs/development/agent-loop-behavior.md`](docs/development/agent-loop-behavior.md); nearest `src/crates/execution/*/AGENTS.md` |
 
 ## Route by task

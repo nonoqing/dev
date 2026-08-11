@@ -76,7 +76,7 @@ BitFun 是 Rust workspace 与 React 前端组成的多端项目。
 | 专题 | 何时打开 | 权威文档 |
 |---|---|---|
 | 日志 | 新增或修改日志、可观测相关文案 | 仓库级规则：[`docs/development/logging.md`](docs/development/logging.md)；前端 API：[`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md)；Rust API：[`src/crates/LOGGING.md`](src/crates/LOGGING.md) |
-| Tauri / 平台 / 远程 | 桌面 command、UI 与宿主边界、远程工作区 | [`docs/development/host-platform-and-remote.zh-CN.md`](docs/development/host-platform-and-remote.zh-CN.md)；[`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md) |
+| Tauri / 平台 / 远程 / 升级 | 桌面 command、UI 与宿主边界、远程场景与跨版本行为 | [`docs/development/host-platform-and-remote.zh-CN.md`](docs/development/host-platform-and-remote.zh-CN.md)；[`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md) |
 | Agent loop | Agent 主循环、重复工具调用、防死循环策略 | [`docs/development/agent-loop-behavior.zh-CN.md`](docs/development/agent-loop-behavior.zh-CN.md)；`src/crates/execution/` 下就近 `AGENTS.md` |
 
 ## 按任务路由
