@@ -14,8 +14,11 @@ const TELEMETRY_CONFIG_PATH: &str = "app.telemetry";
 pub struct TelemetryStateRequest {}
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SetTelemetryLevelRequest {
     pub level: TelemetryLevel,
+    #[serde(default)]
+    pub sensitive_content_consent: bool,
 }
 
 /// The frontend receives only user consent and redacted operational status.
@@ -24,6 +27,7 @@ pub struct SetTelemetryLevelRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TelemetryStateResponse {
     pub level: TelemetryLevel,
+    pub sensitive_content_consent: bool,
     pub health: TelemetryHealthSnapshot,
 }
 
@@ -40,6 +44,7 @@ pub async fn telemetry_state(
         .map_err(|error| format!("Failed to read telemetry preference: {error}"))?;
     Ok(TelemetryStateResponse {
         level: config.effective_level(),
+        sensitive_content_consent: config.sensitive_content_consent(),
         health: runtime.health(),
     })
 }
@@ -50,7 +55,15 @@ pub async fn set_telemetry_level(
     runtime: State<'_, TelemetryRuntimeHandle>,
     request: SetTelemetryLevelRequest,
 ) -> Result<TelemetryStateResponse, String> {
-    let config = TelemetryUserConfig::new(request.level);
+    let current = state
+        .config_service
+        .get_config::<TelemetryUserConfig>(Some(TELEMETRY_CONFIG_PATH))
+        .await
+        .map_err(|error| format!("Failed to read telemetry preference: {error}"))?;
+    let config = TelemetryUserConfig::with_sensitive_content_consent(
+        request.level,
+        current.sensitive_content_consent() || request.sensitive_content_consent,
+    );
     state
         .config_service
         .set_config(TELEMETRY_CONFIG_PATH, &config)
@@ -65,7 +78,8 @@ pub async fn set_telemetry_level(
     }
 
     Ok(TelemetryStateResponse {
-        level: request.level,
+        level: config.effective_level(),
+        sensitive_content_consent: config.sensitive_content_consent(),
         health: runtime.health(),
     })
 }
@@ -79,6 +93,7 @@ mod tests {
     fn response_serialization_excludes_transport_and_identity_fields() {
         let response = TelemetryStateResponse {
             level: TelemetryLevel::Basic,
+            sensitive_content_consent: true,
             health: TelemetryHealthSnapshot {
                 state: TelemetryHealthState::Healthy,
                 user_level: TelemetryLevel::Basic,
@@ -90,8 +105,19 @@ mod tests {
         let serialized = value.to_string();
 
         assert_eq!(value["level"], "basic");
+        assert_eq!(value["sensitiveContentConsent"], true);
         for forbidden in ["endpoint", "header", "secret", "installation", "installId"] {
             assert!(!serialized.contains(forbidden), "leaked field: {forbidden}");
         }
+    }
+
+    #[test]
+    fn debug_request_requires_the_explicit_consent_bit() {
+        let denied =
+            TelemetryUserConfig::with_sensitive_content_consent(TelemetryLevel::Debug, false);
+        assert_eq!(denied.effective_level(), TelemetryLevel::Off);
+        let allowed =
+            TelemetryUserConfig::with_sensitive_content_consent(TelemetryLevel::Debug, true);
+        assert_eq!(allowed.effective_level(), TelemetryLevel::Debug);
     }
 }

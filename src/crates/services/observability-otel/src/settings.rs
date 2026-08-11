@@ -305,7 +305,8 @@ pub(crate) fn validate_enabled_config(
         Some(reference) => validate_headers(secrets.resolve_headers(reference)?)?,
         None => OtlpHeaders::new(),
     };
-    let traces = level == TelemetryLevel::Diagnostic && deployment.signals.traces;
+    let traces = matches!(level, TelemetryLevel::Diagnostic | TelemetryLevel::Debug)
+        && deployment.signals.traces;
     let metrics = deployment.signals.metrics;
     let logs = deployment.signals.logs;
     if !traces && !metrics && !logs {

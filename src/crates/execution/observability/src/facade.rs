@@ -4,9 +4,11 @@ use crate::model::{
     SpanStatus, TelemetryLevel, TraceRelation, ValidatedRecord,
 };
 use crate::schema::{
-    metric_attributes, operation_schema, validate, OperationKind, OperationSchema, TokenMetricKind,
+    event_schema, metric_attributes, operation_schema, validate, EventKind, OperationKind,
+    OperationSchema, TokenMetricKind,
 };
 use crate::sink::{NoopSink, TelemetrySink};
+use crate::{debug::prepare_debug_record, DebugTelemetryRecord};
 use crate::{DeploymentEnvironment, TelemetryEntrypoint, TelemetryResource};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -67,6 +69,7 @@ impl PolicySnapshot {
             TelemetryLevel::Off => (0.0, 0.0),
             TelemetryLevel::Basic => (0.0, 0.1),
             TelemetryLevel::Diagnostic => (0.1, 0.5),
+            TelemetryLevel::Debug => (0.1, 0.5),
         };
         Self {
             level,
@@ -260,7 +263,11 @@ impl Telemetry {
             return TelemetrySpan::disabled(self.clone(), kind, revision);
         }
         let policy = self.policy_snapshot();
-        if policy.level != TelemetryLevel::Diagnostic || !policy.signals.traces {
+        if !matches!(
+            policy.level,
+            TelemetryLevel::Diagnostic | TelemetryLevel::Debug
+        ) || !policy.signals.traces
+        {
             return TelemetrySpan::terminal_only(self.clone(), kind, revision, attributes());
         }
         let (context, parent_span_id, links, budget) = match relation {
@@ -347,6 +354,80 @@ impl Telemetry {
         }
         let policy = self.policy_snapshot();
         policy.signals.metrics || policy.signals.logs
+    }
+
+    pub(crate) fn record_instant_event(&self, kind: EventKind, attributes: Vec<Attribute>) {
+        let revision = self.inner.policy_revision.load(Ordering::Acquire);
+        if !self.accepts_terminal_projection() {
+            return;
+        }
+        let schema = event_schema(kind);
+        self.emit_if_allowed(
+            ValidatedRecord::Metric(MetricRecord {
+                descriptor_version: schema.total.version(),
+                name: schema.total.name(),
+                timestamp_unix_nanos: unix_nanos(),
+                value: MetricValue::Counter(1),
+                attributes: attributes.clone(),
+            }),
+            revision,
+            None,
+        );
+        let policy = self.policy_snapshot();
+        if sample(
+            policy.success_log_sample_ratio,
+            self.inner.sample_sequence.fetch_add(1, Ordering::Relaxed),
+        ) {
+            self.emit_if_allowed(
+                ValidatedRecord::Log(LogRecord {
+                    descriptor_version: schema.log.version(),
+                    event_name: schema.log.name(),
+                    timestamp_unix_nanos: unix_nanos(),
+                    observed_unix_nanos: unix_nanos(),
+                    severity: Severity::Info,
+                    body: schema.log.body().unwrap_or_default(),
+                    attributes,
+                    span_context: None,
+                }),
+                revision,
+                None,
+            );
+        }
+    }
+
+    /// Emit one content-bearing record from its authoritative business owner.
+    pub fn record_debug(&self, record: DebugTelemetryRecord, context: Option<ObservationContext>) {
+        let revision = self.inner.policy_revision.load(Ordering::Acquire);
+        if !self.is_enabled() || self.policy_snapshot().level != TelemetryLevel::Debug {
+            self.inner
+                .diagnostics
+                .skipped
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let prepared = prepare_debug_record(record, context);
+        if self.inner.policy_revision.load(Ordering::Acquire) != revision {
+            self.inner
+                .diagnostics
+                .skipped
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner.sink.emit_debug(prepared)
+        }))
+        .is_ok()
+        {
+            self.inner
+                .diagnostics
+                .accepted
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.inner
+                .diagnostics
+                .rejected
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn record_terminal_projection_at_revision(
@@ -503,7 +584,10 @@ impl Telemetry {
         let policy = self.policy_snapshot();
         let enabled = match record.signal_kind() {
             crate::SignalKind::Trace => {
-                policy.level == TelemetryLevel::Diagnostic && policy.signals.traces
+                matches!(
+                    policy.level,
+                    TelemetryLevel::Diagnostic | TelemetryLevel::Debug
+                ) && policy.signals.traces
             }
             crate::SignalKind::Metric => {
                 policy.level != TelemetryLevel::Off && policy.signals.metrics
@@ -572,6 +656,7 @@ impl TelemetryControl {
     }
 
     pub fn apply(&self, policy: PolicySnapshot) {
+        let previous_level = self.telemetry.policy_snapshot().level;
         if policy.level == TelemetryLevel::Off {
             self.telemetry.inner.enabled.store(false, Ordering::Release);
         }
@@ -587,7 +672,12 @@ impl TelemetryControl {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = policy;
         if policy.level == TelemetryLevel::Off {
             self.telemetry.inner.sink.discard_pending();
+        } else if previous_level == TelemetryLevel::Debug && policy.level != TelemetryLevel::Debug {
+            self.telemetry.inner.sink.discard_debug_pending();
         } else {
+            self.telemetry.inner.enabled.store(true, Ordering::Release);
+        }
+        if policy.level != TelemetryLevel::Off {
             self.telemetry.inner.enabled.store(true, Ordering::Release);
         }
     }
@@ -807,4 +897,69 @@ fn sample(ratio: f64, sequence: u64) -> bool {
     }
     let threshold = (ratio * 10_000.0) as u64;
     sequence.wrapping_mul(6_364_136_223_846_793_005) % 10_000 < threshold
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DebugCorrelation, DebugTelemetryRecord, DebugTurnRecord, InMemorySink};
+
+    fn content_record(content: &str) -> DebugTelemetryRecord {
+        DebugTelemetryRecord::TurnInput(DebugTurnRecord {
+            correlation: DebugCorrelation {
+                session_id: Some("session-debug".to_string()),
+                ..Default::default()
+            },
+            content: Some(crate::DebugContentField::text(content)),
+            modified_file_paths: None,
+            modified_file_paths_original_count: None,
+            workspace_path: None,
+            repository: None,
+            branch: None,
+            base_commit: None,
+        })
+    }
+
+    #[test]
+    fn only_debug_accepts_sensitive_records_without_sampling() {
+        for level in [
+            TelemetryLevel::Off,
+            TelemetryLevel::Basic,
+            TelemetryLevel::Diagnostic,
+        ] {
+            let sink = Arc::new(InMemorySink::default());
+            let (telemetry, _) = Telemetry::build(PolicySnapshot::new(level), sink.clone());
+            telemetry.record_debug(content_record("secret-free"), None);
+            assert!(
+                sink.debug_records().is_empty(),
+                "level {level:?} leaked Debug"
+            );
+        }
+
+        let sink = Arc::new(InMemorySink::default());
+        let (telemetry, _) =
+            Telemetry::build(PolicySnapshot::new(TelemetryLevel::Debug), sink.clone());
+        for index in 0..10 {
+            telemetry.record_debug(content_record(&format!("argument-{index}")), None);
+        }
+        assert_eq!(sink.debug_records().len(), 10);
+    }
+
+    #[test]
+    fn lowering_debug_discards_only_pending_sensitive_records() {
+        let sink = Arc::new(InMemorySink::default());
+        let (telemetry, control) =
+            Telemetry::build(PolicySnapshot::new(TelemetryLevel::Debug), sink.clone());
+        telemetry.record_debug(content_record("discard-me"), None);
+        assert_eq!(sink.debug_records().len(), 1);
+
+        control.apply(PolicySnapshot::new(TelemetryLevel::Diagnostic));
+
+        assert!(sink.debug_records().is_empty());
+        assert!(telemetry.is_enabled());
+        assert_eq!(
+            telemetry.policy_snapshot().level(),
+            TelemetryLevel::Diagnostic
+        );
+    }
 }

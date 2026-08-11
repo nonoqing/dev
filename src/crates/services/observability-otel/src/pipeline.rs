@@ -4,10 +4,11 @@ use crate::settings::{OtlpCompression, TelemetryCapabilities, ValidatedTelemetry
 use crate::transport::{GenerationGate, GuardedHttpClient};
 use crate::TelemetryRuntimeError;
 use bitfun_observability::{
-    descriptor_registry, Attribute, AttributeValue, LogRecord, MetricRecord, MetricUnit,
-    MetricValue, Severity, SpanContext as BitFunSpanContext, SpanRecord, SpanStatus,
-    TelemetryLevel, TelemetryResource, ValidatedRecord, INSTRUMENTATION_SCOPE_NAME,
-    INSTRUMENTATION_SCOPE_VERSION,
+    descriptor_registry, Attribute, AttributeValue, DebugLogRecord, LogRecord, MetricRecord,
+    MetricUnit, MetricValue, Severity, SpanContext as BitFunSpanContext, SpanRecord, SpanStatus,
+    TelemetryLevel, TelemetryResource, ValidatedRecord, DEBUG_BATCH_MAX_BYTES,
+    DEBUG_INSTRUMENTATION_SCOPE_NAME, DEBUG_QUEUE_MAX_BYTES, DEBUG_QUEUE_MAX_RECORDS,
+    DEBUG_TELEMETRY_SCHEMA_VERSION, INSTRUMENTATION_SCOPE_NAME, INSTRUMENTATION_SCOPE_VERSION,
 };
 use opentelemetry::logs::{
     AnyValue, LogRecord as _, Logger as _, LoggerProvider as _, Severity as OtelSeverity,
@@ -135,8 +136,11 @@ pub(crate) struct OtelGeneration {
     diagnostics: Arc<TransportDiagnostics>,
     trace_scheduler: Option<Arc<BoundedBatchScheduler<SpanData>>>,
     log_scheduler: Option<Arc<BoundedBatchScheduler<QueuedLog>>>,
+    debug_log_scheduler: Option<Arc<BoundedBatchScheduler<QueuedLog>>>,
     logger: Option<SdkLogger>,
     logger_provider: Option<SdkLoggerProvider>,
+    debug_logger: Option<SdkLogger>,
+    debug_logger_provider: Option<SdkLoggerProvider>,
     metrics: Option<MetricInstruments>,
     meter_provider: Option<SdkMeterProvider>,
     shutdown_timeout: Duration,
@@ -233,6 +237,48 @@ impl OtelGeneration {
             (None, None, None)
         };
 
+        let (debug_log_scheduler, debug_logger_provider, debug_logger) =
+            if user_level == TelemetryLevel::Debug && settings.signals.logs() {
+                let client = GuardedHttpClient::new(settings, gate.clone(), diagnostics.clone())?;
+                let exporters = (0..LOG_WORKERS)
+                    .map(|_| {
+                        build_log_exporter(settings, client.clone(), &otel_resource).map(Mutex::new)
+                    })
+                    .collect::<Result<Vec<_>, TelemetryRuntimeError>>()?;
+                let export = Arc::new(move |batch: Vec<QueuedLog>| {
+                    let borrowed = batch
+                        .iter()
+                        .map(|item| (&item.record, &item.scope))
+                        .collect::<Vec<_>>();
+                    with_exporter(&exporters, |exporter| {
+                        futures::executor::block_on(exporter.export(LogBatch::new(&borrowed)))
+                            .is_ok()
+                    })
+                });
+                let scheduler = BoundedBatchScheduler::new(
+                    "debug-log",
+                    LOG_WORKERS,
+                    DEBUG_QUEUE_MAX_RECORDS,
+                    DEBUG_QUEUE_MAX_BYTES,
+                    64,
+                    DEBUG_BATCH_MAX_BYTES,
+                    settings.scheduled_delay(),
+                    diagnostics.clone(),
+                    export,
+                );
+                let provider = SdkLoggerProvider::builder()
+                    .with_resource(otel_resource.clone())
+                    .with_log_processor(QueueLogProcessor {
+                        scheduler: scheduler.clone(),
+                        flush_timeout: settings.shutdown_timeout(),
+                    })
+                    .build();
+                let logger = provider.logger_with_scope(debug_instrumentation_scope());
+                (Some(scheduler), Some(provider), Some(logger))
+            } else {
+                (None, None, None)
+            };
+
         let (meter_provider, metrics) = if settings.signals.metrics() {
             let client = GuardedHttpClient::new(settings, gate.clone(), diagnostics.clone())?;
             let mut builder = opentelemetry_otlp::MetricExporter::builder()
@@ -273,8 +319,11 @@ impl OtelGeneration {
             diagnostics,
             trace_scheduler,
             log_scheduler,
+            debug_log_scheduler,
             logger,
             logger_provider,
+            debug_logger,
+            debug_logger_provider,
             metrics,
             meter_provider,
             shutdown_timeout: settings.shutdown_timeout(),
@@ -305,6 +354,15 @@ impl OtelGeneration {
         }
     }
 
+    pub(crate) fn emit_debug(&self, record: DebugLogRecord) {
+        if !self.gate.is_active() || self.user_level != TelemetryLevel::Debug {
+            return;
+        }
+        if let Some(logger) = &self.debug_logger {
+            logger.emit(debug_log_data(logger, record));
+        }
+    }
+
     pub(crate) fn deactivate(&self) {
         self.gate.deactivate();
     }
@@ -319,12 +377,16 @@ impl OtelGeneration {
             .log_scheduler
             .as_ref()
             .is_none_or(|scheduler| scheduler.force_flush(remaining(deadline)));
+        let debug_logs = self
+            .debug_log_scheduler
+            .as_ref()
+            .is_none_or(|scheduler| scheduler.force_flush(remaining(deadline)));
         let metrics = self.meter_provider.as_ref().is_none_or(|provider| {
             bounded_meter_call(provider, remaining(deadline), |provider| {
                 provider.force_flush()
             })
         });
-        traces && logs && metrics
+        traces && logs && debug_logs && metrics
     }
 
     pub(crate) fn shutdown(&self, graceful: bool) -> bool {
@@ -342,6 +404,10 @@ impl OtelGeneration {
             .log_scheduler
             .as_ref()
             .is_none_or(|scheduler| scheduler.shutdown(remaining(deadline), false));
+        let debug_logs = self
+            .debug_log_scheduler
+            .as_ref()
+            .is_none_or(|scheduler| scheduler.shutdown(remaining(deadline), false));
         let metrics = self.meter_provider.as_ref().is_none_or(|provider| {
             if graceful && flushed {
                 bounded_meter_call(provider, remaining(deadline), |provider| {
@@ -352,7 +418,7 @@ impl OtelGeneration {
             }
         });
         self.gate.deactivate();
-        flushed && traces && logs && metrics
+        flushed && traces && logs && debug_logs && metrics
     }
 
     pub(crate) fn discard(&self) {
@@ -361,6 +427,15 @@ impl OtelGeneration {
             scheduler.cancel_and_discard();
         }
         if let Some(scheduler) = &self.log_scheduler {
+            scheduler.cancel_and_discard();
+        }
+        if let Some(scheduler) = &self.debug_log_scheduler {
+            scheduler.cancel_and_discard();
+        }
+    }
+
+    pub(crate) fn discard_debug(&self) {
+        if let Some(scheduler) = &self.debug_log_scheduler {
             scheduler.cancel_and_discard();
         }
     }
@@ -374,10 +449,16 @@ impl OtelGeneration {
             .log_scheduler
             .as_ref()
             .map_or_else(SchedulerSnapshot::default, |scheduler| scheduler.snapshot());
+        let debug_logs = self
+            .debug_log_scheduler
+            .as_ref()
+            .map_or_else(SchedulerSnapshot::default, |scheduler| scheduler.snapshot());
         let transport = self.diagnostics.snapshot();
-        let queued_records = trace.retained_records + logs.retained_records;
-        let queued_bytes = trace.retained_bytes + logs.retained_bytes;
-        let in_flight_batches = trace.in_flight_batches + logs.in_flight_batches;
+        let queued_records =
+            trace.retained_records + logs.retained_records + debug_logs.retained_records;
+        let queued_bytes = trace.retained_bytes + logs.retained_bytes + debug_logs.retained_bytes;
+        let in_flight_batches =
+            trace.in_flight_batches + logs.in_flight_batches + debug_logs.in_flight_batches;
         let state = if !self.gate.is_active() {
             TelemetryHealthState::ShuttingDown
         } else if queued_records >= 3_072 || queued_bytes >= 12 * 1024 * 1024 {
@@ -386,6 +467,7 @@ impl OtelGeneration {
             || transport.server_rejected != 0
             || trace.export_failures != 0
             || logs.export_failures != 0
+            || debug_logs.export_failures != 0
         {
             TelemetryHealthState::Degraded
         } else {
@@ -413,6 +495,7 @@ impl Drop for OtelGeneration {
     fn drop(&mut self) {
         self.gate.deactivate();
         let _ = self.logger_provider.take();
+        let _ = self.debug_logger_provider.take();
     }
 }
 
@@ -471,9 +554,46 @@ fn log_data(logger: &SdkLogger, record: LogRecord) -> SdkLogRecord {
     data
 }
 
+fn debug_log_data(logger: &SdkLogger, record: DebugLogRecord) -> SdkLogRecord {
+    let mut data = logger.create_log_record();
+    data.set_event_name(record.event_name());
+    data.set_timestamp(system_time(record.timestamp_unix_nanos()));
+    data.set_observed_timestamp(system_time(record.observed_unix_nanos()));
+    data.set_severity_number(match record.severity() {
+        Severity::Info => OtelSeverity::Info,
+        Severity::Warn => OtelSeverity::Warn,
+        Severity::Error => OtelSeverity::Error,
+    });
+    data.set_body(AnyValue::from(record.body().to_string()));
+    if let Some(context) = record.span_context() {
+        data.set_trace_context(
+            TraceId::from_bytes(context.trace_id()),
+            SpanId::from_bytes(context.span_id()),
+            context.is_sampled().then_some(TraceFlags::SAMPLED),
+        );
+    }
+    data.add_attribute("data_class", AnyValue::from("debug_sensitive"));
+    data.add_attribute(
+        "bitfun.debug.schema.version",
+        AnyValue::from(i64::from(DEBUG_TELEMETRY_SCHEMA_VERSION)),
+    );
+    data.add_attribute(
+        "bitfun.debug.original_size_bytes",
+        AnyValue::from(i64::try_from(record.original_size_bytes()).unwrap_or(i64::MAX)),
+    );
+    data.add_attribute("bitfun.debug.truncated", AnyValue::from(record.truncated()));
+    data
+}
+
 fn instrumentation_scope() -> InstrumentationScope {
     InstrumentationScope::builder(INSTRUMENTATION_SCOPE_NAME)
         .with_version(INSTRUMENTATION_SCOPE_VERSION)
+        .build()
+}
+
+fn debug_instrumentation_scope() -> InstrumentationScope {
+    InstrumentationScope::builder(DEBUG_INSTRUMENTATION_SCOPE_NAME)
+        .with_version(env!("CARGO_PKG_VERSION"))
         .build()
 }
 
@@ -623,7 +743,25 @@ fn estimate_span_bytes(record: &SpanRecord) -> usize {
 fn estimate_log_bytes(record: &SdkLogRecord) -> usize {
     192usize
         .saturating_add(record.event_name().map_or(0, str::len))
+        .saturating_add(record.body().map_or(0, estimate_log_value_bytes))
         .saturating_add(record.attributes_iter().count().saturating_mul(48))
+}
+
+fn estimate_log_value_bytes(value: &AnyValue) -> usize {
+    match value {
+        AnyValue::Int(_) | AnyValue::Double(_) | AnyValue::Boolean(_) => 16,
+        AnyValue::String(value) => value.as_str().len(),
+        AnyValue::Bytes(value) => value.len(),
+        AnyValue::ListAny(values) => values.iter().fold(0usize, |total, value| {
+            total.saturating_add(estimate_log_value_bytes(value))
+        }),
+        AnyValue::Map(values) => values.iter().fold(0usize, |total, (key, value)| {
+            total
+                .saturating_add(key.as_str().len())
+                .saturating_add(estimate_log_value_bytes(value))
+        }),
+        _ => 32,
+    }
 }
 
 fn with_exporter<T, R>(exporters: &[Mutex<T>], operation: impl FnOnce(&T) -> R) -> R {
@@ -763,5 +901,89 @@ mod tests {
         let scope = instrumentation_scope();
         assert_eq!(scope.name(), INSTRUMENTATION_SCOPE_NAME);
         assert_eq!(scope.version(), Some(INSTRUMENTATION_SCOPE_VERSION));
+
+        let debug_scope = debug_instrumentation_scope();
+        assert_eq!(debug_scope.name(), DEBUG_INSTRUMENTATION_SCOPE_NAME);
+        assert_eq!(debug_scope.version(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn log_byte_estimate_includes_the_sensitive_body() {
+        let provider = SdkLoggerProvider::builder().build();
+        let logger = provider.logger_with_scope(debug_instrumentation_scope());
+        let mut small = logger.create_log_record();
+        small.set_body(AnyValue::from("small"));
+        let mut large = logger.create_log_record();
+        large.set_body(AnyValue::from("x".repeat(1024)));
+
+        assert!(estimate_log_bytes(&large) >= estimate_log_bytes(&small) + 1000);
+    }
+
+    #[test]
+    fn debug_log_mapping_uses_fixed_schema_and_trace_context() {
+        let sink = std::sync::Arc::new(bitfun_observability::InMemorySink::default());
+        let (telemetry, _) = bitfun_observability::Telemetry::build(
+            bitfun_observability::PolicySnapshot::new(TelemetryLevel::Debug)
+                .with_trace_sample_ratio(1.0),
+            sink.clone(),
+        );
+        let span = bitfun_observability::domains::start_turn_with_relation(
+            &telemetry,
+            bitfun_observability::domains::TurnStartFacts {
+                mode_class: bitfun_observability::domains::AgentModeClass::Agentic,
+                trigger: bitfun_observability::domains::TurnTrigger::User,
+                remote: false,
+                subagent: false,
+            },
+            bitfun_observability::TraceRelation::Root,
+        );
+        let context = span.context();
+        telemetry.record_debug(
+            bitfun_observability::DebugTelemetryRecord::TurnInput(
+                bitfun_observability::DebugTurnRecord {
+                    correlation: bitfun_observability::DebugCorrelation::default(),
+                    content: Some(bitfun_observability::DebugContentField::text(
+                        "Authorization: Bearer hidden-token",
+                    )),
+                    modified_file_paths: None,
+                    modified_file_paths_original_count: None,
+                    workspace_path: None,
+                    repository: None,
+                    branch: None,
+                    base_commit: None,
+                },
+            ),
+            context,
+        );
+        let record = sink.debug_records().pop().expect("Debug record");
+        let provider = SdkLoggerProvider::builder().build();
+        let logger = provider.logger_with_scope(debug_instrumentation_scope());
+        let data = debug_log_data(&logger, record);
+
+        assert_eq!(data.event_name(), Some("bitfun.agent.turn"));
+        let body = match data.body().expect("Debug body") {
+            AnyValue::String(value) => value.as_str(),
+            value => panic!("unexpected Debug body: {value:?}"),
+        };
+        assert!(body.contains("[REDACTED]"));
+        assert!(!body.contains("hidden-token"));
+        assert!(data.trace_context().is_some());
+        let attributes = data
+            .attributes_iter()
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            attributes.get("data_class"),
+            Some(&AnyValue::from("debug_sensitive"))
+        );
+        assert_eq!(
+            attributes.get("bitfun.debug.schema.version"),
+            Some(&AnyValue::Int(1))
+        );
+        assert!(attributes.contains_key("bitfun.debug.original_size_bytes"));
+        assert_eq!(
+            attributes.get("bitfun.debug.truncated"),
+            Some(&AnyValue::Boolean(false))
+        );
     }
 }

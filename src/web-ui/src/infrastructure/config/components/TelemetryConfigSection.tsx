@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ConfigPageMessage, Select } from '@/component-library';
+import { ConfigPageMessage, Select, confirmDialog } from '@/component-library';
 import { configAPI } from '@/infrastructure/api';
 import type { TelemetryLevel, TelemetryState } from '../types';
 import { ConfigPageRow, ConfigPageSection } from './common';
@@ -37,12 +37,24 @@ export const TelemetryConfigSection: React.FC = () => {
 
   const setLevel = useCallback(async (level: TelemetryLevel) => {
     if (!state || level === state.level || saving) return;
+    let sensitiveContentConsent = state.sensitiveContentConsent;
+    if (level === 'debug' && !sensitiveContentConsent) {
+      sensitiveContentConsent = await confirmDialog({
+        title: t('telemetry.debugConsent.title'),
+        message: t('telemetry.debugConsent.message'),
+        confirmText: t('telemetry.debugConsent.confirm'),
+        cancelText: t('telemetry.debugConsent.cancel'),
+        type: 'warning',
+        confirmDanger: true,
+      });
+      if (!sensitiveContentConsent) return;
+    }
     const previous = state;
-    setState({ ...state, level });
+    setState({ ...state, level, sensitiveContentConsent });
     setSaving(true);
     setMessage(null);
     try {
-      const next = await configAPI.setTelemetryLevel(level);
+      const next = await configAPI.setTelemetryLevel(level, sensitiveContentConsent);
       setState(next);
       const unavailable = next.level !== 'off' && next.health.effectiveLevel === 'off';
       setMessage({
@@ -75,6 +87,7 @@ export const TelemetryConfigSection: React.FC = () => {
             { value: 'off', label: t('telemetry.levels.off') },
             { value: 'basic', label: t('telemetry.levels.basic') },
             { value: 'diagnostic', label: t('telemetry.levels.diagnostic') },
+            { value: 'debug', label: t('telemetry.levels.debug') },
           ]}
           disabled={!state || saving}
           triggerAriaLabel={t('telemetry.levelLabel')}

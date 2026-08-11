@@ -6,6 +6,7 @@
 //! entrypoints, or external transports.
 
 mod admission;
+mod debug;
 mod facade;
 mod model;
 mod resource;
@@ -16,7 +17,16 @@ mod trace_context;
 pub mod config;
 pub mod domains;
 
-pub use config::{TelemetryUserConfig, TelemetryUserConfigV1, TELEMETRY_USER_CONFIG_VERSION};
+pub use config::{
+    TelemetryUserConfig, TelemetryUserConfigV1, TelemetryUserConfigV2,
+    TELEMETRY_USER_CONFIG_VERSION,
+};
+pub use debug::{
+    DebugApprovalPhase, DebugApprovalRecord, DebugContentField, DebugCorrelation,
+    DebugInferenceRecord, DebugLogRecord, DebugTelemetryRecord, DebugToolRecord, DebugTurnRecord,
+    DEBUG_BATCH_MAX_BYTES, DEBUG_INSTRUMENTATION_SCOPE_NAME, DEBUG_QUEUE_MAX_BYTES,
+    DEBUG_QUEUE_MAX_RECORDS, DEBUG_RECORD_MAX_BYTES, DEBUG_TELEMETRY_SCHEMA_VERSION,
+};
 pub use facade::{
     PolicySnapshot, SignalPolicy, Telemetry, TelemetryControl, TelemetryDiagnostics, TelemetrySpan,
 };

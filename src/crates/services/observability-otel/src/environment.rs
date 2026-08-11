@@ -68,6 +68,7 @@ fn telemetry_level(value: &str) -> TelemetryLevel {
     match value.trim().to_ascii_lowercase().as_str() {
         "basic" => TelemetryLevel::Basic,
         "diagnostic" => TelemetryLevel::Diagnostic,
+        "debug" => TelemetryLevel::Debug,
         _ => TelemetryLevel::Off,
     }
 }
@@ -80,6 +81,7 @@ mod tests {
     fn deployment_level_is_bounded_and_case_insensitive() {
         assert_eq!(telemetry_level(" BASIC "), TelemetryLevel::Basic);
         assert_eq!(telemetry_level("Diagnostic"), TelemetryLevel::Diagnostic);
+        assert_eq!(telemetry_level("debug"), TelemetryLevel::Debug);
         assert_eq!(telemetry_level("unsupported"), TelemetryLevel::Off);
     }
 }

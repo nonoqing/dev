@@ -1,4 +1,4 @@
-use crate::{TelemetryResource, ValidatedRecord};
+use crate::{DebugLogRecord, TelemetryResource, ValidatedRecord};
 use std::sync::Mutex;
 
 /// Non-blocking destination for records that already passed the privacy gate.
@@ -12,7 +12,11 @@ pub trait TelemetrySink: Send + Sync + 'static {
 
     fn emit(&self, record: ValidatedRecord);
 
+    fn emit_debug(&self, _record: DebugLogRecord) {}
+
     fn discard_pending(&self) {}
+
+    fn discard_debug_pending(&self) {}
 }
 
 #[derive(Debug, Default)]
@@ -26,6 +30,7 @@ impl TelemetrySink for NoopSink {
 pub struct InMemorySink {
     resource: Mutex<Option<TelemetryResource>>,
     records: Mutex<Vec<ValidatedRecord>>,
+    debug_records: Mutex<Vec<DebugLogRecord>>,
 }
 
 impl InMemorySink {
@@ -52,6 +57,13 @@ impl InMemorySink {
         )
     }
 
+    pub fn debug_records(&self) -> Vec<DebugLogRecord> {
+        self.debug_records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.records
             .lock()
@@ -75,8 +87,26 @@ impl TelemetrySink for InMemorySink {
             .push(record);
     }
 
+    fn emit_debug(&self, record: DebugLogRecord) {
+        self.debug_records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(record);
+    }
+
     fn discard_pending(&self) {
         self.records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.debug_records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    fn discard_debug_pending(&self) {
+        self.debug_records
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();

@@ -34,8 +34,10 @@ async fn main() -> anyhow::Result<()> {
         )),
     );
     let _telemetry_shutdown = telemetry_runtime.shutdown_guard();
-    let user_telemetry = bitfun_observability::TelemetryUserConfig::new(
-        bitfun_observability_otel::telemetry_level_from_env(),
+    let telemetry_level = bitfun_observability_otel::telemetry_level_from_env();
+    let user_telemetry = bitfun_observability::TelemetryUserConfig::with_sensitive_content_consent(
+        telemetry_level,
+        telemetry_level == bitfun_observability::TelemetryLevel::Debug,
     );
     if let Err(error) = telemetry_runtime.apply_config(
         &user_telemetry,

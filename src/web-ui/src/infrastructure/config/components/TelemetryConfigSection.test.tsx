@@ -7,6 +7,7 @@ import { TelemetryConfigSection } from './TelemetryConfigSection';
 
 const getTelemetryStateMock = vi.hoisted(() => vi.fn());
 const setTelemetryLevelMock = vi.hoisted(() => vi.fn());
+const confirmDialogMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/infrastructure/api', () => ({
   configAPI: {
@@ -15,12 +16,17 @@ vi.mock('@/infrastructure/api', () => ({
   },
 }));
 
+vi.mock('@/component-library', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/component-library')>()),
+  confirmDialog: confirmDialogMock,
+}));
+
 vi.mock('react-i18next', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react-i18next')>()),
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
-const health = (effectiveLevel: 'off' | 'basic' | 'diagnostic') => ({
+const health = (effectiveLevel: 'off' | 'basic' | 'diagnostic' | 'debug') => ({
   state: effectiveLevel === 'off' ? 'closed' : 'healthy',
   userLevel: effectiveLevel,
   effectiveLevel,
@@ -42,11 +48,17 @@ describe('TelemetryConfigSection', () => {
 
   beforeEach(() => {
     Object.defineProperty(window, '__TAURI__', { configurable: true, value: {} });
-    getTelemetryStateMock.mockReset().mockResolvedValue({ level: 'off', health: health('off') });
+    getTelemetryStateMock.mockReset().mockResolvedValue({
+      level: 'off',
+      sensitiveContentConsent: false,
+      health: health('off'),
+    });
     setTelemetryLevelMock.mockReset().mockResolvedValue({
       level: 'basic',
+      sensitiveContentConsent: false,
       health: health('basic'),
     });
+    confirmDialogMock.mockReset().mockResolvedValue(false);
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -78,10 +90,77 @@ describe('TelemetryConfigSection', () => {
       basicOption?.click();
     });
 
-    expect(setTelemetryLevelMock).toHaveBeenCalledWith('basic');
+    expect(setTelemetryLevelMock).toHaveBeenCalledWith('basic', false);
     expect(container.textContent).not.toContain('endpoint');
     expect(container.textContent).not.toContain('secret');
     expect(container.textContent).not.toContain('installation');
+  });
+
+  it('requires explicit confirmation before saving Debug consent', async () => {
+    await act(async () => {
+      root.render(<TelemetryConfigSection />);
+    });
+
+    const select = container.querySelector<HTMLElement>('[role="combobox"]');
+    await act(async () => {
+      select?.click();
+    });
+    let debugOption = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find((option) => option.textContent?.includes('telemetry.levels.debug'));
+    await act(async () => {
+      debugOption?.click();
+    });
+    expect(confirmDialogMock).toHaveBeenCalledOnce();
+    expect(setTelemetryLevelMock).not.toHaveBeenCalled();
+
+    confirmDialogMock.mockResolvedValueOnce(true);
+    setTelemetryLevelMock.mockResolvedValueOnce({
+      level: 'debug',
+      sensitiveContentConsent: true,
+      health: health('debug'),
+    });
+    await act(async () => {
+      select?.click();
+    });
+    debugOption = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find((option) => option.textContent?.includes('telemetry.levels.debug'));
+    await act(async () => {
+      debugOption?.click();
+    });
+
+    expect(setTelemetryLevelMock).toHaveBeenCalledWith('debug', true);
+  });
+
+  it('reuses persisted Debug consent without showing the warning again', async () => {
+    getTelemetryStateMock.mockReset().mockResolvedValue({
+      level: 'basic',
+      sensitiveContentConsent: true,
+      health: health('basic'),
+    });
+    setTelemetryLevelMock.mockReset().mockResolvedValue({
+      level: 'debug',
+      sensitiveContentConsent: true,
+      health: health('debug'),
+    });
+    await act(async () => {
+      root.render(<TelemetryConfigSection />);
+    });
+
+    const select = container.querySelector<HTMLElement>('[role="combobox"]');
+    await vi.waitFor(() => {
+      expect(select?.textContent).toContain('telemetry.levels.basic');
+    });
+    await act(async () => {
+      select?.click();
+    });
+    const debugOption = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find((option) => option.textContent?.includes('telemetry.levels.debug'));
+    await act(async () => {
+      debugOption?.click();
+    });
+
+    expect(confirmDialogMock).not.toHaveBeenCalled();
+    expect(setTelemetryLevelMock).toHaveBeenCalledWith('debug', true);
   });
 
 });

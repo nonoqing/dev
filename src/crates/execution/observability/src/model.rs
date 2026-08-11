@@ -10,6 +10,7 @@ pub enum TelemetryLevel {
     Off,
     Basic,
     Diagnostic,
+    Debug,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

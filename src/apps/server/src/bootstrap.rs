@@ -35,7 +35,10 @@ pub(crate) struct ServerAppState {
 /// Initialize all core services and return the shared server state.
 ///
 /// The optional `workspace` path, when provided, is opened automatically.
-pub(crate) async fn initialize(workspace: Option<String>) -> anyhow::Result<Arc<ServerAppState>> {
+pub(crate) async fn initialize(
+    workspace: Option<String>,
+    telemetry: bitfun_observability::Telemetry,
+) -> anyhow::Result<Arc<ServerAppState>> {
     log::info!("Initializing BitFun server core services");
 
     bitfun_core::agentic::system::select_agentic_system_profile(
@@ -88,35 +91,39 @@ pub(crate) async fn initialize(workspace: Option<String>) -> anyhow::Result<Arc<
     let tool_registry = tools::registry::get_global_tool_registry();
     let tool_state_manager = Arc::new(tools::pipeline::ToolStateManager::new(event_queue.clone()));
 
-    let tool_pipeline = Arc::new(tools::pipeline::ToolPipeline::new(
-        tool_registry.clone(),
-        tool_state_manager,
-        None,
-    ));
+    let tool_pipeline = Arc::new(
+        tools::pipeline::ToolPipeline::new(tool_registry.clone(), tool_state_manager, None)
+            .with_telemetry(telemetry.clone()),
+    );
 
     let stream_processor = Arc::new(execution::StreamProcessor::new(event_queue.clone()));
-    let round_executor = Arc::new(execution::RoundExecutor::new(
-        stream_processor,
-        event_queue.clone(),
-        tool_pipeline.clone(),
-    ));
+    let round_executor = Arc::new(
+        execution::RoundExecutor::new(stream_processor, event_queue.clone(), tool_pipeline.clone())
+            .with_telemetry(telemetry.clone()),
+    );
 
-    let execution_engine = Arc::new(execution::ExecutionEngine::new(
-        round_executor,
-        event_queue.clone(),
-        session_manager.clone(),
-        context_compressor,
-        execution::ExecutionEngineConfig::default(),
-    ));
+    let execution_engine = Arc::new(
+        execution::ExecutionEngine::new(
+            round_executor,
+            event_queue.clone(),
+            session_manager.clone(),
+            context_compressor,
+            execution::ExecutionEngineConfig::default(),
+        )
+        .with_telemetry(telemetry.clone()),
+    );
 
-    let coordinator = Arc::new(coordination::ConversationCoordinator::new(
-        session_manager.clone(),
-        execution_engine,
-        tool_pipeline,
-        event_queue.clone(),
-        event_router.clone(),
-        runtime_ownership,
-    ));
+    let coordinator = Arc::new(
+        coordination::ConversationCoordinator::new(
+            session_manager.clone(),
+            execution_engine,
+            tool_pipeline,
+            event_queue.clone(),
+            event_router.clone(),
+            runtime_ownership,
+        )
+        .with_telemetry(telemetry),
+    );
     coordinator.set_terminal_port(
         bitfun_core::product_runtime::CoreRuntimeServicesProvider::terminal_port(),
     );

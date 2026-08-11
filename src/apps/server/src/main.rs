@@ -105,8 +105,10 @@ async fn main() -> Result<()> {
         )),
     );
     let _telemetry_shutdown = telemetry_runtime.shutdown_guard();
-    let user_telemetry = bitfun_observability::TelemetryUserConfig::new(
-        bitfun_observability_otel::telemetry_level_from_env(),
+    let telemetry_level = bitfun_observability_otel::telemetry_level_from_env();
+    let user_telemetry = bitfun_observability::TelemetryUserConfig::with_sensitive_content_consent(
+        telemetry_level,
+        telemetry_level == bitfun_observability::TelemetryLevel::Debug,
     );
     if let Err(error) = telemetry_runtime.apply_config(
         &user_telemetry,
@@ -137,6 +139,7 @@ async fn main() -> Result<()> {
         external_workspace_root
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
+        telemetry_runtime.telemetry(),
     )
     .await?;
 
@@ -326,12 +329,16 @@ mod tests {
             .next()
             .expect("Server production entrypoint");
         assert!(
-            !main_source.contains("bootstrap::initialize"),
-            "the current read-only HTTP shell must not silently start an Agent Runtime"
+            main_source.contains("bootstrap::initialize"),
+            "the Server entrypoint must initialize the Agent Runtime through bootstrap"
+        );
+        assert!(
+            main_source.contains("telemetry_runtime.telemetry()"),
+            "the Server entrypoint must pass the shared telemetry facade into bootstrap"
         );
         assert!(
             main_source.contains("DispatchHostState"),
-            "the lightweight Server Host should expose dispatch without booting an Agent Runtime"
+            "the Server Host should expose dispatch after booting the shared Agent Runtime"
         );
     }
 }

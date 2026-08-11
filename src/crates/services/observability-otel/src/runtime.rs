@@ -8,8 +8,9 @@ use bitfun_observability::{
     domains::{
         start_startup, CompletionFacts, SafeErrorType, StartupFinishFacts, StartupObservation,
     },
-    DeploymentEnvironment, PolicySnapshot, Telemetry, TelemetryControl, TelemetryEntrypoint,
-    TelemetryLevel, TelemetryResource, TelemetrySink, TelemetryUserConfig, ValidatedRecord,
+    DebugLogRecord, DeploymentEnvironment, PolicySnapshot, Telemetry, TelemetryControl,
+    TelemetryEntrypoint, TelemetryLevel, TelemetryResource, TelemetrySink, TelemetryUserConfig,
+    ValidatedRecord,
 };
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -74,9 +75,21 @@ impl TelemetrySink for RuntimeRouter {
         }
     }
 
+    fn emit_debug(&self, record: DebugLogRecord) {
+        if let Some(generation) = self.current() {
+            generation.emit_debug(record);
+        }
+    }
+
     fn discard_pending(&self) {
         if let Some(generation) = self.current() {
             generation.discard();
+        }
+    }
+
+    fn discard_debug_pending(&self) {
+        if let Some(generation) = self.current() {
+            generation.discard_debug();
         }
     }
 }
@@ -337,6 +350,7 @@ impl TelemetryRuntimeHandle {
         let success_log_ratio = match user_level {
             TelemetryLevel::Basic => settings.sampling.basic_success_log_ratio,
             TelemetryLevel::Diagnostic => settings.sampling.diagnostic_success_log_ratio,
+            TelemetryLevel::Debug => settings.sampling.diagnostic_success_log_ratio,
             TelemetryLevel::Off => 0.0,
         };
         self.inner.control.apply(
@@ -487,6 +501,7 @@ const fn level_rank(level: TelemetryLevel) -> u8 {
         TelemetryLevel::Off => 0,
         TelemetryLevel::Basic => 1,
         TelemetryLevel::Diagnostic => 2,
+        TelemetryLevel::Debug => 3,
     }
 }
 

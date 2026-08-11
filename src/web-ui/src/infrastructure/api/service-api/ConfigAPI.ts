@@ -87,10 +87,13 @@ export class ConfigAPI {
     }
   }
 
-  async setTelemetryLevel(level: TelemetryLevel): Promise<TelemetryState> {
+  async setTelemetryLevel(
+    level: TelemetryLevel,
+    sensitiveContentConsent = false,
+  ): Promise<TelemetryState> {
     try {
       return await api.invoke<TelemetryState>('set_telemetry_level', {
-        request: { level },
+        request: { level, sensitiveContentConsent },
       });
     } catch (error) {
       throw createTauriCommandError('set_telemetry_level', error, { level });

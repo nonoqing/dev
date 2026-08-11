@@ -118,11 +118,18 @@
     "title": "Usage Data",
     "hint": "Control anonymous product telemetry",
     "levelLabel": "Telemetry level",
-    "levelDescription": "Basic sends aggregate metrics and sampled structured events. Diagnostic also sends sampled execution traces. Prompts, model payloads, file paths, user names, and device names are never included.",
+    "levelDescription": "Basic sends aggregate metrics and sampled structured events. Diagnostic also sends sampled execution traces. Debug sends troubleshooting content after explicit consent; account and device identities remain excluded.",
     "levels": {
       "off": "Off",
       "basic": "Basic",
-      "diagnostic": "Diagnostic"
+      "diagnostic": "Diagnostic",
+      "debug": "Debug (sensitive)"
+    },
+    "debugConsent": {
+      "title": "Enable sensitive Debug telemetry?",
+      "message": "Debug telemetry sends prompts, model requests and responses, reasoning, tool inputs and results, file paths, commands, and business correlation IDs to the configured telemetry endpoint. Known secret patterns are redacted, but unknown temporary codes or secrets in free text may still be sent. Account, email, organization, and device identities remain excluded.",
+      "confirm": "Enable Debug",
+      "cancel": "Cancel"
     },
     "messages": {
       "loadFailed": "Failed to read telemetry settings",
