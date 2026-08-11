@@ -21,7 +21,31 @@ pub(crate) fn build_non_stream_request_body(
         "stream": false
     });
 
-    common::apply_reasoning_fields(&mut request_body, client, url);
+    if let Some(preset) = client.model_reasoning_preset.as_ref() {
+        let protected_keys = &[
+            "model",
+            "messages",
+            "stream",
+            "max_tokens",
+            "tool_stream",
+            "tools",
+        ];
+        let _ = shared::apply_reasoning_actions(
+            preset,
+            &mut request_body,
+            protected_keys,
+            &[],
+            |action, body| {
+                common::compile_chat_reasoning_action(
+                    preset,
+                    action,
+                    body,
+                    url,
+                    &client.config.model,
+                )
+            },
+        );
+    }
 
     // For non-streaming fallback, use a minimal max_tokens to reduce cost
     // We only need the usage data, not the full response
