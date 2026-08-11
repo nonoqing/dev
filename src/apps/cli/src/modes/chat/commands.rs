@@ -46,6 +46,65 @@ fn parse_reload_invocation(
     None
 }
 
+fn slash_command_class(
+    command_name: &str,
+    builtin: Option<&crate::actions::ActionSpec>,
+    external: bool,
+) -> bitfun_observability::domains::SlashCommandClass {
+    use bitfun_observability::domains::SlashCommandClass;
+
+    if external && builtin.is_none() {
+        return SlashCommandClass::External;
+    }
+    if command_name.eq_ignore_ascii_case("auto") {
+        return SlashCommandClass::Configuration;
+    }
+    if command_name.eq_ignore_ascii_case("worktree") {
+        return SlashCommandClass::Workspace;
+    }
+    let Some(action) = builtin else {
+        return SlashCommandClass::Other;
+    };
+    match action.handler {
+        ActionHandler::NewSession
+        | ActionHandler::Sessions
+        | ActionHandler::ViewSubagents
+        | ActionHandler::Timeline
+        | ActionHandler::ForkSession
+        | ActionHandler::UndoSession
+        | ActionHandler::RedoSession
+        | ActionHandler::RenameSession
+        | ActionHandler::CompactSession => SlashCommandClass::Session,
+        ActionHandler::SelectModel | ActionHandler::AddModel => SlashCommandClass::Model,
+        ActionHandler::OpenAgentSelector
+        | ActionHandler::SwitchAgent
+        | ActionHandler::SwitchAgentReverse => SlashCommandClass::Agent,
+        ActionHandler::Init
+        | ActionHandler::Status
+        | ActionHandler::WorkspaceDiff
+        | ActionHandler::Editor
+        | ActionHandler::ToggleWorktree => SlashCommandClass::Workspace,
+        ActionHandler::SelectTheme
+        | ActionHandler::Skills
+        | ActionHandler::Reload
+        | ActionHandler::McpServers
+        | ActionHandler::Tools
+        | ActionHandler::Extensions
+        | ActionHandler::NativeHooks
+        | ActionHandler::ExternalHooks
+        | ActionHandler::ToggleTimestamps
+        | ActionHandler::ToggleThinking
+        | ActionHandler::ToggleToolDetails
+        | ActionHandler::ToggleAutoApprove => SlashCommandClass::Configuration,
+        ActionHandler::Help
+        | ActionHandler::AcpHelp
+        | ActionHandler::Usage
+        | ActionHandler::CopyTranscript
+        | ActionHandler::ExportTranscript => SlashCommandClass::Diagnostic,
+        _ => SlashCommandClass::Other,
+    }
+}
+
 fn pending_session_operation_blocks_runtime_action(
     shared_tui: bool,
     pending_for_current_session: bool,
@@ -393,6 +452,32 @@ impl ChatMode {
             .map(str::trim_start)
             .unwrap_or("");
         let command_name = entered_command_name;
+        let builtin_alias = format!("/{command_name}");
+        let builtin_action = action_for_alias(&builtin_alias, ActionContext::Chat);
+        let has_external_projection = self.external_command_projection(command_name).is_some();
+        let source = if builtin_action.is_some()
+            || command_name.eq_ignore_ascii_case("auto")
+            || command_name.eq_ignore_ascii_case("worktree")
+            || command_name.eq_ignore_ascii_case("reload-skills")
+        {
+            bitfun_observability::domains::SlashCommandSource::BuiltIn
+        } else if has_external_projection {
+            bitfun_observability::domains::SlashCommandSource::External
+        } else {
+            bitfun_observability::domains::SlashCommandSource::Unknown
+        };
+        bitfun_observability::domains::record_slash_command(
+            &crate::cli_telemetry(),
+            bitfun_observability::domains::SlashCommandFacts {
+                command_class: slash_command_class(
+                    command_name,
+                    builtin_action,
+                    has_external_projection,
+                ),
+                source,
+                has_arguments: !arguments.trim().is_empty(),
+            },
+        );
         let selected_native_once = consume_selected_native_command_once(
             &mut self.selected_native_command_once,
             command_name,
@@ -432,8 +517,6 @@ impl ChatMode {
                 rt_handle,
             );
         }
-        let builtin_alias = format!("/{command_name}");
-        let builtin_action = action_for_alias(&builtin_alias, ActionContext::Chat);
         let mut external = self.external_command_projection(command_name);
         let authoritative_preferences = tokio::task::block_in_place(|| {
             rt_handle
