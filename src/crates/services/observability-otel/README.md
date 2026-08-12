@@ -17,3 +17,7 @@ channel has no disk retry cache and is revoked and discarded on downgrade. Its
 business event names are the same fixed Turn, Inference, Tool, and Permission
 names used by the safe channel; `record_type` and the separate scope identify
 the sensitive schema.
+
+Debug fixes Trace and successful safe-Log sampling at `1.0` so evaluation runs
+have complete correlation. Deployment sampling settings continue to apply to
+Basic and Diagnostic, but cannot reduce Debug sampling.

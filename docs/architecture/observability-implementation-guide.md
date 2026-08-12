@@ -283,7 +283,7 @@ accepted / rejected / skipped 诊断计数
 - `Off`：返回完全禁用的 guard，不构造 Attribute。
 - `Basic`：不创建 Trace，只保留可用于最终 Metric/Log 的终态 guard。
 - `Diagnostic`：在 Trace 开启且采样命中后创建带 Context 的 Span guard。
-- `Debug`：保留 Diagnostic 的安全信号行为，并允许单独授权的 Debug 敏感 Log；敏感记录本身不做概率采样。
+- `Debug`：面向评测和完整排障，安全 Trace、成功 Log 与单独授权的 Debug 敏感 Log 均按 `1.0` 全采样；Metric 仍保持聚合，不产生逐 chunk 记录。
 - Parent 复用父操作预算；Link 创建新操作预算。
 - 采样未命中或 Span 准入失败时，降级为 terminal-only guard，Metric/Log 仍可工作。
 
@@ -380,7 +380,7 @@ Telemetry
 - Endpoint 是无凭据、Query、Fragment 和额外 Path 的 HTTP(S) base URL。
 - 除开发/测试的显式 Loopback 外必须使用 HTTPS。
 - Batch 条数、字节、间隔、请求超时和关闭超时处于安全上限内。
-- 采样率只能收紧产品默认值。
+- Basic/Diagnostic 采样率只能收紧产品默认值；Debug 的 Trace 和成功 Log 固定为 `1.0`，部署配置不能将其降低。
 - 重试次数、退避时间和总预算有上限。
 - Secret Header 名称和值受限，且不能覆盖 `traceparent`、`baggage` 等保留 Header。
 
@@ -548,3 +548,57 @@ Basic 模式不创建 Trace，但仍能生成 Metric 和经过采样的结构化
 10. Debug 排障链路看封闭记录与脱敏：[`debug.rs`](../../src/crates/execution/observability/src/debug.rs)，再看 [`record_debug`](../../src/crates/execution/observability/src/facade.rs) 和 [`debug_log_data`](../../src/crates/services/observability-otel/src/pipeline.rs)。
 
 读完这条路径后，再按需要进入 Session、Permission、Compression 或各 Host 的具体 Owner。
+
+## 8. 现有点位、字段与通俗说明
+
+本节按当前 [`schema.rs`](../../src/crates/execution/observability/src/schema.rs) 的真实出站名称汇总，供评测、Collector 查询和代码验收使用。字段缺少类型化事实时直接省略，不用 `0`、空字符串或错误文本反推。除三个即时事件外，业务操作通常投影同名 Span、`<name>.total` Counter、`<name>.duration` Histogram 和固定正文 Log；Debug 下安全 Trace、成功 Log 与敏感 Debug Log 均按 `1.0` 全采样，Metric 仍聚合发送。
+
+### 8.1 安全业务点位
+
+|点位|触发时机|安全字段|一句话说明|
+|---|---|---|---|
+|`bitfun.app.startup`|应用启动结束|`bitfun.app.startup.outcome`、`bitfun.app.startup.duration_ms`、`error.type`|看应用有没有正常启动、启动花了多久、失败属于哪类问题。|
+|`bitfun.agent.session`|Session 创建、恢复或删除结束|`bitfun.agent.session.operation`、`bitfun.agent.session.class`、`bitfun.agent.session.remote`、`bitfun.agent.session.outcome`、`bitfun.agent.session.duration_ms`、`error.type`|看会话执行了什么生命周期操作、属于哪类会话、是否远程以及结果如何。|
+|`bitfun.agent.session.config`|Session 创建或恢复成功|`bitfun.agent.session.config.max_context_tokens`、`bitfun.agent.session.config.max_turns`、`bitfun.agent.session.config.auto_compact`、`bitfun.agent.session.config.context_compression_enabled`|记录这个会话实际采用的轮数、上下文和自动压缩配置。|
+|`bitfun.agent.slash_command`|命令路由确认一次 slash command|`bitfun.agent.slash_command.class`、`bitfun.agent.slash_command.source`、`bitfun.agent.slash_command.has_arguments`|看用户调用了哪类命令、命令来自哪里、是否带参数，但不记录原始命令。|
+|`bitfun.agent.input_attachment`|统一提交边界接受或拒绝一批图片|`bitfun.agent.input_attachment.outcome`、`image_count`、`image_size_known_count`、`image_dimensions_known_count`、`image_total_size_bytes`、`image_max_size_bytes`、`image_max_width`、`image_max_height`、`image_has_png`、`image_has_jpeg`、`image_has_webp`、`image_has_gif`、`image_has_other`（均使用完整点位前缀）|看一次提交带了多少图片、图片规模和格式，以及最终是否被接受。|
+|`bitfun.agent.turn`|一个用户或系统 Turn 结束|`bitfun.agent.turn.mode_class`、`trigger`、`remote`、`subagent`、`sequence`、`input_length`、`output_length`、`outcome`、`finish_reason`、`round_count`、`tool_count`、`first_result_ms`、`modified_file_count`、`added_lines`、`deleted_lines`、`duration_ms`（均使用完整点位前缀），以及 `error.type`|看一轮任务从哪里触发、做了多少工作、改了多少代码、多久结束以及为什么结束。|
+|`bitfun.agent.round`|Turn 内一次模型 Round 结束|`bitfun.agent.round.index_bucket`、`subagent`、`has_tool_calls`、`attempt.index_bucket`、`outcome`、`duration_ms`（均使用完整点位前缀），以及 `error.type`|看当前是第几轮模型交互、有没有调用工具、尝试了几次以及是否成功。|
+|`bitfun.inference.request`|一次完整模型请求结束|`bitfun.inference.provider_class`、`model_class`、`protocol_class`、`context_class`、`auth_class`、`attempt.index_bucket`、`request.http_status_class`、`request.outcome`、`request.retryable`、`request.duration_ms`、`request.ttft_ms`、`request.message_count`、`request.tool_count`、`response.finish_reason`、`response.has_tool_calls`、`response.reasoning_present`、`response.stream_outcome`、`response.tool_argument_recovery`、`response.output_length`、`response.reasoning_length`、`response.output_line_count`、`response.reasoning_first_ms`、`response.reasoning_duration_ms`、`usage.input_tokens`、`usage.output_tokens`、`usage.reasoning_tokens`、`usage.cache_read_tokens`、`usage.cache_creation_tokens`、`usage.total_tokens`、`request.context_window_tokens`、`request.tool_definition_tokens_estimate`（均使用 `bitfun.inference.*` 完整前缀），以及 `error.type`|看一次模型请求用了什么类型的模型和上下文、返回了什么、消耗多少 Token、慢在哪里。|
+|`bitfun.inference.attempt`|模型请求的一次底层尝试结束|`bitfun.inference.attempt.index_bucket`、`http_status_class`、`retryable`、`stream_outcome`、`tool_argument_recovery`、`outcome`、`ttft_ms`、`duration_ms`（均使用完整点位前缀），以及 `error.type`|看每次模型尝试为什么重试、流或工具参数有没有恢复以及这一尝试花了多久。|
+|`bitfun.tool.execute`|一次 Tool 执行结束|`bitfun.tool.class`、`bitfun.tool.source_class`、`bitfun.tool.kind`、`bitfun.tool.execute.parallel`、`remote`、`background`、`outcome`、`duration_ms`、`queue_ms`、`preflight_ms`、`confirmation_ms`、`execution_ms`、`failure_source`、`exit_status_class`、`retryable`、`bitfun.tool.arguments.state`、`bitfun.tool.arguments.truncated`、`bitfun.tool.content.length`、`bitfun.tool.content.truncated`、`bitfun.tool.programming_language`、`error.type`|看工具属于哪一类、经过哪些阶段、执行结果如何，但安全通道不记录参数、命令和结果正文。|
+|`bitfun.permission.evaluate`|权限策略完成评估|`bitfun.permission.evaluate.intent_count_bucket`、`delegated`、`decision`、`source`、`outcome`、`duration_ms`（均使用完整点位前缀），以及 `error.type`|看权限策略怎样判断一次工具请求，以及决定来自策略、授权记录还是用户。|
+|`bitfun.permission.confirmation`|权限确认完成|`bitfun.permission.confirmation.request_count_bucket`、`auto_approve`、`ui_surface`、`decision`、`source`、`outcome`、`duration_ms`（均使用完整点位前缀），以及 `error.type`|看需要确认时展示在哪里、用户如何决定以及等待了多久。|
+|`bitfun.agent.compression`|一次上下文压缩结束|`bitfun.agent.compression.trigger`、`threshold_tokens`、`turns_since_last`、`source`、`has_summary`、`tokens_before`、`tokens_after_estimate`、`usage.input_tokens`、`usage.output_tokens`、`usage.total_tokens`、`usage.cache_read_tokens`、`usage.cache_creation_tokens`、`outcome`、`duration_ms`（均使用完整点位前缀），以及 `error.type`|看上下文为什么压缩、采用模型还是本地兜底、压缩前后规模和成本是多少。|
+
+安全属性只接受有限枚举、布尔值和无符号整数；`error.type` 也是有限错误分类，不承载错误原文。`InferenceAttempt` 成功路径没有独立终态 Log/Metric，只在 Trace 中表示尝试；请求级 Inference 承担汇总终态和 Token Metric。
+
+### 8.2 Token 聚合指标
+
+|指标|允许的有限维度|一句话说明|
+|---|---|---|
+|`bitfun.inference.usage.input_tokens`|`bitfun.inference.provider_class`、`bitfun.inference.model_class`、`bitfun.agent.turn.subagent`|聚合模型输入 Token。|
+|`bitfun.inference.usage.output_tokens`|同上|聚合模型输出 Token。|
+|`bitfun.inference.usage.reasoning_tokens`|同上|聚合模型推理 Token。|
+|`bitfun.inference.usage.cache_read_tokens`|同上|聚合从缓存读取的 Token。|
+|`bitfun.inference.usage.cache_creation_tokens`|同上|聚合为缓存创建的 Token。|
+|`bitfun.inference.usage.total_tokens`|同上|聚合 Provider 返回的总 Token。|
+
+Token 只记录 Provider 实际返回的终态汇总，不为 token delta 或 stream chunk 制造逐条事件；缺少某类 Usage 时省略该指标。
+
+### 8.3 Debug 内容点位
+
+Debug 使用独立 instrumentation scope `bitfun.observability.debug`、固定 `data_class=debug_sensitive` 和 `bitfun.debug.schema.version=1`，但继续复用所属业务事件名。每个内容字段都是 `DebugContentField { value, original_size_bytes, truncated }`；已知秘密先整值替换，自由文本再做模式脱敏，随后共享记录预算并受单记录 256 KiB 上限保护。
+
+|`record_type`|业务事件名|Debug 字段|一句话说明|
+|---|---|---|---|
+|`turn_input` / `turn_result`|`bitfun.agent.turn`|`correlation`、`content`、`modified_file_paths`、`modified_file_paths_original_count`、`workspace_path`、`repository`、`branch`、`base_commit`|还原用户给了什么、最终产生了什么以及本轮修改了哪些文件。|
+|`inference_request` / `inference_response` / `inference_attempt`|`bitfun.inference.request` / `bitfun.inference.attempt`|`correlation`、`provider`、`model`、`request_url`、`request`、`response`、`system_prompt`、`tool_definitions`、`context`、`reminders`、`answer`、`reasoning`、`provider_metadata`、`error`|还原模型实际收到什么、返回什么、如何推理以及失败原文。|
+|`tool_request` / `tool_result` / `tool_failure`|`bitfun.tool.execute`|`correlation`、`part_index`、`tool_name`、`wire_tool_name`、`arguments`、`raw_arguments`、`result`、`error`、`parse_error`、`workspace_path`、`command`、`mcp_server`、`skill`、`extension`|还原工具实际执行的名称、参数、命令和结果，并保持 Tool call 顺序及来源关联。|
+|`approval_decision`|`bitfun.permission.evaluate` / `bitfun.permission.confirmation`|`correlation`、`phase`、`approval_id`、`function_name`、`feedback`|定位具体哪次权限判断或确认，以及用户提供了什么拒绝反馈。|
+
+`correlation` 可包含 `session_id`、`turn_id`、`round_id`、`inference_id`、`tool_call_id`、`parent_session_id`、`parent_turn_id` 和 `parent_tool_call_id`。Debug 全采样让处于业务 Observation 中的内容 Log 同时携带非空 OTLP `trace_id/span_id`；跨 Trace 或没有业务 Observation 的记录不伪造 Trace Context。Recovery 不建独立 Debug 事件，而归入 Inference、Tool 或 Compression 的类型化终态；slash command 只保留安全分类点位。
+
+### 8.4 公共资源字段与隐私边界
+
+所有信号共享经过白名单约束的 Resource：`bitfun.entrypoint`、`service.name`、`service.version`、`service.instance.id`、`deployment.environment.name`、`host.arch`、`os.type`、`bitfun.release.channel`、`bitfun.installation.pseudonymous_id` 和 `bitfun.telemetry.schema.version`。Debug 可发送排障所需的内容、路径、命令和业务关联 ID，但账号、邮箱、组织、设备身份、Authorization、Cookie、密码、API Key、私钥和 Collector credential 在所有等级都禁止发送。

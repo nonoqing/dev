@@ -347,16 +347,12 @@ impl TelemetryRuntimeHandle {
             old.discard();
             let _ = old.shutdown(false);
         }
-        let success_log_ratio = match user_level {
-            TelemetryLevel::Basic => settings.sampling.basic_success_log_ratio,
-            TelemetryLevel::Diagnostic => settings.sampling.diagnostic_success_log_ratio,
-            TelemetryLevel::Debug => settings.sampling.diagnostic_success_log_ratio,
-            TelemetryLevel::Off => 0.0,
-        };
+        let (trace_sample_ratio, success_log_ratio) =
+            effective_sample_ratios(user_level, settings.sampling);
         self.inner.control.apply(
             PolicySnapshot::new(user_level)
                 .with_signals(settings.signals)
-                .with_trace_sample_ratio(settings.sampling.diagnostic_trace_ratio)
+                .with_trace_sample_ratio(trace_sample_ratio)
                 .with_success_log_sample_ratio(success_log_ratio),
         );
         let mut state = self
@@ -505,6 +501,21 @@ const fn level_rank(level: TelemetryLevel) -> u8 {
     }
 }
 
+fn effective_sample_ratios(
+    level: TelemetryLevel,
+    sampling: crate::settings::TelemetrySamplingConfig,
+) -> (f64, f64) {
+    match level {
+        TelemetryLevel::Off => (0.0, 0.0),
+        TelemetryLevel::Basic => (0.0, sampling.basic_success_log_ratio),
+        TelemetryLevel::Diagnostic => (
+            sampling.diagnostic_trace_ratio,
+            sampling.diagnostic_success_log_ratio,
+        ),
+        TelemetryLevel::Debug => (1.0, 1.0),
+    }
+}
+
 fn config_fingerprint(user: &TelemetryUserConfig, deployment: &TelemetryDeploymentConfig) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     serde_json::to_vec(user)
@@ -520,6 +531,28 @@ fn config_fingerprint(user: &TelemetryUserConfig, deployment: &TelemetryDeployme
 mod tests {
     use super::*;
     use crate::NoTelemetrySecrets;
+
+    #[test]
+    fn debug_sampling_is_full_while_lower_levels_keep_deployment_ratios() {
+        let sampling = crate::settings::TelemetrySamplingConfig {
+            diagnostic_trace_ratio: 0.03,
+            basic_success_log_ratio: 0.04,
+            diagnostic_success_log_ratio: 0.05,
+        };
+
+        assert_eq!(
+            effective_sample_ratios(TelemetryLevel::Basic, sampling),
+            (0.0, 0.04)
+        );
+        assert_eq!(
+            effective_sample_ratios(TelemetryLevel::Diagnostic, sampling),
+            (0.03, 0.05)
+        );
+        assert_eq!(
+            effective_sample_ratios(TelemetryLevel::Debug, sampling),
+            (1.0, 1.0)
+        );
+    }
 
     #[test]
     fn default_runtime_is_closed_and_does_not_create_identity() {

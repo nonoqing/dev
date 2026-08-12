@@ -69,7 +69,7 @@ impl PolicySnapshot {
             TelemetryLevel::Off => (0.0, 0.0),
             TelemetryLevel::Basic => (0.0, 0.1),
             TelemetryLevel::Diagnostic => (0.1, 0.5),
-            TelemetryLevel::Debug => (0.1, 0.5),
+            TelemetryLevel::Debug => (1.0, 1.0),
         };
         Self {
             level,
@@ -903,6 +903,14 @@ fn sample(ratio: f64, sequence: u64) -> bool {
 mod tests {
     use super::*;
     use crate::{DebugCorrelation, DebugTelemetryRecord, DebugTurnRecord, InMemorySink};
+
+    #[test]
+    fn debug_defaults_to_full_trace_and_success_log_sampling() {
+        let policy = PolicySnapshot::new(TelemetryLevel::Debug);
+
+        assert_eq!(policy.trace_sample_ratio, 1.0);
+        assert_eq!(policy.success_log_sample_ratio, 1.0);
+    }
 
     fn content_record(content: &str) -> DebugTelemetryRecord {
         DebugTelemetryRecord::TurnInput(DebugTurnRecord {

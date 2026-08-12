@@ -733,7 +733,7 @@ Metric 禁止使用 Trace ID、Session ID、路径、URL、用户定义名称、
 |Debug 敏感 OTel Log|业务 owner 构造封闭 `DebugTelemetryRecord`，经脱敏和截断后使用独立 scope/队列通过同一 `/v1/logs` 发送|
 |LogRecord|事件时间、客户端观察时间、事件名、严重级别、固定正文、类型安全属性，以及可选 TraceId/SpanId|
 |事件名 / 正文|事件名来自版本化静态定义；正文只能使用静态定义中的固定模板，调用方不能提交自由文本|
-|严重级别与采样|安全 Error/Warn 不做概率采样；低频状态变化 Info 全量；高频成功 Info 按静态规则采样。`TelemetryLevel::Debug` 的敏感记录不做概率采样，使用独立容量保护；它与普通日志的 DEBUG severity 不是同一个概念|
+|严重级别与采样|安全 Error/Warn 不做概率采样；Basic/Diagnostic 的高频成功 Info 按静态规则采样。`TelemetryLevel::Debug` 面向评测，安全 Trace、成功 Log 和敏感记录均按 `1.0` 全采样，并继续使用各自容量保护；它与普通日志的 DEBUG severity 不是同一个概念|
 |Trace 关联|处于活动 Span 中的 LogRecord 自动带 TraceId/SpanId；跨 Trace 的后台状态不伪造父子关系|
 |禁止字段|安全 Log 禁止 `error.to_string()` 原文、调用栈、路径、URL、请求体、Prompt、模型输出、Tool 参数/结果、用户和机器身份；Debug 仍禁止调用栈、独立用户/机器身份和未脱敏凭据|
 |发送实现|生产配置只提供 `none`（不发送）和 `otlp_http`；`local_safe_jsonl`、`in_memory` 仅由开发和测试环境注入，不是用户可配置出口|
@@ -1002,7 +1002,7 @@ TraceId、SpanId、ParentSpanId、Span 时间、Metric DataPoint 时间和 Log T
 |`signals.metrics`|`true`|仍受 level 限制|可重载|
 |`signals.logs`|`true`|控制结构化 OTel Log；仍受遥测级别和隐私校验门限制|可重载|
 |`logs.minimum_severity`|level 默认值|`basic=info`、`diagnostic=debug`；用户或组织策略只能提高阈值|新 LogRecord 生效|
-|`logs.success_sample_ratio`|`basic=0.1`、`diagnostic=0.5`|仅作用于高频成功 Info/Debug；Error/Warn 和低频状态变化不采样|新 LogRecord 生效|
+|`logs.success_sample_ratio`|`basic=0.1`、`diagnostic=0.5`、`debug=1.0`|Basic/Diagnostic 可在安全上限内收紧；Debug 为保证评测轨迹完整而固定全采样；Error/Warn 和低频状态变化不采样|新 LogRecord 生效|
 |`logs.max_records_per_operation`|`128`|单个可选业务操作的 Log 上限；没有操作上下文时只使用静态定义和进程速率预算|新记录生效|
 |`logs.low_priority_queue_ratio`|`0.75`|固定为 `0.75`；达到该水位后停止接收 Info/Debug，为 Warn/Error 和生命周期事件保留剩余容量|新记录生效|
 |`exporter.kind`|`otlp_http`|`none`（不发送）/`otlp_http`（通过 OTLP HTTP 发送）|重建运行实例|
@@ -1049,7 +1049,7 @@ TraceId、SpanId、ParentSpanId、Span 时间、Metric DataPoint 时间和 Log T
 |`metrics.max_series_per_instrument`|`256`|单个 Metric 定义的维度组合上限；注册时先计算有限枚举的理论组合数|重建指标读取器|
 |`metrics.max_state_bytes`|`4 MiB`|Metric 聚合状态的估算字节上限，与组合数量上限同时生效|重建指标读取器|
 |`sampling.strategy`|`parent_based_trace_id_ratio`|固定枚举|新 Trace 生效|
-|`sampling.ratio`|`0.1`|`[0,1]`|新 Trace 生效|
+|`sampling.ratio`|`diagnostic=0.1`、`debug=1.0`|Diagnostic 可在 `[0,0.1]` 内收紧；Debug 固定全采样|新 Trace 生效|
 
 
 

@@ -923,8 +923,7 @@ mod tests {
     fn debug_log_mapping_uses_fixed_schema_and_trace_context() {
         let sink = std::sync::Arc::new(bitfun_observability::InMemorySink::default());
         let (telemetry, _) = bitfun_observability::Telemetry::build(
-            bitfun_observability::PolicySnapshot::new(TelemetryLevel::Debug)
-                .with_trace_sample_ratio(1.0),
+            bitfun_observability::PolicySnapshot::new(TelemetryLevel::Debug),
             sink.clone(),
         );
         let span = bitfun_observability::domains::start_turn_with_relation(
