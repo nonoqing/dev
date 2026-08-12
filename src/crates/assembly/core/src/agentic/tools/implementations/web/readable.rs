@@ -1,9 +1,10 @@
 use crate::util::errors::{BitFunError, BitFunResult};
 
 #[cfg(test)]
-pub(crate) use tool_runtime::web_readable::{html_to_text, looks_noisy};
+pub(crate) use tool_runtime::web_readable::looks_noisy;
 pub(crate) use tool_runtime::web_readable::{
-    is_html, ReadableWebOutput as ReadableOutput, RequestedWebFetchFormat as RequestedFormat,
+    html_to_text, is_html, ReadableWebOutput as ReadableOutput,
+    RequestedWebFetchFormat as RequestedFormat,
 };
 
 pub(crate) fn normalize_requested_format(format: Option<&str>) -> BitFunResult<RequestedFormat> {

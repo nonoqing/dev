@@ -5,8 +5,11 @@ use serde_json::json;
 use std::time::Duration;
 use thiserror::Error;
 
-const USER_AGENT_VALUE: &str = "BitFun/1.0";
+const BROWSER_USER_AGENT_VALUE: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+const HONEST_USER_AGENT_VALUE: &str = "BitFun/1.0";
 const WEB_FETCH_TIMEOUT_SECS: u64 = 30;
+const WEB_FETCH_MAX_TIMEOUT_SECS: u64 = 120;
+const WEB_FETCH_MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 const EXA_URL: &str = "https://mcp.exa.ai/mcp";
 const EXA_TIMEOUT_SECS: u64 = 25;
 
@@ -31,7 +34,7 @@ pub enum WebToolNetworkError {
 #[derive(Debug, Clone)]
 pub struct WebFetchResponse {
     pub content_type: Option<String>,
-    pub content: String,
+    pub content: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,18 +66,75 @@ struct ExaContent {
 pub struct WebToolNetworkProvider;
 
 impl WebToolNetworkProvider {
-    pub async fn fetch_text(url: &str) -> Result<WebFetchResponse, WebToolNetworkError> {
+    fn request(
+        client: &reqwest::Client,
+        url: &str,
+        accept: &str,
+        user_agent: &'static str,
+    ) -> reqwest::RequestBuilder {
+        client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, user_agent)
+            .header(reqwest::header::ACCEPT, accept)
+    }
+
+    /// Decode response bytes to a string using the charset declared in the
+    /// `Content-Type` header. Falls back to UTF-8 when no charset is
+    /// specified, matching the behavior of reqwest's `Response::text()`
+    /// for non-UTF-8 encodings (GBK, Shift-JIS, ISO-8859-1, etc.).
+    pub fn decode_text_content(content: &[u8], content_type: Option<&str>) -> String {
+        let charset = content_type
+            .and_then(|ct| {
+                ct.split(';').find_map(|part| {
+                    let (name, value) = part.split_once('=')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("charset")
+                        .then(|| value.trim().trim_matches('"'))
+                })
+            })
+            .unwrap_or("utf-8");
+
+        let encoding =
+            encoding_rs::Encoding::for_label(charset.as_bytes()).unwrap_or(encoding_rs::UTF_8);
+
+        let (decoded, _, _) = encoding.decode(content);
+        decoded.into_owned()
+    }
+
+    pub async fn fetch(
+        url: &str,
+        accept: &str,
+        timeout_secs: Option<u64>,
+    ) -> Result<WebFetchResponse, WebToolNetworkError> {
+        let timeout_secs = timeout_secs
+            .unwrap_or(WEB_FETCH_TIMEOUT_SECS)
+            .min(WEB_FETCH_MAX_TIMEOUT_SECS);
         let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT_VALUE)
-            .timeout(Duration::from_secs(WEB_FETCH_TIMEOUT_SECS))
+            .cookie_store(true)
+            .timeout(Duration::from_secs(timeout_secs))
             .build()
             .map_err(|error| WebToolNetworkError::BuildClient(error.to_string()))?;
 
-        let response = client
-            .get(url)
+        // Use the honest identifier by default so servers can identify this
+        // as a non-browser automation client. Only fall back to a browser UA
+        // when a Cloudflare challenge is encountered.
+        let mut response = Self::request(&client, url, accept, HONEST_USER_AGENT_VALUE)
             .send()
             .await
             .map_err(|error| WebToolNetworkError::Fetch(error.to_string()))?;
+
+        if response.status() == reqwest::StatusCode::FORBIDDEN
+            && response
+                .headers()
+                .get("cf-mitigated")
+                .and_then(|v| v.to_str().ok())
+                == Some("challenge")
+        {
+            response = Self::request(&client, url, accept, BROWSER_USER_AGENT_VALUE)
+                .send()
+                .await
+                .map_err(|error| WebToolNetworkError::Fetch(error.to_string()))?;
+        }
 
         if !response.status().is_success() {
             return Err(WebToolNetworkError::HttpStatus {
@@ -93,10 +153,31 @@ impl WebToolNetworkProvider {
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
 
-        let content = response
-            .text()
+        if response
+            .content_length()
+            .is_some_and(|length| length > WEB_FETCH_MAX_RESPONSE_SIZE as u64)
+        {
+            return Err(WebToolNetworkError::ReadResponse(
+                "Response too large (exceeds 5MB limit)".to_string(),
+            ));
+        }
+
+        // Stream the body in chunks, aborting as soon as the accumulated
+        // size exceeds the limit. This protects against chunked-transfer
+        // responses that lack a Content-Length header.
+        let mut content = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|error| WebToolNetworkError::ReadResponse(error.to_string()))?;
+            .map_err(|error| WebToolNetworkError::ReadResponse(error.to_string()))?
+        {
+            content.extend_from_slice(&chunk);
+            if content.len() > WEB_FETCH_MAX_RESPONSE_SIZE {
+                return Err(WebToolNetworkError::ReadResponse(
+                    "Response too large (exceeds 5MB limit)".to_string(),
+                ));
+            }
+        }
 
         Ok(WebFetchResponse {
             content_type,
@@ -203,5 +284,71 @@ mod tests {
         let error = parse_exa_sse(text).unwrap_err();
 
         assert!(matches!(error, WebToolNetworkError::SearchEmpty));
+    }
+
+    #[test]
+    fn decode_text_content_decodes_gbk() {
+        // GBK encoded "你好" (hello in Chinese)
+        let gbk_bytes: &[u8] = &[0xC4, 0xE3, 0xBA, 0xC3];
+        let result =
+            WebToolNetworkProvider::decode_text_content(gbk_bytes, Some("text/html; charset=gbk"));
+        assert_eq!(result, "你好");
+    }
+
+    #[test]
+    fn decode_text_content_decodes_shift_jis() {
+        // Shift-JIS encoded "日本語" (Japanese)
+        let sjis_bytes: &[u8] = &[0x93, 0xFA, 0x96, 0x7B, 0x8C, 0xEA];
+        let result = WebToolNetworkProvider::decode_text_content(
+            sjis_bytes,
+            Some("text/html; charset=shift_jis"),
+        );
+        assert_eq!(result, "日本語");
+    }
+
+    #[test]
+    fn decode_text_content_falls_back_to_utf8() {
+        let utf8_bytes = "Hello, world!".as_bytes();
+        let result = WebToolNetworkProvider::decode_text_content(utf8_bytes, Some("text/plain"));
+        assert_eq!(result, "Hello, world!");
+    }
+
+    #[test]
+    fn decode_text_content_handles_quoted_charset() {
+        let utf8_bytes = "test".as_bytes();
+        let result = WebToolNetworkProvider::decode_text_content(
+            utf8_bytes,
+            Some("text/html; charset=\"utf-8\""),
+        );
+        assert_eq!(result, "test");
+    }
+
+    #[test]
+    fn decode_text_content_handles_case_insensitive_charset_parameter() {
+        let gbk_bytes: &[u8] = &[0xC4, 0xE3, 0xBA, 0xC3];
+        let result = WebToolNetworkProvider::decode_text_content(
+            gbk_bytes,
+            Some("text/html; Charset = \"gbk\""),
+        );
+        assert_eq!(result, "你好");
+    }
+
+    #[test]
+    fn web_fetch_requests_do_not_force_a_language() {
+        let client = reqwest::Client::new();
+        for user_agent in [HONEST_USER_AGENT_VALUE, BROWSER_USER_AGENT_VALUE] {
+            let request = WebToolNetworkProvider::request(
+                &client,
+                "https://example.com",
+                "text/html",
+                user_agent,
+            )
+            .build()
+            .expect("request should build");
+
+            assert!(!request
+                .headers()
+                .contains_key(reqwest::header::ACCEPT_LANGUAGE));
+        }
     }
 }

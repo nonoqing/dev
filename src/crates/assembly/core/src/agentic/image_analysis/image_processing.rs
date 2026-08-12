@@ -14,6 +14,7 @@ use image::DynamicImage;
 use image::ImageEncoder;
 use image::ImageFormat;
 use serde_json::json;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
@@ -164,8 +165,23 @@ pub fn optimize_image_with_size_limit(
         None => limits.max_size,
     };
 
-    let guessed_format = image::guess_format(&image_data).ok();
-    let dynamic = image::load_from_memory(&image_data)
+    let mut reader = image::ImageReader::new(Cursor::new(image_data.as_slice()))
+        .with_guessed_format()
+        .map_err(|e| BitFunError::validation(format!("Failed to read image header: {}", e)))?;
+    let guessed_format = reader.format();
+
+    // Limit decoded memory to protect against decompression bombs from
+    // arbitrary remote URLs. The image crate's `Limits::max_alloc` checks
+    // `decoder.total_bytes()` — computed from header metadata (width ×
+    // height × bytes_per_pixel) — *before* any pixel data is allocated,
+    // so oversized images are rejected without decoding.
+    const MAX_DECODE_MEMORY_BYTES: u64 = 20 * 1024 * 1024;
+    let mut decode_limits = image::Limits::default();
+    decode_limits.max_alloc = Some(MAX_DECODE_MEMORY_BYTES);
+    reader.limits(decode_limits);
+
+    let dynamic = reader
+        .decode()
         .map_err(|e| BitFunError::validation(format!("Failed to decode image data: {}", e)))?;
 
     let (orig_width, orig_height) = (dynamic.width(), dynamic.height());
@@ -483,4 +499,87 @@ fn encode_dynamic_image(
         .to_string();
 
     Ok((buffer, mime))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{GrayImage, ImageFormat, Luma};
+    use std::io::Cursor;
+
+    fn encode_gray_png(width: u32, height: u32) -> Vec<u8> {
+        let image = GrayImage::from_pixel(width, height, Luma([0u8]));
+        let mut encoded = Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, ImageFormat::Png)
+            .expect("encode png");
+        encoded.into_inner()
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut table = [0u32; 256];
+        for (i, slot) in table.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    0xedb88320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+            *slot = c;
+        }
+        let mut crc = 0xffff_ffff;
+        for &b in data {
+            crc = table[((crc ^ b as u32) & 0xff) as usize] ^ (crc >> 8);
+        }
+        crc ^ 0xffff_ffff
+    }
+
+    /// Build a PNG whose IHDR header claims `width × height` but whose IDAT
+    /// only contains pixel data for a 1×1 image. The IHDR dimensions and CRC
+    /// are rewritten so `ImageReader::dimensions()` / `color_type()` return
+    /// the claimed values, while the file itself stays tiny.
+    fn png_with_oversized_header(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = encode_gray_png(1, 1);
+        // PNG layout: [0..8] signature, [8..12] IHDR length, [12..16] "IHDR",
+        // [16..20] width, [20..24] height, [24] bit-depth, [25] color-type,
+        // [26..29] compression/filter/interlace, [29..33] CRC (over 12..29).
+        bytes[16..20].copy_from_slice(&width.to_be_bytes());
+        bytes[20..24].copy_from_slice(&height.to_be_bytes());
+        let crc = crc32(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn rejects_image_exceeding_decode_memory_limit() {
+        // 100000 × 100000 grayscale (1 byte/pixel) = ~9.3 GiB decoded.
+        // The IHDR header claims these dimensions but the IDAT only has a
+        // 1×1 pixel; the limit check reads the header and rejects before
+        // any pixel data is decoded.
+        let png = png_with_oversized_header(100_000, 100_000);
+        let result = optimize_image_for_provider(png, "openai", Some("image/png"));
+        assert!(
+            result.is_err(),
+            "oversized image should be rejected, got: {:?}",
+            result.ok()
+        );
+        let err = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            err.contains("memory") || err.contains("limit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_image_within_decode_memory_limit() {
+        let png = encode_gray_png(100, 100);
+        let result = optimize_image_for_provider(png, "openai", Some("image/png"));
+        assert!(
+            result.is_ok(),
+            "normal image should be accepted: {:?}",
+            result.err()
+        );
+    }
 }

@@ -16,10 +16,13 @@ mod tests {
     };
     use super::search::{build_web_search_tool_result, WebSearchTool};
     use crate::agentic::tools::framework::{Tool, ToolResult, ToolUseContext};
+    use image::{ImageBuffer, ImageFormat, Rgb};
     use serde_json::json;
+    use std::io::Cursor;
     use std::io::ErrorKind;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tool_runtime::context::PrimaryModelFacts;
 
     const SIMPLE_HTML: &str = r#"<!DOCTYPE html>
 <html>
@@ -48,6 +51,58 @@ mod tests {
             runtime_tool_restrictions: Default::default(),
             runtime_handles: bitfun_runtime_ports::ToolRuntimeHandles::default(),
         }
+    }
+
+    fn model_context(provider: &str, supports_images: bool) -> ToolUseContext {
+        let mut context = empty_context();
+        context.primary_model_facts =
+            PrimaryModelFacts::new("primary-model", "vision-model", provider, supports_images);
+        context
+    }
+
+    fn png_bytes() -> Vec<u8> {
+        let image = ImageBuffer::from_pixel(1, 1, Rgb([80u8, 120u8, 160u8]));
+        let mut encoded = Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, ImageFormat::Png)
+            .expect("encode png");
+        encoded.into_inner()
+    }
+
+    async fn local_binary_server(
+        body: Vec<u8>,
+        content_type: &'static str,
+    ) -> Option<(String, tokio::task::JoinHandle<()>)> {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "Skipping web tool local server test due to sandbox socket restrictions: {}",
+                    e
+                );
+                return None;
+            }
+            Err(e) => panic!("bind local test server: {}", e),
+        };
+        let addr = listener.local_addr().expect("read local addr");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut req_buf = [0u8; 1024];
+            let _ = socket.read(&mut req_buf).await;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                content_type,
+                body.len()
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write response headers");
+            socket.write_all(&body).await.expect("write response body");
+            let _ = socket.shutdown().await;
+        });
+
+        Some((format!("http://{}/image", addr), server))
     }
 
     async fn local_text_server(
@@ -122,6 +177,72 @@ mod tests {
             other => panic!("unexpected tool result variant: {:?}", other),
         }
 
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn webfetch_image_response_is_validated_and_attached() {
+        let Some((url, server)) = local_binary_server(png_bytes(), "image/png").await else {
+            return;
+        };
+        let tool = WebFetchTool::new();
+        let results = tool
+            .call(&json!({ "url": url }), &model_context("openai", true))
+            .await
+            .expect("vision model should receive image attachment");
+
+        let ToolResult::Result {
+            data,
+            image_attachments,
+            ..
+        } = &results[0]
+        else {
+            panic!("expected image result");
+        };
+        assert_eq!(data["format"], "image");
+        let attachments = image_attachments.as_ref().expect("image attachment");
+        assert_eq!(attachments[0].mime_type, "image/png");
+        assert!(!attachments[0].data_base64.is_empty());
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn webfetch_image_response_rejects_text_only_model() {
+        let Some((url, server)) = local_binary_server(png_bytes(), "image/png").await else {
+            return;
+        };
+        let error = WebFetchTool::new()
+            .call(&json!({ "url": url }), &model_context("openai", false))
+            .await
+            .expect_err("text-only model should not receive image attachment");
+        assert!(error.to_string().contains("does not accept image inputs"));
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn webfetch_image_response_rejects_unsupported_api_format() {
+        let Some((url, server)) = local_binary_server(png_bytes(), "image/png").await else {
+            return;
+        };
+        let error = WebFetchTool::new()
+            .call(&json!({ "url": url }), &model_context("gemini", true))
+            .await
+            .expect_err("unsupported API format should not receive image attachment");
+        assert!(error.to_string().contains("not supported yet"));
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn webfetch_image_response_rejects_invalid_image_bytes() {
+        let Some((url, server)) = local_binary_server(b"not an image".to_vec(), "image/png").await
+        else {
+            return;
+        };
+        let error = WebFetchTool::new()
+            .call(&json!({ "url": url }), &model_context("openai", true))
+            .await
+            .expect_err("invalid image bytes should not be attached");
+        assert!(error.to_string().contains("supported image files"));
         server.await.expect("server task");
     }
 
@@ -207,15 +328,15 @@ mod tests {
             normalize_requested_format(Some("xml"))
                 .expect_err("unsupported format should fail")
                 .to_string(),
-            "Tool error: Unsupported format 'xml'. Expected raw, markdown, or json."
+            "Tool error: Unsupported format 'xml'. Expected raw, html, text, markdown, or json."
         );
     }
 
     #[test]
-    fn webfetch_text_alias_normalizes_to_markdown() {
+    fn webfetch_text_selects_plain_text_output() {
         assert!(matches!(
             normalize_requested_format(Some("text")).expect("format alias should work"),
-            RequestedFormat::Markdown
+            RequestedFormat::Text
         ));
     }
 
@@ -241,6 +362,123 @@ mod tests {
         assert!(text.contains("This is a paragraph with bold text."));
         assert!(text.contains("Item one"));
         assert!(text.contains("Item two"));
+    }
+
+    #[tokio::test]
+    async fn webfetch_timeout_validation_rejects_zero() {
+        let tool = WebFetchTool::new();
+        let input = json!({"url": "https://example.com", "timeout": 0});
+        let result = tool.validate_input(&input, None).await;
+        assert!(!result.result);
+        assert_eq!(result.error_code, Some(400));
+    }
+
+    #[tokio::test]
+    async fn webfetch_timeout_validation_accepts_minimum_one() {
+        let tool = WebFetchTool::new();
+        let input = json!({"url": "https://example.com", "timeout": 1});
+        let result = tool.validate_input(&input, None).await;
+        assert!(result.result);
+    }
+
+    #[tokio::test]
+    async fn webfetch_text_format_extracts_plain_text_from_html() {
+        let Some((url, server)) = local_text_server(SIMPLE_HTML, "text/html; charset=utf-8").await
+        else {
+            return;
+        };
+        let tool = WebFetchTool::new();
+        let input = json!({
+            "url": url,
+            "format": "text"
+        });
+
+        let results = tool
+            .call(&input, &empty_context())
+            .await
+            .expect("text format should succeed");
+        assert_eq!(results.len(), 1);
+
+        match &results[0] {
+            ToolResult::Result { data, .. } => {
+                assert_eq!(data["format"], "text");
+                assert_eq!(data["content_representation"], "plain_text");
+                assert_eq!(data["extractor"], "html_to_text");
+                assert_eq!(data["title"], "Hello World");
+                let content = data["content"].as_str().expect("content string");
+                assert!(content.contains("Hello World"));
+                assert!(content.contains("primary article content"));
+                assert!(!content.contains("<script>"));
+                assert!(!content.contains("<style>"));
+                assert!(!content.contains("Ignore this footer"));
+            }
+            other => panic!("unexpected tool result variant: {:?}", other),
+        }
+
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn webfetch_markdown_format_preserves_server_markdown() {
+        let body = "# Server Markdown\n\nThis was served as text/markdown.";
+        let Some((url, server)) = local_text_server(body, "text/markdown; charset=utf-8").await
+        else {
+            return;
+        };
+        let tool = WebFetchTool::new();
+        let input = json!({
+            "url": url,
+            "format": "markdown"
+        });
+
+        let results = tool
+            .call(&input, &empty_context())
+            .await
+            .expect("markdown format should succeed");
+        assert_eq!(results.len(), 1);
+
+        match &results[0] {
+            ToolResult::Result { data, .. } => {
+                assert_eq!(data["format"], "markdown");
+                assert_eq!(data["content_representation"], "markdown");
+                assert_eq!(data["extractor"], "server");
+                assert_eq!(data["content"], body);
+            }
+            other => panic!("unexpected tool result variant: {:?}", other),
+        }
+
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn webfetch_text_format_preserves_server_plain_text() {
+        let body = "Served as plain text directly.";
+        let Some((url, server)) = local_text_server(body, "text/plain").await else {
+            return;
+        };
+        let tool = WebFetchTool::new();
+        let input = json!({
+            "url": url,
+            "format": "text"
+        });
+
+        let results = tool
+            .call(&input, &empty_context())
+            .await
+            .expect("text format should succeed");
+        assert_eq!(results.len(), 1);
+
+        match &results[0] {
+            ToolResult::Result { data, .. } => {
+                assert_eq!(data["format"], "text");
+                assert_eq!(data["content_representation"], "plain_text");
+                assert_eq!(data["extractor"], "server");
+                assert_eq!(data["content"], body);
+            }
+            other => panic!("unexpected tool result variant: {:?}", other),
+        }
+
+        server.await.expect("server task");
     }
 
     #[test]

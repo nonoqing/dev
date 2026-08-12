@@ -10,6 +10,11 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use super::util::{
+    primary_api_format, require_multimodal_tool_output, supported_image_mime_type,
+    supports_multimodal_tool_output,
+};
+
 pub struct ViewImageTool;
 
 #[derive(Debug, Clone)]
@@ -38,56 +43,13 @@ impl ViewImageTool {
         Self
     }
 
-    fn primary_api_format(ctx: &ToolUseContext) -> String {
-        ctx.primary_model_facts().api_format.to_lowercase()
-    }
-
-    fn require_multimodal_tool_output(ctx: &ToolUseContext) -> BitFunResult<()> {
-        if !ctx.primary_model_supports_image_understanding() {
-            return Err(BitFunError::tool(
-                "view_image is not allowed because the primary model does not accept image inputs"
-                    .to_string(),
-            ));
-        }
-
-        let format = Self::primary_api_format(ctx);
-        if matches!(
-            format.as_str(),
-            "anthropic" | "openai" | "response" | "responses"
-        ) {
-            return Ok(());
-        }
-
-        Err(BitFunError::tool(
-            "view_image returns images in tool results; set the primary model to Anthropic (Claude) or OpenAI-compatible API format. Other providers are not supported for view_image yet."
-                .to_string(),
-        ))
-    }
-
-    fn supports_multimodal_tool_output(ctx: &ToolUseContext) -> bool {
-        ctx.primary_model_supports_image_understanding()
-            && ctx.primary_model_facts().multimodal_tool_output_supported()
-    }
-
     fn mime_type_for_image(bytes: &[u8]) -> BitFunResult<&'static str> {
-        let format = image::guess_format(bytes).map_err(|_| {
+        supported_image_mime_type(bytes).ok_or_else(|| {
             BitFunError::tool(
                 "view_image can only attach supported image files: png, jpeg, gif, webp, or bmp"
                     .to_string(),
             )
-        })?;
-
-        match format {
-            image::ImageFormat::Png => Ok("image/png"),
-            image::ImageFormat::Jpeg => Ok("image/jpeg"),
-            image::ImageFormat::Gif => Ok("image/gif"),
-            image::ImageFormat::WebP => Ok("image/webp"),
-            image::ImageFormat::Bmp => Ok("image/bmp"),
-            other => Err(BitFunError::tool(format!(
-                "view_image does not support image format {:?}; supported formats are png, jpeg, gif, webp, and bmp",
-                other
-            ))),
-        }
+        })
     }
 
     fn path_from_input(input: &Value) -> BitFunResult<&str> {
@@ -250,9 +212,7 @@ impl Tool for ViewImageTool {
     }
 
     async fn is_available_in_context(&self, context: Option<&ToolUseContext>) -> bool {
-        context
-            .map(Self::supports_multimodal_tool_output)
-            .unwrap_or(true)
+        context.map(supports_multimodal_tool_output).unwrap_or(true)
     }
 
     fn is_readonly(&self) -> bool {
@@ -380,14 +340,14 @@ impl Tool for ViewImageTool {
         input: &Value,
         context: &ToolUseContext,
     ) -> BitFunResult<Vec<ToolResult>> {
-        Self::require_multimodal_tool_output(context)?;
+        require_multimodal_tool_output("view_image", context)?;
         Self::validate_detail(input)?;
 
         let input_path = Self::path_from_input(input)?;
         let path = Self::resolve_path(input_path, Some(context))?;
         let bytes = Self::read_image_bytes(&path, Some(context)).await?;
         let original_mime_type = Self::mime_type_for_image(&bytes)?;
-        let provider = Self::primary_api_format(context);
+        let provider = primary_api_format(context);
         let processed = optimize_image_for_provider(bytes, &provider, Some(original_mime_type))
             .map_err(|err| {
                 BitFunError::tool(format!("unable to prepare image for model vision: {}", err))
