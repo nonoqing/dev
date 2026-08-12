@@ -373,7 +373,14 @@ impl ChatMode {
                 service
                     .get_config::<bitfun_core::service::config::types::GlobalConfig>(None)
                     .await
-                    .map(|config| config.tool_permissions.interaction.auto_approve_ask)
+                    .map(|config| {
+                        matches!(
+                            bitfun_runtime_ports::PermissionMode::from_config(
+                                &config.tool_permissions
+                            ),
+                            bitfun_runtime_ports::PermissionMode::AutoApprove
+                        )
+                    })
                     .unwrap_or(false)
             })
         });

@@ -322,8 +322,8 @@ export interface UpdateSessionModelRequest {
   includeInternal?: boolean;
 }
 
-/** `ask` | `auto_approve` | `full_access`; `null` clears the session override. */
-export type SessionPermissionMode = 'ask' | 'auto_approve' | 'full_access';
+/** `ask` | `auto_approve` | `deny` | `full_access`; `null` clears the session override. */
+export type SessionPermissionMode = 'ask' | 'auto_approve' | 'deny' | 'full_access';
 
 export interface SessionPermissionModeRequest {
   sessionId: string;

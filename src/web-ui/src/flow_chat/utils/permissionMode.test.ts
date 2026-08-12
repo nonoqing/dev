@@ -12,6 +12,7 @@ function config(
   autoApproveAsk: boolean,
 ): ToolPermissionConfig {
   return {
+    default_permission: preset === 'full_access' ? 'allow' : 'ask',
     policy: { preset, rules: [] },
     interaction: { auto_approve_ask: autoApproveAsk },
   };
@@ -22,14 +23,16 @@ describe('permissionMode', () => {
     expect(chatInputPermissionMode('ask')).toBe('ask');
     expect(chatInputPermissionMode('auto_approve')).toBe('auto');
     expect(chatInputPermissionMode('full_access')).toBe('full_access');
+    expect(chatInputPermissionMode('deny')).toBe('reject');
 
     expect(sessionPermissionMode('ask')).toBe('ask');
     expect(sessionPermissionMode('auto')).toBe('auto_approve');
     expect(sessionPermissionMode('full_access')).toBe('full_access');
+    expect(sessionPermissionMode('reject')).toBe('deny');
   });
 
   it('round trips every mode through the control naming', () => {
-    for (const mode of ['ask', 'auto_approve', 'full_access'] as const) {
+    for (const mode of ['ask', 'auto_approve', 'deny', 'full_access'] as const) {
       expect(sessionPermissionMode(chatInputPermissionMode(mode))).toBe(mode);
     }
   });
@@ -39,6 +42,7 @@ describe('permissionMode', () => {
     expect(permissionModeFromConfig(config('ask', true))).toBe('auto_approve');
     // Full access already resolves every ask, so it outranks auto approval.
     expect(permissionModeFromConfig(config('full_access', true))).toBe('full_access');
+    expect(permissionModeFromConfig({ ...config('ask', false), default_permission: 'deny' })).toBe('deny');
   });
 
   it('projects a mode back onto both configuration knobs', () => {

@@ -63,6 +63,7 @@ fn tool_permission_config_defaults_to_ask_with_auto_approve_disabled() {
     assert_eq!(
         serde_json::to_value(config).expect("serialize tool permission config"),
         json!({
+            "default_permission": "ask",
             "policy": {
                 "preset": "ask",
                 "rules": [],
@@ -75,9 +76,23 @@ fn tool_permission_config_defaults_to_ask_with_auto_approve_disabled() {
 }
 
 #[test]
+fn unknown_or_malformed_default_permission_safely_falls_back_to_ask() {
+    for value in [json!("unexpected"), json!(true), json!(42), json!(null)] {
+        let config: ToolPermissionConfig = serde_json::from_value(json!({
+            "default_permission": value,
+        }))
+        .expect("an invalid default permission must not reject the whole config");
+
+        assert_eq!(config.default_permission, PermissionEffect::Ask);
+        assert_eq!(PermissionMode::from_config(&config), PermissionMode::Ask);
+    }
+}
+
+#[test]
 fn policy_presets_expand_into_ordinary_baseline_rules() {
     let ask = policy(PermissionPolicyPreset::Ask, Vec::new());
     let full_access = policy(PermissionPolicyPreset::FullAccess, Vec::new());
+    let deny = policy(PermissionPolicyPreset::Deny, Vec::new());
     let evaluator = PermissionEvaluator::case_sensitive();
 
     let ask_rules = resolve_permission_policy(PermissionPolicyLayers {
@@ -91,6 +106,14 @@ fn policy_presets_expand_into_ordinary_baseline_rules() {
     let full_access_rules = resolve_permission_policy(PermissionPolicyLayers {
         product_defaults: &[],
         global: &full_access,
+        mode: None,
+        project: &[],
+        agent: &[],
+        enforced: &[],
+    });
+    let deny_rules = resolve_permission_policy(PermissionPolicyLayers {
+        product_defaults: &[],
+        global: &deny,
         mode: None,
         project: &[],
         agent: &[],
@@ -123,6 +146,10 @@ fn policy_presets_expand_into_ordinary_baseline_rules() {
     assert_eq!(
         full_access_rules.rules(),
         vec![rule("*", "*", PermissionEffect::Allow)]
+    );
+    assert_eq!(
+        deny_rules.rules(),
+        vec![rule("*", "*", PermissionEffect::Deny)]
     );
     assert_eq!(
         evaluator.evaluate_policy_resource("edit", "src/main.rs", &ask_rules),
@@ -699,6 +726,8 @@ fn permission_mode_projects_onto_preset_and_auto_approval() {
         PermissionPolicyPreset::FullAccess
     );
     assert!(!PermissionMode::FullAccess.auto_approve_ask());
+    assert_eq!(PermissionMode::Deny.preset(), PermissionPolicyPreset::Deny);
+    assert!(!PermissionMode::Deny.auto_approve_ask());
 }
 
 #[test]
@@ -706,13 +735,23 @@ fn permission_mode_round_trips_through_stored_configuration() {
     let mut config = ToolPermissionConfig::default();
     assert_eq!(PermissionMode::from_config(&config), PermissionMode::Ask);
 
+    config.default_permission = PermissionEffect::Allow;
+    assert_eq!(
+        PermissionMode::from_config(&config),
+        PermissionMode::FullAccess
+    );
+    config.default_permission = PermissionEffect::Deny;
+    assert_eq!(PermissionMode::from_config(&config), PermissionMode::Deny);
+    config.default_permission = PermissionEffect::Ask;
+
     config.interaction.auto_approve_ask = true;
     assert_eq!(
         PermissionMode::from_config(&config),
         PermissionMode::AutoApprove
     );
 
-    // Full access already resolves every ask, so it outranks auto approval.
+    // The new shared field is the canonical global selection.
+    config.default_permission = PermissionEffect::Allow;
     config.policy.preset = PermissionPolicyPreset::FullAccess;
     assert_eq!(
         PermissionMode::from_config(&config),
@@ -721,6 +760,7 @@ fn permission_mode_round_trips_through_stored_configuration() {
 
     for mode in [
         PermissionMode::Ask,
+        PermissionMode::Deny,
         PermissionMode::AutoApprove,
         PermissionMode::FullAccess,
     ] {
@@ -735,6 +775,7 @@ fn permission_mode_round_trips_through_stored_configuration() {
         Some(PermissionMode::FullAccess)
     );
     assert_eq!(PermissionMode::parse("elevated"), None);
+    assert_eq!(PermissionMode::parse("deny"), Some(PermissionMode::Deny));
 }
 
 #[test]

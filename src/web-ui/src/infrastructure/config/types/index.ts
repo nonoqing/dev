@@ -22,7 +22,7 @@ export interface PermissionRule {
 }
 
 export interface PermissionPolicyConfig {
-  preset: 'ask' | 'full_access';
+  preset: 'ask' | 'deny' | 'full_access';
   rules: PermissionRule[];
 }
 
@@ -31,6 +31,7 @@ export interface PermissionInteractionConfig {
 }
 
 export interface ToolPermissionConfig {
+  default_permission: PermissionEffect;
   policy: PermissionPolicyConfig;
   interaction: PermissionInteractionConfig;
 }

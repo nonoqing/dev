@@ -103,6 +103,7 @@ pub(crate) fn resolve_effective_permission_policy(
     let agent_rules = agent_profile
         .map(|profile| profile.tool_permission_rules.as_slice())
         .unwrap_or(&[]);
+    let mode = mode.or(Some(PermissionMode::from_config(&global.tool_permissions)));
 
     let resolved = match parent_runtime_ceiling {
         Some(parent_runtime_ceiling) => {

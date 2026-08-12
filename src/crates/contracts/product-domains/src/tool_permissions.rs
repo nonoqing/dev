@@ -9,10 +9,11 @@ use serde_json::{Map, Value};
 use std::fmt;
 
 /// The effect produced by a matching permission rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionEffect {
     Allow,
+    #[default]
     Ask,
     Deny,
 }
@@ -187,6 +188,7 @@ impl std::error::Error for PermissionRuntimeCeilingValidationError {}
 pub enum PermissionPolicyPreset {
     #[default]
     Ask,
+    Deny,
     FullAccess,
 }
 
@@ -215,6 +217,7 @@ impl PermissionPolicyPreset {
                 PermissionRule::new("git", "git shortlog *", PermissionEffect::Allow),
                 PermissionRule::new("git", "git branch", PermissionEffect::Allow),
             ],
+            Self::Deny => vec![PermissionRule::new("*", "*", PermissionEffect::Deny)],
             Self::FullAccess => vec![PermissionRule::new("*", "*", PermissionEffect::Allow)],
         }
     }
@@ -252,6 +255,8 @@ pub enum PermissionMode {
     /// Every `ask` decision is raised to the user.
     #[default]
     Ask,
+    /// Deny tool calls by default unless a later explicit rule allows them.
+    Deny,
     /// Static policy is unchanged; interactive `ask` is answered automatically.
     AutoApprove,
     /// The policy baseline allows everything the later layers do not deny.
@@ -262,6 +267,7 @@ impl PermissionMode {
     pub const fn preset(self) -> PermissionPolicyPreset {
         match self {
             Self::Ask | Self::AutoApprove => PermissionPolicyPreset::Ask,
+            Self::Deny => PermissionPolicyPreset::Deny,
             Self::FullAccess => PermissionPolicyPreset::FullAccess,
         }
     }
@@ -273,6 +279,7 @@ impl PermissionMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Ask => "ask",
+            Self::Deny => "deny",
             Self::AutoApprove => "auto_approve",
             Self::FullAccess => "full_access",
         }
@@ -283,6 +290,7 @@ impl PermissionMode {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "ask" => Some(Self::Ask),
+            "deny" | "reject" => Some(Self::Deny),
             "auto" | "auto_approve" | "autoapprove" => Some(Self::AutoApprove),
             "full_access" | "fullaccess" | "full" => Some(Self::FullAccess),
             _ => None,
@@ -294,10 +302,11 @@ impl PermissionMode {
     /// `full_access` wins over the auto-approve preference: the preset already
     /// resolves every `ask` to `allow`, so auto-answering is not observable.
     pub const fn from_config(config: &ToolPermissionConfig) -> Self {
-        match config.policy.preset {
-            PermissionPolicyPreset::FullAccess => Self::FullAccess,
-            PermissionPolicyPreset::Ask if config.interaction.auto_approve_ask => Self::AutoApprove,
-            PermissionPolicyPreset::Ask => Self::Ask,
+        match config.default_permission {
+            PermissionEffect::Allow => Self::FullAccess,
+            PermissionEffect::Deny => Self::Deny,
+            PermissionEffect::Ask if config.interaction.auto_approve_ask => Self::AutoApprove,
+            PermissionEffect::Ask => Self::Ask,
         }
     }
 }
@@ -333,6 +342,25 @@ where
         .as_ref()
         .and_then(Value::as_str)
         .and_then(PermissionMode::parse))
+}
+
+/// Deserializes the user-editable global default without allowing an unknown
+/// value to make the entire application configuration unreadable.
+///
+/// Only the three documented wire values are accepted. Unknown strings and
+/// values of the wrong JSON type safely degrade to `ask`.
+pub fn deserialize_default_permission_or_ask<'de, D>(
+    deserializer: D,
+) -> Result<PermissionEffect, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(match value.as_str() {
+        Some("allow") => PermissionEffect::Allow,
+        Some("deny") => PermissionEffect::Deny,
+        Some("ask") | Some(_) | None => PermissionEffect::Ask,
+    })
 }
 
 /// The layer that owns the effective mode of one dialog turn.
@@ -418,6 +446,10 @@ pub const fn resolve_permission_mode(layers: PermissionModeLayers) -> ResolvedPe
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ToolPermissionConfig {
+    /// Shared global default used by CLI and Desktop. Legacy configs are
+    /// normalized from the old preset/interaction fields.
+    #[serde(default, deserialize_with = "deserialize_default_permission_or_ask")]
+    pub default_permission: PermissionEffect,
     pub policy: PermissionPolicyConfig,
     pub interaction: PermissionInteractionConfig,
 }

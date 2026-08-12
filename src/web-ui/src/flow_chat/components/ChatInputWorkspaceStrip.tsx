@@ -117,9 +117,10 @@ export interface ChatInputWorkspaceStripProps {
 
 export type ChatInputPermissionMode = 'ask' | 'auto' | 'full_access' | 'reject' | 'acp';
 
-const NATIVE_PERMISSION_MODES: Array<Exclude<ChatInputPermissionMode, 'acp' | 'reject'>> = [
+const NATIVE_PERMISSION_MODES: Array<Exclude<ChatInputPermissionMode, 'acp'>> = [
   'ask',
   'auto',
+  'reject',
   'full_access',
 ];
 

@@ -2110,7 +2110,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     if (permissionModeSaving || isAcpTargetSession) return;
     if (!(await confirmFullAccessIfNeeded(nextMode, 'session'))) return;
     const backendMode = toBackendPermissionMode(
-      nextMode as Exclude<ChatInputPermissionMode, 'acp' | 'reject'>,
+      nextMode as Exclude<ChatInputPermissionMode, 'acp'>,
     );
     // An armed one-off would otherwise keep masking the session mode the user
     // just chose, making the write look like it did nothing.
@@ -2133,7 +2133,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   ) => {
     if (permissionModeSaving || isAcpTargetSession) return;
     const backendMode = toBackendPermissionMode(
-      nextMode as Exclude<ChatInputPermissionMode, 'acp' | 'reject'>,
+      nextMode as Exclude<ChatInputPermissionMode, 'acp'>,
     );
     if (turnPermissionMode === backendMode) {
       setTurnPermissionMode(null);

@@ -80,7 +80,7 @@ type BrowserControlBrowserOption = {
 };
 
 type SubagentBatchExecutionPolicy = 'safe_only' | 'force_parallel' | 'serial';
-type ToolPermissionMode = 'ask' | 'auto' | 'full_access';
+type ToolPermissionMode = 'ask' | 'allow' | 'deny';
 
 const DEFAULT_SUBAGENT_BATCH_EXECUTION_POLICY: SubagentBatchExecutionPolicy = 'force_parallel';
 const DEFAULT_SUBAGENT_MAX_CONCURRENCY = 5;
@@ -93,8 +93,7 @@ function normalizeSubagentBatchExecutionPolicy(value: unknown): SubagentBatchExe
 }
 
 function resolveToolPermissionMode(config: ToolPermissionConfig): ToolPermissionMode {
-  if (config.policy.preset === 'full_access') return 'full_access';
-  return config.interaction.auto_approve_ask ? 'auto' : 'ask';
+  return config.default_permission;
 }
 
 const DEFAULT_BROWSER_CONTROL_BROWSER = 'default';
@@ -308,16 +307,16 @@ const SessionSettingsPanels: React.FC<SessionSettingsPanelsProps> = ({ variant }
 
   const handlePermissionModeChange = async (value: string | number | (string | number)[]) => {
     const nextModeValue = String(Array.isArray(value) ? value[0] : value);
-    const nextMode: ToolPermissionMode = nextModeValue === 'full_access'
-      ? 'full_access'
-      : nextModeValue === 'auto'
-        ? 'auto'
+    const nextMode: ToolPermissionMode = nextModeValue === 'allow'
+      ? 'allow'
+      : nextModeValue === 'deny'
+        ? 'deny'
         : 'ask';
     const previousConfig = toolPermissionConfig;
     const currentMode = resolveToolPermissionMode(previousConfig);
     if (nextMode === currentMode) return;
 
-    if (nextMode === 'full_access') {
+    if (nextMode === 'allow') {
       const confirmed = await confirmDanger(
         t('permissionPolicy.fullAccessWarningTitle'),
         t('permissionPolicy.fullAccessWarningMessage'),
@@ -333,11 +332,12 @@ const SessionSettingsPanels: React.FC<SessionSettingsPanelsProps> = ({ variant }
       {
         policy: {
           ...previousConfig.policy,
-          preset: nextMode === 'full_access' ? 'full_access' : 'ask',
+          preset: nextMode === 'allow' ? 'full_access' : nextMode === 'deny' ? 'deny' : 'ask',
         },
+        default_permission: nextMode,
         interaction: {
           ...previousConfig.interaction,
-          auto_approve_ask: nextMode === 'auto',
+          auto_approve_ask: false,
         },
       },
       previousConfig,
@@ -1175,10 +1175,10 @@ const SessionSettingsPanels: React.FC<SessionSettingsPanelsProps> = ({ variant }
         >
           <ConfigPageRow
             label={t('permissionPolicy.mode')}
-            description={`${resolveToolPermissionMode(toolPermissionConfig) === 'full_access'
-              ? t('permissionPolicy.fullAccessDescription')
-              : resolveToolPermissionMode(toolPermissionConfig) === 'auto'
-                ? t('permissionPolicy.autoApproveDescription')
+            description={`${resolveToolPermissionMode(toolPermissionConfig) === 'allow'
+              ? t('permissionPolicy.allowDescription')
+              : resolveToolPermissionMode(toolPermissionConfig) === 'deny'
+                ? t('permissionPolicy.denyDescription')
                 : t('permissionPolicy.askDescription')} ${t('permissionPolicy.modeDescription')}`}
             align="center"
           >
@@ -1188,8 +1188,8 @@ const SessionSettingsPanels: React.FC<SessionSettingsPanelsProps> = ({ variant }
                 value={resolveToolPermissionMode(toolPermissionConfig)}
                 options={[
                   { value: 'ask', label: t('permissionPolicy.ask') },
-                  { value: 'auto', label: t('permissionPolicy.autoApprove') },
-                  { value: 'full_access', label: t('permissionPolicy.fullAccess') },
+                  { value: 'allow', label: t('permissionPolicy.allow') },
+                  { value: 'deny', label: t('permissionPolicy.deny') },
                 ]}
                 disabled={permissionConfigSaving}
                 onChange={handlePermissionModeChange}

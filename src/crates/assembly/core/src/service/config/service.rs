@@ -1093,6 +1093,7 @@ mod tests {
             .await
             .expect("migrated tool permissions should be readable");
         assert_eq!(permissions["policy"]["preset"], "ask");
+        assert_eq!(permissions["default_permission"], "ask");
         assert_eq!(permissions["interaction"]["auto_approve_ask"], true);
 
         let path_manager = PathManager::with_user_root_for_tests(dir.path().join(test_name));
@@ -1107,6 +1108,7 @@ mod tests {
             persisted["tool_permissions"]["interaction"]["auto_approve_ask"],
             true
         );
+        assert_eq!(persisted["tool_permissions"]["default_permission"], "ask");
     }
 
     #[tokio::test]

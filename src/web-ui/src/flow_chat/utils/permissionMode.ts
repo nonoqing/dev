@@ -9,16 +9,16 @@ import type { ChatInputPermissionMode } from '../components/ChatInputWorkspaceSt
  * keep that one difference in one place instead of at every call site.
  */
 
-type NativePermissionMode = Exclude<ChatInputPermissionMode, 'acp' | 'reject'>;
+type NativePermissionMode = Exclude<ChatInputPermissionMode, 'acp'>;
 
 /** Backend mode -> chat input control mode. */
 export function chatInputPermissionMode(mode: SessionPermissionMode): NativePermissionMode {
-  return mode === 'auto_approve' ? 'auto' : mode;
+  return mode === 'auto_approve' ? 'auto' : mode === 'deny' ? 'reject' : mode;
 }
 
 /** Chat input control mode -> backend mode. */
 export function sessionPermissionMode(mode: NativePermissionMode): SessionPermissionMode {
-  return mode === 'auto' ? 'auto_approve' : mode;
+  return mode === 'auto' ? 'auto_approve' : mode === 'reject' ? 'deny' : mode;
 }
 
 /**
@@ -28,7 +28,8 @@ export function sessionPermissionMode(mode: NativePermissionMode): SessionPermis
  * ask, so it outranks the auto-approve preference.
  */
 export function permissionModeFromConfig(config: ToolPermissionConfig): SessionPermissionMode {
-  if (config.policy.preset === 'full_access') return 'full_access';
+  if (config.default_permission === 'deny') return 'deny';
+  if (config.default_permission === 'allow') return 'full_access';
   return config.interaction.auto_approve_ask ? 'auto_approve' : 'ask';
 }
 
@@ -38,9 +39,10 @@ export function permissionModeToConfig(
   mode: SessionPermissionMode,
 ): ToolPermissionConfig {
   return {
+    default_permission: mode === 'full_access' ? 'allow' : mode === 'deny' ? 'deny' : 'ask',
     policy: {
       ...config.policy,
-      preset: mode === 'full_access' ? 'full_access' : 'ask',
+      preset: mode === 'full_access' ? 'full_access' : mode === 'deny' ? 'deny' : 'ask',
     },
     interaction: {
       ...config.interaction,

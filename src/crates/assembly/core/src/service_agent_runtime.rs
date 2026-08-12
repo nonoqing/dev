@@ -27,9 +27,10 @@ use bitfun_runtime_ports::{
 #[cfg(feature = "remote-connect")]
 use bitfun_runtime_ports::{
     AgentInputAttachment, AgentSessionCreateRequest, AgentSubmissionSource,
-    AgentTurnCancellationRequest, PermissionPolicyPreset, RemoteControlStatePort,
-    RemoteControlStateRequest, RemoteControlStateSnapshot, RemoteSessionWorkspaceIdentity,
-    RuntimeServiceCapability, RuntimeServicePort, ToolPermissionConfig,
+    AgentTurnCancellationRequest, PermissionEffect, PermissionMode, PermissionPolicyPreset,
+    RemoteControlStatePort, RemoteControlStateRequest, RemoteControlStateSnapshot,
+    RemoteSessionWorkspaceIdentity, RuntimeServiceCapability, RuntimeServicePort,
+    ToolPermissionConfig,
 };
 #[cfg(feature = "remote-connect")]
 use bitfun_services_integrations::remote_connect::{
@@ -2247,12 +2248,13 @@ impl RemoteInteractionRuntimeHost for CoreRemoteInteractionRuntimeHost {
             .get_config(Some("tool_permissions"))
             .await
             .map_err(|error| error.to_string())?;
-        Ok(match config.policy.preset {
-            PermissionPolicyPreset::FullAccess => RemotePermissionMode::FullAccess,
-            PermissionPolicyPreset::Ask if config.interaction.auto_approve_ask => {
-                RemotePermissionMode::Auto
-            }
-            PermissionPolicyPreset::Ask => RemotePermissionMode::Ask,
+        // The remote protocol predates the global deny mode. Expose deny as
+        // ask rather than allow so a remote client cannot accidentally widen
+        // a deny-configured host; the host Runtime still enforces deny.
+        Ok(match PermissionMode::from_config(&config) {
+            PermissionMode::FullAccess => RemotePermissionMode::FullAccess,
+            PermissionMode::AutoApprove => RemotePermissionMode::Auto,
+            PermissionMode::Ask | PermissionMode::Deny => RemotePermissionMode::Ask,
         })
     }
 
@@ -2269,14 +2271,17 @@ impl RemoteInteractionRuntimeHost for CoreRemoteInteractionRuntimeHost {
             .map_err(|error| error.to_string())?;
         match mode {
             RemotePermissionMode::Ask => {
+                config.default_permission = PermissionEffect::Ask;
                 config.policy.preset = PermissionPolicyPreset::Ask;
                 config.interaction.auto_approve_ask = false;
             }
             RemotePermissionMode::Auto => {
+                config.default_permission = PermissionEffect::Ask;
                 config.policy.preset = PermissionPolicyPreset::Ask;
                 config.interaction.auto_approve_ask = true;
             }
             RemotePermissionMode::FullAccess => {
+                config.default_permission = PermissionEffect::Allow;
                 config.policy.preset = PermissionPolicyPreset::FullAccess;
                 config.interaction.auto_approve_ask = false;
             }

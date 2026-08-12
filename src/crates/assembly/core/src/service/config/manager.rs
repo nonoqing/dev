@@ -98,6 +98,7 @@ pub(crate) fn normalize_legacy_tool_permissions_config_value(mut config: Value) 
             root.insert(
                 "tool_permissions".to_string(),
                 serde_json::json!({
+                    "default_permission": "ask",
                     "policy": {
                         "preset": "ask",
                         "rules": [],
@@ -107,6 +108,48 @@ pub(crate) fn normalize_legacy_tool_permissions_config_value(mut config: Value) 
                     },
                 }),
             );
+        }
+    } else if let Some(tool_permissions) = root
+        .get_mut("tool_permissions")
+        .and_then(Value::as_object_mut)
+    {
+        let current_default = tool_permissions
+            .get("default_permission")
+            .and_then(Value::as_str);
+        if !matches!(current_default, Some("ask" | "allow" | "deny")) {
+            let had_invalid_default = tool_permissions.contains_key("default_permission");
+            let default_permission = if had_invalid_default {
+                "ask"
+            } else {
+                match tool_permissions
+                    .get("policy")
+                    .and_then(Value::as_object)
+                    .and_then(|policy| policy.get("preset"))
+                    .and_then(Value::as_str)
+                {
+                    Some("full_access") => "allow",
+                    Some("deny") => "deny",
+                    _ => "ask",
+                }
+            };
+            tool_permissions.insert(
+                "default_permission".to_string(),
+                Value::String(default_permission.to_string()),
+            );
+            if had_invalid_default {
+                if let Some(policy) = tool_permissions
+                    .get_mut("policy")
+                    .and_then(Value::as_object_mut)
+                {
+                    policy.insert("preset".to_string(), Value::String("ask".to_string()));
+                }
+                if let Some(interaction) = tool_permissions
+                    .get_mut("interaction")
+                    .and_then(Value::as_object_mut)
+                {
+                    interaction.insert("auto_approve_ask".to_string(), Value::Bool(false));
+                }
+            }
         }
     }
 
@@ -1142,6 +1185,7 @@ mod tests {
             assert_eq!(
                 normalized["tool_permissions"],
                 serde_json::json!({
+                    "default_permission": "ask",
                     "policy": {
                         "preset": "ask",
                         "rules": [],
@@ -1173,8 +1217,39 @@ mod tests {
             },
         }));
 
-        assert_eq!(normalized["tool_permissions"], tool_permissions);
+        assert_eq!(
+            normalized["tool_permissions"]["default_permission"],
+            "allow"
+        );
+        assert_eq!(
+            normalized["tool_permissions"]["policy"],
+            tool_permissions["policy"]
+        );
+        assert_eq!(
+            normalized["tool_permissions"]["interaction"],
+            tool_permissions["interaction"]
+        );
         assert!(normalized["ai"].get("skip_tool_confirmation").is_none());
+    }
+
+    #[test]
+    fn invalid_default_permission_is_normalized_to_ask() {
+        for invalid in [serde_json::json!("unexpected"), serde_json::json!(42)] {
+            let normalized = normalize_legacy_tool_permissions_config_value(serde_json::json!({
+                "tool_permissions": {
+                    "default_permission": invalid,
+                    "policy": { "preset": "full_access", "rules": [] },
+                    "interaction": { "auto_approve_ask": false }
+                }
+            }));
+
+            assert_eq!(normalized["tool_permissions"]["default_permission"], "ask");
+            assert_eq!(normalized["tool_permissions"]["policy"]["preset"], "ask");
+            assert_eq!(
+                normalized["tool_permissions"]["interaction"]["auto_approve_ask"],
+                false
+            );
+        }
     }
 
     #[test]
