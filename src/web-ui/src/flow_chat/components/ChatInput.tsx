@@ -583,6 +583,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const threadGoalController = useThreadGoalController(effectiveTargetSession, {
     isBtwSession,
     disabled: !caps.threadGoal,
+    sceneActive: isSceneActive,
   });
   const currentSessionTitle = currentSession?.title?.trim() || t('session.untitled');
   const activeBtwSession = activeBtwSessionId
@@ -3295,11 +3296,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           noWorkspaceMessage: t('chatInput.usageNoWorkspace'),
           failedTitle: t('chatInput.usageFailed'),
           unknownErrorMessage: t('error.unknown'),
-          loadingMarkdown: t('usage.loading.markdown'),
         },
       );
 
-      if (result.inserted) {
+      if (result.shown) {
         dispatchInput({ type: 'DEACTIVATE' });
       }
     } catch (error) {

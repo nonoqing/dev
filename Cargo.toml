@@ -81,10 +81,10 @@ undocumented_unsafe_blocks = "warn"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.52", default-features = false }
-tokio-stream = "0.1.18"
+tokio-stream = { version = "0.1.18", default-features = false }
 tokio-util = "0.7.18"
 async-trait = "0.1.89"
-futures = "0.3.31"
+futures = { version = "0.3.31", default-features = false, features = ["std"] }
 futures-util = "0.3.31"
 
 # Serialization
@@ -104,7 +104,7 @@ thiserror = "2"
 
 # Logging
 log = "0.4"
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry = { version = "0.32.0", default-features = false }
 opentelemetry_sdk = { version = "0.32.1", default-features = false }
@@ -115,7 +115,7 @@ prost = "0.14"
 
 # Utilities
 uuid = { version = "1.0", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde", "clock"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
 chrono-tz = "0.10.4"
 cron = "0.15.0"
 # Tauri 2.9.2 utilities conflict with time 0.3.48 on current stable Rust.
@@ -179,9 +179,8 @@ clap = { version = "4.6.1", features = ["derive"] }
 crossterm = {version = "0.28", features = ["use-dev-tty"] }
 ratatui = "0.29"
 unicode-width = "0.2"
-pulldown-cmark = "0.11"
-syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
-syntect-tui = "3.0"
+pulldown-cmark = { version = "0.11", default-features = false }
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
 once_cell = "1"
 libc = "0.2"
 arboard = "3"
@@ -203,7 +202,7 @@ similar = "2.5"
 urlencoding = "2.1"
 oxc = { version = "0.138.0", default-features = false, features = ["ast_visit", "codegen", "semantic", "transformer"] }
 oxc-parse = { package = "oxc", version = "0.138.0", default-features = false }
-rquickjs = { version = "0.9", default-features = false, features = ["classes", "properties", "macro"] }
+sqlx = { version = "0.8", default-features = false }
 
 # Tauri (desktop only)
 tauri = { version = "2.11", features = ["unstable", "macos-private-api", "tray-icon"] }
@@ -214,7 +213,6 @@ tauri-plugin-log = "2.8"
 tauri-plugin-autostart = "2.5"
 tauri-plugin-notification = "2.3"
 tauri-plugin-updater = "2.10"
-tauri-plugin-global-shortcut = "2.3"
 tauri-plugin-single-instance = "2.4"
 tauri-plugin-window-state = "2.4"
 tauri-build = { version = "2.6", features = [] }
@@ -232,10 +230,10 @@ foreign-types = "0.5"
 dispatch = "0.2"
 block2 = "0.6"
 objc2 = "0.6"
-objc2-foundation = "0.3"
-objc2-app-kit = "0.3"
-objc2-vision = { version = "0.3.2", features = ["VNRecognizeTextRequest", "VNRequest", "VNObservation", "VNRequestHandler", "VNUtils", "VNTypes", "objc2-core-foundation"] }
-objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "WKPDFConfiguration", "block2", "objc2-app-kit"] }
+objc2-foundation = { version = "0.3", default-features = false }
+objc2-app-kit = { version = "0.3", default-features = false }
+objc2-vision = { version = "0.3.2", default-features = false }
+objc2-web-kit = { version = "0.3", default-features = false }
 tempfile = "3"
 webview2-com = "0.38"
 windows = "0.61"
@@ -265,7 +263,7 @@ local-ip-address = "0.6"
 hostname = "0.4"
 
 # QR code generation
-qrcode = "0.14"
+qrcode = { version = "0.14", default-features = false }
 
 # WebSocket client
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }

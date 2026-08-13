@@ -77,6 +77,7 @@
       "sessions": "會話",
       "project": "目錄",
       "persona": "助理",
+      "todos": "待辦事項",
       "agents": "專業智能體",
       "skills": "技能",
       "tools": "工具",
@@ -87,6 +88,7 @@
     },
     "tooltips": {
       "persona": "助理 — 建立與管理所有助理實例",
+      "todos": "待辦 — 匯總所有定時任務，列表與日曆兩層檢視",
       "agents": "它能調用哪些 Agent",
       "skills": "它懂什麼專項知識 — 技能知識檔案",
       "tools": "它能用什麼工具 — 內置工具與 MCP 服務",
@@ -282,7 +284,7 @@
         "enabledHint": "啟用該任務",
         "scheduleKind": "調度方式",
         "at": "執行時間",
-        "everyMs": "間隔（分鐘）",
+        "everyMs": "間隔",
         "anchorMs": "錨點時間（可選）",
         "cronExpr": "Cron 表達式",
         "timezone": "時區（可選）",
@@ -307,9 +309,13 @@
         "cron": "Cron"
       },
       "scheduleSummary": {
-        "every": "每 {{everyMinutes}} 分鐘",
         "cron": "Cron: {{expr}}",
-        "cronWithTz": "Cron: {{expr}} · {{tz}}"
+        "cronWithTz": "Cron: {{expr}} · {{tz}}",
+        "everyUnit": {
+          "minute": "每 {{value}} 分鐘",
+          "hour": "每 {{value}} 小時",
+          "day": "每 {{value}} 天"
+        }
       },
       "targets": {
         "session": "會話",
@@ -356,6 +362,11 @@
         "promptRequired": "請輸入任務內容",
         "workspaceRequired": "請輸入工作區路徑",
         "sessionRequired": "請選擇會話"
+      },
+      "intervalUnits": {
+        "minute": "分鐘",
+        "hour": "小時",
+        "day": "天"
       }
     },
     "workspaces": {
@@ -1173,6 +1184,7 @@
     "browser": "瀏覽器",
     "insights": "洞察",
     "assistant": "助理",
+    "todos": "待辦事項",
     "shell": "Shell",
     "panelView": "面板視圖"
   },
@@ -1538,5 +1550,14 @@
   },
   "collapse": "收合",
   "expand": "展開",
-  "retry": "重試"
+  "retry": "重試",
+  "dateTimeField": {
+    "label": "日期與時間",
+    "openPicker": "開啟日期選擇器",
+    "pickerLabel": "選擇日期",
+    "previousMonth": "上個月",
+    "nextMonth": "下個月",
+    "now": "此刻",
+    "close": "關閉"
+  }
 }

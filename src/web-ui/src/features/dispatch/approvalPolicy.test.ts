@@ -10,6 +10,7 @@ describe('dispatch approval policy', () => {
   it('starts a dispatch session on the stored local permission default', () => {
     expect(dispatchApprovalPolicyFromSessionMode('ask')).toBe('remote');
     expect(dispatchApprovalPolicyFromSessionMode('auto_approve')).toBe('auto');
+    expect(dispatchApprovalPolicyFromSessionMode('deny')).toBe('reject-and-report');
     // Full access already resolves every ask, so nothing is worth forwarding.
     expect(dispatchApprovalPolicyFromSessionMode('full_access')).toBe('auto');
   });

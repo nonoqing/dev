@@ -4677,6 +4677,8 @@ mod tests {
             target: RoundInjectionTarget::CurrentRunningTurn,
             content: "test injection".to_string(),
             display_content: "test injection".to_string(),
+            attachments: Vec::new(),
+            metadata: serde_json::Map::new(),
             created_at: SystemTime::now(),
         }
     }

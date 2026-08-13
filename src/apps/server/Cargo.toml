@@ -10,7 +10,7 @@ name = "bitfun-server"
 path = "src/main.rs"
 
 [dependencies]
-bitfun-core = { path = "../../crates/assembly/core", default-features = false, features = ["product-full"] }
+bitfun-core = { path = "../../crates/assembly/core", features = ["product-full"] }
 bitfun-observability = { path = "../../crates/execution/observability" }
 bitfun-observability-otel = { path = "../../crates/services/observability-otel" }
 

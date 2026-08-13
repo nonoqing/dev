@@ -25,6 +25,14 @@ export const requiredContentRules = [
       'services-core must compile concrete service owners only through their declared capability features',
     patterns: [
       {
+        regex: /#\[cfg\(feature = "diagnostics"\)\]\s*pub mod diagnostics;/,
+        message: 'missing diagnostic redaction capability source gate',
+      },
+      {
+        regex: /#\[cfg\(feature = "diff"\)\]\s*pub mod diff;/,
+        message: 'missing local diff capability source gate',
+      },
+      {
         regex: /#\[cfg\(any\(feature = "local-storage", feature = "runtime-ownership"\)\)\]\s*mod file_lock;/,
         message: 'missing shared file lock owner source gate',
       },
@@ -75,6 +83,25 @@ export const requiredContentRules = [
       {
         regex: /#\[cfg\(feature = "workspace-instructions"\)\]\s*pub mod workspace_instructions;/,
         message: 'missing workspace-instructions source gate',
+      },
+    ],
+  },
+  {
+    path: 'src/crates/services/services-core/src/workspace_text.rs',
+    reason:
+      'workspace text contracts stay synchronous while bounded local IO requires its runtime owner',
+    patterns: [
+      {
+        regex: /pub fn normalize_workspace_relative_path\b/,
+        message: 'missing feature-free workspace path normalization contract',
+      },
+      {
+        regex: /#\[cfg\(feature = "workspace-text-runtime"\)\]\s*pub async fn read_workspace_relative_text_bounded\b/s,
+        message: 'bounded workspace text reads must stay behind workspace-text-runtime',
+      },
+      {
+        regex: /#\[cfg\(feature = "workspace-text-runtime"\)\]\s*pub async fn resolve_workspace_relative_entry\b/s,
+        message: 'workspace entry resolution must stay behind workspace-text-runtime',
       },
     ],
   },
@@ -187,7 +214,7 @@ export const requiredContentRules = [
         message: 'serde_yaml must remain optional in services-core',
       },
       {
-        regex: /markdown = \["dep:serde_yaml"\]/,
+        regex: /markdown = \[[^\]]*"dep:serde_yaml"[^\]]*\]/,
         message: 'missing explicit markdown feature for services-core',
       },
     ],
@@ -432,7 +459,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/contracts/core-types/tests/lsp_contracts.rs',
+    path: 'src/crates/contracts/core-types/tests/core_type_contracts/lsp_contracts.rs',
     reason:
       'core-types must keep LSP manifest serialization, default-value, and placeholder regressions',
     patterns: [
@@ -1513,7 +1540,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/assembly/product-capabilities/tests/product_capabilities.rs',
+    path: 'src/crates/assembly/product-capabilities/tests/product_capability_contracts/product_capabilities.rs',
     reason:
       'product-capabilities tests must protect product shape facts, runtime service gap reporting, and legacy harness routing',
     patterns: [
@@ -1544,7 +1571,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/assembly/product-capabilities/tests/plugin_product_shape.rs',
+    path: 'src/crates/assembly/product-capabilities/tests/product_capability_contracts/plugin_product_shape.rs',
     reason:
       'product-capabilities plugin shape tests must protect P0 plugin-capable profiles, non-P0 rejection, default availability reasons, and runtime handoff',
     patterns: [
@@ -1571,7 +1598,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/assembly/product-capabilities/tests/product_sdk_assembly.rs',
+    path: 'src/crates/assembly/product-capabilities/tests/product_capability_contracts/product_sdk_assembly.rs',
     reason:
       'product-capabilities must prove product runtime parts can feed the SDK runtime without bitfun-core',
     patterns: [
@@ -3898,12 +3925,12 @@ export const requiredContentRules = [
     patterns: [
       {
         regex:
-          /bitfun-tool-packs = \{ path = "\.\.\/\.\.\/execution\/tool-provider-groups", default-features = false, optional = true \}/,
+          /bitfun-tool-packs = \{ path = "\.\.\/\.\.\/execution\/tool-provider-groups", optional = true \}/,
         message: 'bitfun-tool-packs dependency must stay optional and not force product-full outside the core feature graph',
       },
       {
         regex:
-          /bitfun-services-integrations = \{ path = "\.\.\/\.\.\/services\/services-integrations", default-features = false, optional = true \}/,
+          /bitfun-services-integrations = \{ path = "\.\.\/\.\.\/services\/services-integrations", optional = true \}/,
         message:
           'bitfun-services-integrations dependency must stay optional so local workspace profiles do not compile remote integrations',
       },
@@ -3961,13 +3988,13 @@ export const requiredContentRules = [
       },
       {
         regex:
-          /bitfun-product-domains = \{ path = "\.\.\/\.\.\/contracts\/product-domains", default-features = false, optional = true \}/,
+          /bitfun-product-domains = \{ path = "\.\.\/\.\.\/contracts\/product-domains", optional = true \}/,
         message:
           'bitfun-product-domains dependency must stay optional and not force product-full outside the core feature graph',
       },
       {
         regex:
-          /bitfun-product-capabilities = \{ path = "\.\.\/product-capabilities", default-features = false, optional = true \}/,
+          /bitfun-product-capabilities = \{ path = "\.\.\/product-capabilities", optional = true \}/,
         message:
           'bitfun-product-capabilities dependency must stay optional and not force product-full outside the core feature graph',
       },
@@ -4095,6 +4122,14 @@ export const requiredContentRules = [
       {
         regex: /#\[cfg\(feature = "file-watch"\)\]\s*pub use bitfun_services_integrations::file_watch\b/s,
         message: 'file-watch facade must stay behind its exact feature',
+      },
+      {
+        regex: /#\[cfg\(feature = "diagnostics"\)\]\s*pub use bitfun_services_core::diagnostics\b/s,
+        message: 'diagnostics compatibility facade must stay behind diagnostics',
+      },
+      {
+        regex: /#\[cfg\(feature = "diff"\)\]\s*pub use bitfun_services_core::diff\b/s,
+        message: 'diff compatibility facade must stay behind diff',
       },
       {
         regex: /#\[cfg\(feature = "git"\)\]\s*pub mod git\b/s,
@@ -4844,7 +4879,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/contracts/runtime-ports/tests/plugin_runtime_contracts.rs',
+    path: 'src/crates/contracts/runtime-ports/tests/runtime_port_contracts/plugin_runtime_contracts.rs',
     reason:
       'runtime-ports plugin contract tests must cover typed envelopes, candidate effects, and disabled/projection-only behavior',
     patterns: [
@@ -4901,7 +4936,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/contracts/runtime-ports/tests/plugin_runtime_diagnostics_contracts.rs',
+    path: 'src/crates/contracts/runtime-ports/tests/runtime_port_contracts/plugin_runtime_diagnostics_contracts.rs',
     reason:
       'runtime-ports plugin diagnostics contract tests must cover permission prompts, diagnostics, and quarantine facts',
     patterns: [
@@ -5024,7 +5059,7 @@ export const requiredContentRules = [
     ],
   },
   {
-    path: 'src/crates/contracts/runtime-ports/src/lib.rs',
+    path: 'src/crates/contracts/runtime-ports/src/agent_api.rs',
     reason:
       'runtime-ports must keep remote and subagent runtime boundary contracts DTO/trait-only',
     patterns: [
@@ -5037,6 +5072,7 @@ export const requiredContentRules = [
         message: 'missing remote control state port contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/runtime_event_port.rs',
         regex: /\bpub trait RuntimeEventSink\b/,
         message: 'missing runtime event sink contract',
       },
@@ -5045,62 +5081,77 @@ export const requiredContentRules = [
         message: 'agent session create result must return the persisted session name',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/remote_workspace_ports.rs',
         regex: /\bpub struct RemoteWorkspaceFacts\b/,
         message: 'missing remote workspace facts contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/remote_workspace_ports.rs',
         regex: /\bpub trait RemoteWorkspaceRuntimeHost\b/,
         message: 'missing remote workspace runtime host contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/remote_workspace_ports.rs',
         regex: /\bpub trait RemoteWorkspacePort\b/,
         message: 'missing remote workspace service port contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/remote_workspace_ports.rs',
         regex: /\bpub trait RemoteWorkspaceFileRuntimeHost\b/,
         message: 'missing remote workspace file runtime host contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/remote_workspace_ports.rs',
         regex: /\bpub trait RemoteProjectionPort\b/,
         message: 'missing remote projection service port contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/remote_workspace_ports.rs',
         regex: /\bpub trait RemoteInitialSyncRuntimeHost\b/,
         message: 'missing remote initial sync runtime host contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/remote_workspace_ports.rs',
         regex: /\bremote_workspace_contracts_preserve_workspace_and_session_facts\b/,
         message: 'missing remote workspace contract regression',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/remote_workspace_ports.rs',
         regex: /\bremote_projection_contract_preserves_file_chunk_identity\b/,
         message: 'missing remote projection contract regression',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/workspace_ports.rs',
         regex: /\bpub trait WorkspaceFileSystem\b/,
         message: 'missing workspace file-system port contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/workspace_ports.rs',
         regex: /\bpub trait WorkspaceShell\b/,
         message: 'missing workspace shell port contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/workspace_ports.rs',
         regex: /\bpub struct WorkspaceServices\b/,
         message: 'missing workspace services bundle contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/workspace_ports.rs',
         regex: /\bpub struct WorkspaceCommandOptions\b/,
         message: 'missing workspace command options contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/workspace_ports.rs',
         regex: /\bpub struct WorkspaceCommandResult\b/,
         message: 'missing workspace command result contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/workspace_ports.rs',
         regex: /\bpub struct WorkspaceDirEntry\b/,
         message: 'missing workspace dir-entry contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/workspace_ports.rs',
         regex: /\bworkspace_services_contract_is_runtime_port_owned\b/,
         message: 'missing workspace service ownership regression',
       },
@@ -5177,10 +5228,12 @@ export const requiredContentRules = [
         message: 'missing thread-goal lifecycle request regression',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/lib.rs',
         regex: /\bpub type DialogTriggerSource = AgentSubmissionSource\b/,
         message: 'missing dialog trigger source compatibility contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/lib.rs',
         regex: /\bdialog_trigger_source_reuses_agent_submission_source_contract\b/,
         message: 'missing dialog trigger source alias regression',
       },
@@ -5321,29 +5374,73 @@ export const requiredContentRules = [
         message: 'missing compression contract rendering regression',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/lib.rs',
         regex: /\bpub struct RelatedPath\b/,
         message: 'missing related path request-context contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/lib.rs',
         regex: /\brelated_path_serializes_as_request_context_fact\b/,
         message: 'missing related path serialization regression',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/lib.rs',
         regex: /\bpub struct DelegationPolicy\b/,
         message: 'missing delegation policy contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/lib.rs',
         regex: /\bpub enum SubagentContextMode\b/,
         message: 'missing subagent context mode contract',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/lib.rs',
         regex: /\bdelegation_policy_child_blocks_recursive_spawn_without_losing_depth\b/,
         message: 'missing delegation policy contract regression',
       },
       {
+        path: 'src/crates/contracts/runtime-ports/src/lib.rs',
         regex: /\bsubagent_context_mode_preserves_fork_wire_value\b/,
         message: 'missing subagent context mode contract regression',
       },
+    ],
+  },
+  {
+    path: 'src/crates/contracts/runtime-ports/src/lib.rs',
+    reason: 'runtime-ports capability features must gate their owned source modules and exports',
+    patterns: [
+      { regex: /#\[cfg\(feature = "agent-api"\)\]\r?\nmod agent_api;/, message: 'agent-api must gate its source module' },
+      { regex: /#\[cfg\(feature = "agent-api"\)\]\r?\npub use agent_api::\*;/, message: 'agent-api must gate its public exports' },
+      { regex: /#\[cfg\(feature = "plugin-runtime"\)\]\r?\nmod plugin;/, message: 'plugin-runtime must gate its source module' },
+      { regex: /#\[cfg\(feature = "plugin-runtime"\)\]\r?\npub use plugin::\{/, message: 'plugin-runtime must gate its public exports' },
+      { regex: /#\[cfg\(feature = "script-tool-runtime"\)\]\r?\nmod script_tool;/, message: 'script-tool-runtime must gate its source module' },
+      { regex: /#\[cfg\(feature = "script-tool-runtime"\)\]\r?\npub use script_tool::\{/, message: 'script-tool-runtime must gate its public exports' },
+      { regex: /#\[cfg\(feature = "workspace-ports"\)\]\r?\nmod workspace_ports;/, message: 'workspace-ports must gate its source module' },
+      { regex: /#\[cfg\(feature = "workspace-ports"\)\]\r?\npub use workspace_ports::\*;/, message: 'workspace-ports must gate its public exports' },
+      { regex: /#\[cfg\(feature = "terminal-port"\)\]\r?\nmod terminal_port;/, message: 'terminal-port must gate its source module' },
+      { regex: /#\[cfg\(feature = "terminal-port"\)\]\r?\npub use terminal_port::\*;/, message: 'terminal-port must gate its public exports' },
+      { regex: /#\[cfg\(feature = "remote-exec-port"\)\]\r?\nmod remote_exec_port;/, message: 'remote-exec-port must gate its source module' },
+      { regex: /#\[cfg\(feature = "remote-exec-port"\)\]\r?\npub use remote_exec_port::\*;/, message: 'remote-exec-port must gate its public exports' },
+      { regex: /#\[cfg\(feature = "remote-workspace-ports"\)\]\r?\nmod remote_workspace_ports;/, message: 'remote-workspace-ports must gate its source module' },
+      { regex: /#\[cfg\(feature = "remote-workspace-ports"\)\]\r?\npub use remote_workspace_ports::\*;/, message: 'remote-workspace-ports must gate its public exports' },
+      { regex: /#\[cfg\(feature = "runtime-event-port"\)\]\r?\nmod runtime_event_port;/, message: 'runtime-event-port must gate its source module' },
+      { regex: /#\[cfg\(feature = "runtime-event-port"\)\]\r?\npub use runtime_event_port::\*;/, message: 'runtime-event-port must gate its public exports' },
+      { regex: /#\[cfg\(feature = "git-port"\)\]\r?\nmod git_port;/, message: 'git-port must gate its source module' },
+      { regex: /#\[cfg\(feature = "git-port"\)\]\r?\npub use git_port::\*;/, message: 'git-port must gate its public exports' },
+      { regex: /#\[cfg\(feature = "tool-runtime-handles"\)\]\r?\nmod tool_runtime_handles;/, message: 'tool-runtime-handles must gate its source module' },
+      { regex: /#\[cfg\(feature = "tool-runtime-handles"\)\]\r?\npub use tool_runtime_handles::\*;/, message: 'tool-runtime-handles must gate its public exports' },
+    ],
+  },
+  {
+    path: 'src/crates/execution/tool-contracts/src/lib.rs',
+    reason: 'tool-contract capability features must gate their owned source modules and exports',
+    patterns: [
+      { regex: /#\[cfg\(feature = "acp-bridge"\)\]\r?\npub mod acp_tool_bridge;/, message: 'acp-bridge must gate its source module' },
+      { regex: /#\[cfg\(feature = "acp-bridge"\)\]\r?\npub use acp_tool_bridge::\{/, message: 'acp-bridge must gate its public exports' },
+      { regex: /#\[cfg\(feature = "mcp-bridge"\)\]\r?\npub mod mcp_tool_bridge;/, message: 'mcp-bridge must gate its source module' },
+      { regex: /#\[cfg\(feature = "mcp-bridge"\)\]\r?\npub use mcp_tool_bridge::\{/, message: 'mcp-bridge must gate its public exports' },
+      { regex: /#\[cfg\(feature = "computer-use-contract"\)\]\r?\npub mod computer_use;/, message: 'computer-use-contract must gate its source module' },
+      { regex: /#\[cfg\(feature = "element-token"\)\]\r?\npub mod element_token;/, message: 'element-token must gate its source module' },
     ],
   },
   {

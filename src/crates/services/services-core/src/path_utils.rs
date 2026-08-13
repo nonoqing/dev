@@ -1,10 +1,10 @@
-//! Path and permission utilities with no heavy dependencies.
+//! Path and permission utilities implemented with the standard library.
 //!
 //! This module is **not** feature-gated. It collects functions that only need
-//! `std` (plus the lightweight `dirs`, `sha2`, `hex` crates already declared as
-//! non-optional dependencies) so that consumers without the `filesystem` feature
-//! can still use them. Functions that require `tokio::fs` or the `windows`
-//! crate stay in their gated modules under `filesystem/`.
+//! `std` so that consumers without the `filesystem` feature can still use them.
+//! Functions that require `tokio::fs` or the `windows` crate stay in their gated
+//! modules under `filesystem/`; application data roots and hashed product path
+//! identities remain owned by product assembly.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -315,63 +315,6 @@ pub fn executable_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Lightweight-dep helpers (dirs, sha2, hex — non-optional dependencies).
-// ---------------------------------------------------------------------------
-
-/// Returns the platform-specific base directory for application data.
-///
-/// - Windows: `%APPDATA%` (Roaming), e.g. `C:\Users\xxx\AppData\Roaming`
-/// - macOS: `~/Library/Application Support`
-/// - Other (Linux etc.): `~/.local/share`
-///
-/// Falls back to platform-appropriate default paths when environment
-/// variables are not set.
-pub fn app_data_dir() -> PathBuf {
-    if cfg!(target_os = "windows") {
-        dirs::data_dir().unwrap_or_else(|| PathBuf::from("C:\\ProgramData"))
-    } else if cfg!(target_os = "macos") {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("Library")
-            .join("Application Support")
-    } else {
-        dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
-    }
-}
-
-/// Computes a SHA-256 hex digest of the platform-native byte representation
-/// of a path.
-///
-/// On Unix this uses `OsStr::as_bytes()`; on Windows it uses
-/// `OsStr::encode_wide()` with little-endian bytes so that paths differing
-/// only in unpaired UTF-16 surrogates produce different digests; on other
-/// platforms it falls back to `to_string_lossy().as_bytes()`.
-pub fn native_path_digest(path: &Path) -> String {
-    use sha2::{Digest, Sha256};
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        hex::encode(Sha256::digest(path.as_os_str().as_bytes()))
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        let mut hasher = Sha256::new();
-        for unit in path.as_os_str().encode_wide() {
-            hasher.update(unit.to_le_bytes());
-        }
-        hex::encode(hasher.finalize())
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        hex::encode(Sha256::digest(path.to_string_lossy().as_bytes()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,33 +335,5 @@ mod tests {
             normalize_path_separators(r"src/literal\name.rs"),
             r"src/literal\name.rs"
         );
-    }
-
-    #[test]
-    fn native_path_digest_is_deterministic() {
-        let path = Path::new("/some/path");
-        assert_eq!(native_path_digest(path), native_path_digest(path));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn native_path_digest_distinguishes_lossy_utf16_paths() {
-        use std::os::windows::ffi::OsStringExt;
-
-        let first = PathBuf::from(OsString::from_wide(&[
-            b'C' as u16,
-            b':' as u16,
-            b'\\' as u16,
-            0xd800,
-        ]));
-        let second = PathBuf::from(OsString::from_wide(&[
-            b'C' as u16,
-            b':' as u16,
-            b'\\' as u16,
-            0xd801,
-        ]));
-
-        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
-        assert_ne!(native_path_digest(&first), native_path_digest(&second));
     }
 }

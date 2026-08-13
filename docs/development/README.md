@@ -17,6 +17,7 @@ of stable architecture bodies.
 | Host, platform, Tauri, and remote rules | [`host-platform-and-remote.md`](host-platform-and-remote.md) | [`host-platform-and-remote.zh-CN.md`](host-platform-and-remote.zh-CN.md) |
 | i18n operations | [`i18n.md`](i18n.md) | — |
 | Repository logging policy | [`logging.md`](logging.md) | — |
+| Release channels, signing, and packaging | [`releasing.md`](releasing.md) | — |
 | Stable UI test IDs | [`ui-testids.md`](ui-testids.md) | [`ui-testids.zh-CN.md`](ui-testids.zh-CN.md) |
 | Verification selector | [`verification.md`](verification.md) | [`verification.zh-CN.md`](verification.zh-CN.md) |
 

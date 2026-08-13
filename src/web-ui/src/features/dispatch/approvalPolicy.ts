@@ -10,6 +10,7 @@
  */
 
 import type { ChatInputPermissionMode } from '@/flow_chat/components/ChatInputWorkspaceStrip';
+import { chatInputPermissionMode } from '@/flow_chat/utils/permissionMode';
 import type { SessionPermissionMode } from '@/infrastructure/api/service-api/AgentAPI';
 import type { DispatchApprovalPolicy } from './types';
 
@@ -41,7 +42,7 @@ export function dispatchApprovalPolicyFromPermissionMode(
 export function dispatchApprovalPolicyFromSessionMode(
   mode: SessionPermissionMode,
 ): DispatchApprovalPolicy {
-  return dispatchApprovalPolicyFromPermissionMode(mode === 'auto_approve' ? 'auto' : mode);
+  return dispatchApprovalPolicyFromPermissionMode(chatInputPermissionMode(mode));
 }
 
 export function permissionModeFromDispatchApprovalPolicy(

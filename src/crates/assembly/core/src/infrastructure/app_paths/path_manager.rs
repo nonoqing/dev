@@ -240,9 +240,7 @@ impl PathManager {
     /// - macOS: ~/Library/Application Support/BitFun/skills/
     /// - Linux: ~/.local/share/BitFun/skills/
     pub fn user_skills_dir(&self) -> PathBuf {
-        bitfun_services_core::path_utils::app_data_dir()
-            .join("BitFun")
-            .join("skills")
+        Self::app_data_dir().join("BitFun").join("skills")
     }
 
     /// Get BitFun-managed built-in skills directory under the user skills root.
@@ -469,10 +467,44 @@ impl PathManager {
             dunce::canonicalize(workspace_path).unwrap_or_else(|_| workspace_path.to_path_buf());
         self.project_runtime_root(workspace_path)
             .join("plugin-runtime")
-            .join(bitfun_services_core::path_utils::native_path_digest(
-                &canonical,
-            ))
+            .join(Self::native_path_digest(&canonical))
             .join("trust.json")
+    }
+
+    fn app_data_dir() -> PathBuf {
+        if cfg!(target_os = "windows") {
+            dirs::data_dir().unwrap_or_else(|| PathBuf::from("C:\\ProgramData"))
+        } else if cfg!(target_os = "macos") {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join("Library")
+                .join("Application Support")
+        } else {
+            dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
+        }
+    }
+
+    pub(crate) fn native_path_digest(path: &Path) -> String {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            return hex::encode(Sha256::digest(path.as_os_str().as_bytes()));
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            let mut hasher = Sha256::new();
+            for unit in path.as_os_str().encode_wide() {
+                hasher.update(unit.to_le_bytes());
+            }
+            return hex::encode(hasher.finalize());
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            hex::encode(Sha256::digest(path.to_string_lossy().as_bytes()))
+        }
     }
 
     fn project_runtime_slug(&self, workspace_path: &Path) -> String {
@@ -773,9 +805,7 @@ mod tests {
             pm.project_plugin_trust_file(workspace),
             pm.project_runtime_root(workspace)
                 .join("plugin-runtime")
-                .join(bitfun_services_core::path_utils::native_path_digest(
-                    workspace
-                ))
+                .join(PathManager::native_path_digest(workspace))
                 .join("trust.json")
         );
     }

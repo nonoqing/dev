@@ -1326,11 +1326,14 @@ pub async fn run() {
             set_native_prompt_command_conflict_choice_command,
             expand_external_prompt_command_command,
             set_external_tool_target_decision_command,
+            set_external_tool_targets_enabled_command,
             set_external_tool_conflict_choice_command,
             set_external_subagent_activation_command,
+            set_external_subagents_enabled_command,
             set_external_subagent_model_binding_command,
             choose_external_subagent_conflict_command,
             set_external_mcp_server_decision_command,
+            set_external_mcp_servers_enabled_command,
             choose_external_mcp_conflict_command,
             api::context_upload_api::upload_image_contexts,
             get_all_tools_info,
@@ -1556,7 +1559,6 @@ pub async fn run() {
             load_session_turns,
             get_session_usage_report,
             save_session_turn,
-            record_local_command_turn,
             save_session_metadata,
             export_session_transcript,
             delete_persisted_session,
@@ -2668,7 +2670,7 @@ fn spawn_runtime_log_level_listener(default_level: log::LevelFilter) {
 fn create_event_emitter(
     transport: Arc<TauriTransportAdapter>,
 ) -> Arc<dyn bitfun_core::infrastructure::events::EventEmitter> {
-    use bitfun_core::infrastructure::events::TransportEmitter;
+    use bitfun_transport::TransportEmitter;
     let inner: Arc<dyn bitfun_core::infrastructure::events::EventEmitter> =
         Arc::new(TransportEmitter::new(transport));
     api::remote_connect_api::wrap_peer_aware_emitter(inner)

@@ -7,6 +7,7 @@ export function runManifestParserSelfTest({
   parseManifestDependencies,
   manifestDependencyMatches,
   matchingForbiddenDependency,
+  acpClosedFeatureProfileRules,
   coreClosedFeatureProfileRules,
   coreProductFullFeatureAssemblyRule,
   ownerCrateFeatureAssemblyRules,
@@ -151,6 +152,53 @@ export function runManifestParserSelfTest({
   });
   if (!orphanErrors.some((error) => error.includes('orphan_contracts.rs'))) {
     throw new Error('explicit integration-test topology must reject an orphan leaf test');
+  }
+  const reviewedLeafTargets = agentRuntimeIntegrationTestTargets.map((target) => (
+    target.path === 'tests/agent_definition_contracts.rs'
+      ? {
+          ...target,
+          leaves: ['tests/agent_definition_contracts/prompt_contracts.rs'],
+          forbidRequiredFeatures: true,
+        }
+      : target
+  ));
+  const missingReviewedLeafErrors = validateExplicitIntegrationTestTopology({
+    ...explicitTestFixture,
+    expectedTargets: reviewedLeafTargets,
+    leafRustFiles: [],
+    leafSources: new Map(),
+  });
+  if (!missingReviewedLeafErrors.some((error) => error.includes('grouped test leaves'))) {
+    throw new Error('explicit integration-test topology must reject a removed reviewed leaf');
+  }
+  for (const requiredFeaturesDeclaration of [
+    'required-features = [\n  "opt-in",\n]',
+    '"required\\u002dfeatures" = ["opt-in"]',
+  ]) {
+    const unexpectedRequiredFeaturesErrors = validateExplicitIntegrationTestTopology({
+      ...explicitTestFixture,
+      expectedTargets: reviewedLeafTargets,
+      manifestText: explicitTestManifest.replace(
+        'path = "tests/agent_definition_contracts.rs"',
+        `path = "tests/agent_definition_contracts.rs"\n${requiredFeaturesDeclaration}`,
+      ),
+    });
+    if (!unexpectedRequiredFeaturesErrors.some((error) => error.includes('required-features'))) {
+      throw new Error(`ungated explicit test topology accepted: ${requiredFeaturesDeclaration}`);
+    }
+  }
+  const independentRequiredFeaturesErrors = validateExplicitIntegrationTestTopology({
+    ...explicitTestFixture,
+    expectedTargets: reviewedLeafTargets,
+    manifestText: explicitTestManifest.replace(
+      'path = "tests/native_hook_execution_contracts.rs"',
+      'path = "tests/native_hook_execution_contracts.rs"\nrequired-features = ["native-hooks"]',
+    ),
+  });
+  if (independentRequiredFeaturesErrors.length > 0) {
+    throw new Error(
+      `target-scoped required-features contract rejected an independent target: ${independentRequiredFeaturesErrors.join('; ')}`,
+    );
   }
   const reviewedLeafCfgFixture = {
     ...explicitTestFixture,
@@ -316,6 +364,8 @@ export function runManifestParserSelfTest({
 
   for (const featureName of [
     'agent-runtime',
+    'diagnostics',
+    'diff',
     'announcement',
     'canvas-runtime',
     'debug-log',
@@ -323,6 +373,7 @@ export function runManifestParserSelfTest({
     'file-watch',
     'filesystem',
     'git',
+    'i18n-runtime',
     'lsp',
     'local-storage',
     'process-runtime',
@@ -352,11 +403,33 @@ export function runManifestParserSelfTest({
   const coreManifest = 'src/crates/assembly/core/Cargo.toml';
   const servicesCoreManifest = 'src/crates/services/services-core/Cargo.toml';
   const expectedClosedCoreProfiles = [
+    [coreManifest, 'default', []],
+    [coreManifest, 'i18n-runtime', ['dep:fluent-bundle', 'dep:unic-langid']],
+    [coreManifest, 'diagnostics', ['bitfun-services-core/diagnostics']],
+    [coreManifest, 'diff', ['bitfun-services-core/diff']],
     [servicesCoreManifest, 'default', []],
+    [servicesCoreManifest, 'diagnostics', ['dep:regex']],
+    [
+      servicesCoreManifest,
+      'diff',
+      ['dep:similar', 'dep:tokio', 'tokio/rt', 'tokio/time'],
+    ],
     [
       servicesCoreManifest,
       'filesystem',
-      ['dep:base64', 'dep:chrono', 'dep:ignore', 'tokio/fs', 'dep:windows', 'windows/Win32_Foundation', 'windows/Win32_Storage_FileSystem'],
+      [
+        'dep:base64',
+        'dep:chrono',
+        'dep:ignore',
+        'dep:regex',
+        'dep:sha2',
+        'dep:tokio',
+        'dep:windows',
+        'tokio/fs',
+        'tokio/rt',
+        'windows/Win32_Foundation',
+        'windows/Win32_Storage_FileSystem',
+      ],
     ],
     [
       servicesCoreManifest,
@@ -367,9 +440,15 @@ export function runManifestParserSelfTest({
         'dep:chrono',
         'dep:fs2',
         'dep:libc',
+        'dep:regex',
+        'dep:sha2',
+        'dep:similar',
+        'dep:tokio',
         'dep:windows',
         'tokio/fs',
+        'tokio/rt',
         'tokio/sync',
+        'tokio/time',
         'windows/Win32_Foundation',
         'windows/Win32_Storage_FileSystem',
       ],
@@ -379,11 +458,14 @@ export function runManifestParserSelfTest({
       'process-runtime',
       [
         'dep:libc',
+        'dep:tokio',
         'dep:which',
         'dep:win32job',
         'dep:windows',
         'tokio/io-util',
         'tokio/process',
+        'tokio/rt',
+        'tokio/time',
         'windows/Win32_Foundation',
         'windows/Win32_System_Diagnostics_ToolHelp',
         'windows/Win32_System_Threading',
@@ -392,7 +474,20 @@ export function runManifestParserSelfTest({
     [
       servicesCoreManifest,
       'workspace-instructions',
-      ['dep:globset', 'dep:serde_yaml', 'tokio/fs', 'tokio/io-util'],
+      [
+        'dep:globset',
+        'dep:regex',
+        'dep:serde_yaml',
+        'dep:tokio',
+        'tokio/fs',
+        'tokio/io-util',
+        'tokio/rt',
+      ],
+    ],
+    [
+      servicesCoreManifest,
+      'workspace-text-runtime',
+      ['dep:tokio', 'tokio/rt'],
     ],
     [
       servicesCoreManifest,
@@ -415,6 +510,8 @@ export function runManifestParserSelfTest({
         'dep:anyhow',
         'dep:async-trait',
         'dep:bitfun-runtime-ports',
+        'bitfun-runtime-ports/runtime-event-port',
+        'bitfun-runtime-ports/workspace-ports',
         'dep:dunce',
         'process-runtime',
         'tokio/fs',
@@ -423,12 +520,20 @@ export function runManifestParserSelfTest({
       ],
     ],
     [servicesCoreManifest, 'session-git', ['local-storage', 'dep:git2']],
-    [servicesCoreManifest, 'workspace-identity', ['dep:dunce']],
-    [coreManifest, 'dispatch-store', ['local-storage', 'bitfun-services-core/dispatch-workspace']],
+    [servicesCoreManifest, 'workspace-identity', ['dep:dunce', 'dep:sha2']],
+    [
+      coreManifest,
+      'dispatch-store',
+      ['dep:base64', 'local-storage', 'bitfun-services-core/dispatch-workspace'],
+    ],
     [coreManifest, 'filesystem', ['bitfun-services-core/filesystem']],
-    [coreManifest, 'local-storage', ['bitfun-services-core/local-storage']],
+    [
+      coreManifest,
+      'local-storage',
+      ['dep:bitfun-agent-tools', 'bitfun-services-core/local-storage'],
+    ],
     [coreManifest, 'process-runtime', ['bitfun-services-core/process-runtime']],
-    [coreManifest, 'lsp', ['dep:notify', 'bitfun-services-core/lsp']],
+    [coreManifest, 'lsp', ['dep:notify', 'bitfun-services-core/lsp', 'tokio/macros']],
     [coreManifest, 'terminal', ['dep:terminal-core']],
     [
       coreManifest,
@@ -489,6 +594,63 @@ export function runManifestParserSelfTest({
         .some((reference) => reference.includes('product-full'))
     ) {
       throw new Error(`core closed feature profile must not reach product-full in ${featureName}`);
+    }
+  }
+  const acpProfiles = new Map(
+    acpClosedFeatureProfileRules.map((rule) => [rule.featureName, rule]),
+  );
+  const expectedAcpProfiles = new Map([
+    ['default', ['client', 'server']],
+    [
+      'client',
+      [
+        'bitfun-agent-tools/acp-bridge',
+        'dep:futures',
+        'dep:serde',
+        'dep:bitfun-core',
+        'bitfun-core/agent-runtime',
+        'bitfun-core/ssh-remote',
+      ],
+    ],
+    [
+      'server',
+      [
+        'dep:bitfun-agent-tools',
+        'dep:bitfun-agent-runtime',
+        'dep:bitfun-core-types',
+        'dep:bitfun-core',
+        'dep:sha2',
+        'bitfun-core/agent-runtime',
+        'bitfun-core/document-read',
+        'bitfun-core/subscription-auth',
+        'bitfun-core/deep-research',
+        'bitfun-core/lsp',
+        'bitfun-core/external-sources',
+        'bitfun-core/tools-basic',
+        'bitfun-core/tools-git',
+        'bitfun-core/tools-mcp',
+        'bitfun-core/tools-browser-web',
+        'bitfun-core/tools-computer-use',
+        'bitfun-core/tools-image-analysis',
+        'bitfun-core/tools-miniapp',
+        'bitfun-core/tools-canvas',
+        'bitfun-core/tools-agent-control',
+      ],
+    ],
+  ]);
+  for (const [featureName, expectedReferences] of expectedAcpProfiles) {
+    const rule = acpProfiles.get(featureName);
+    if (!rule?.exact) {
+      throw new Error(`ACP closed feature profile must cover ${featureName} exactly`);
+    }
+    if (
+      rule.requiredFeatureRefs.length !== expectedReferences.length
+      || expectedReferences.some((reference) => !rule.requiredFeatureRefs.includes(reference))
+    ) {
+      throw new Error(`ACP closed feature profile has stale references for ${featureName}`);
+    }
+    if (rule.requiredFeatureRefs.some((reference) => reference.includes('product-full'))) {
+      throw new Error(`ACP closed feature profile must not reach product-full in ${featureName}`);
     }
   }
   const ownerFeatureRulePaths = new Set(
@@ -912,6 +1074,7 @@ export function runManifestParserSelfTest({
     'schannel',
     'win32job',
     'bitfun-relay-service',
+    'bitfun-transport',
     'htmd',
     'legible',
     'readability-js',
@@ -930,6 +1093,7 @@ export function runManifestParserSelfTest({
     'aes',
     'aes-gcm',
     'bitfun-relay-service',
+    'bitfun-transport',
     'eventsource-stream',
     'git2',
     'glob',
@@ -989,12 +1153,42 @@ export function runManifestParserSelfTest({
     ['ignore', ['filesystem']],
     ['libc', ['local-storage', 'process-runtime']],
     ['notify', ['lsp']],
+    [
+      'regex',
+      ['diagnostics', 'filesystem', 'local-storage', 'markdown', 'workspace-instructions'],
+    ],
     ['rusqlite', ['permission']],
     ['serde_yaml', ['markdown', 'workspace-instructions']],
+    ['similar', ['diff', 'local-storage']],
+    [
+      'sha2',
+      [
+        'dispatch-workspace',
+        'filesystem',
+        'local-storage',
+        'runtime-ownership',
+        'workspace-identity',
+      ],
+    ],
     ['which', ['process-runtime']],
     ['win32job', ['process-runtime']],
     ['windows', ['json-io', 'local-storage', 'process-runtime']],
     ['zip', ['lsp']],
+    [
+      'tokio',
+      [
+        'diff',
+        'filesystem',
+        'json-io',
+        'local-storage',
+        'lsp',
+        'permission',
+        'process-runtime',
+        'workspace-instructions',
+        'workspace-runtime',
+        'workspace-text-runtime',
+      ],
+    ],
   ]);
   for (const [dependencyName, ownerFeatures] of expectedServicesCoreOwners) {
     const dependency = servicesCoreOptionalOwnerRule?.dependencies.find(
@@ -2278,7 +2472,7 @@ export function runManifestParserSelfTest({
 
   const requiredContentContracts = [
     {
-      path: 'src/crates/contracts/runtime-ports/src/lib.rs',
+      path: 'src/crates/contracts/runtime-ports/src/agent_api.rs',
       contracts: [
         'AgentDialogTurnRequest',
         'AgentDialogPrependedReminder',
@@ -3180,7 +3374,7 @@ export function runManifestParserSelfTest({
       ],
     },
     {
-      path: 'src/crates/assembly/product-capabilities/tests/product_capabilities.rs',
+      path: 'src/crates/assembly/product-capabilities/tests/product_capability_contracts/product_capabilities.rs',
       contracts: [
         'product_assembly_plan_exposes_build_feature_groups_explicitly',
         'product_runtime_assembly_reports_runtime_service_capability_gaps',
@@ -3188,7 +3382,7 @@ export function runManifestParserSelfTest({
       ],
     },
     {
-      path: 'src/crates/assembly/product-capabilities/tests/plugin_product_shape.rs',
+      path: 'src/crates/assembly/product-capabilities/tests/product_capability_contracts/plugin_product_shape.rs',
       contracts: [
         'executable_plugin_runtime_is_limited_to_product_full_desktop_and_cli',
         'executable_plugin_runtime_client_builds_agent_runtime_parts',
@@ -3227,7 +3421,7 @@ export function runManifestParserSelfTest({
       ],
     },
     {
-      path: 'src/crates/assembly/product-capabilities/tests/product_sdk_assembly.rs',
+      path: 'src/crates/assembly/product-capabilities/tests/product_capability_contracts/product_sdk_assembly.rs',
       contracts: [
         'product_runtime_parts_can_build_agent_runtime_sdk_without_core',
         'sdk_delivery_profile_builds_shared_runtime_owner_ceiling_without_bitfun_core',
@@ -4222,11 +4416,11 @@ export function runManifestParserSelfTest({
     {
       path: 'src/crates/assembly/core/Cargo.toml',
       contracts: [
-        'bitfun-product-capabilities = \\{ path = "\\.\\.\\/product-capabilities", default-features = false, optional = true \\}',
+        'bitfun-product-capabilities = \\{ path = "\\.\\.\\/product-capabilities", optional = true \\}',
         'bitfun-ai-adapters = \\{ path = "\\.\\.\\/\\.\\.\\/adapters\\/ai-adapters", optional = true \\}',
-        'bitfun-tool-packs = \\{ path = "\\.\\.\\/\\.\\.\\/execution\\/tool-provider-groups", default-features = false, optional = true \\}',
-        'bitfun-services-integrations = \\{ path = "\\.\\.\\/\\.\\.\\/services\\/services-integrations", default-features = false, optional = true \\}',
-        'bitfun-product-domains = \\{ path = "\\.\\.\\/\\.\\.\\/contracts\\/product-domains", default-features = false, optional = true \\}',
+        'bitfun-tool-packs = \\{ path = "\\.\\.\\/\\.\\.\\/execution\\/tool-provider-groups", optional = true \\}',
+        'bitfun-services-integrations = \\{ path = "\\.\\.\\/\\.\\.\\/services\\/services-integrations", optional = true \\}',
+        'bitfun-product-domains = \\{ path = "\\.\\.\\/\\.\\.\\/contracts\\/product-domains", optional = true \\}',
         'dep:bitfun-ai-adapters',
         'ai-adapter-runtime',
         'canvas-runtime',
