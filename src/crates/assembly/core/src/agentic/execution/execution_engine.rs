@@ -102,8 +102,12 @@ fn compression_source_class(source: &str) -> CompressionSource {
     }
 }
 
-fn ensure_primary_session_goal_tools(allowed_tools: &mut Vec<String>, is_subagent: bool) {
-    if !is_subagent {
+fn ensure_primary_session_goal_tools(
+    allowed_tools: &mut Vec<String>,
+    agent_type: &str,
+    is_subagent: bool,
+) {
+    if !is_subagent && agent_type != crate::agentic::agents::CODING_MINIMAL_MODE_ID {
         ensure_thread_goal_tools(allowed_tools);
     }
 }
@@ -2370,6 +2374,7 @@ impl ExecutionEngine {
         let mut allowed_tools = tool_policy.allowed_tools.clone();
         ensure_primary_session_goal_tools(
             &mut allowed_tools,
+            &context.agent_type,
             context.subagent_parent_info.is_some(),
         );
         let enable_tools = context
@@ -2383,6 +2388,9 @@ impl ExecutionEngine {
             &context.agent_type,
             context.workspace.as_ref(),
             context.workspace_services.as_ref(),
+            Some(&context.session_id),
+            context.terminal_port.as_ref(),
+            context.remote_exec_port.as_ref(),
             Some(&primary_model_facts),
             &tool_manifest_context_vars,
             &context.runtime_tool_restrictions,
@@ -2407,7 +2415,12 @@ impl ExecutionEngine {
         let runtime_context_needs = tool_manifest
             .as_ref()
             .map(|manifest| {
-                RuntimeContextNeeds::from_tool_names(manifest.allowed_tool_names.iter())
+                RuntimeContextNeeds::from_tool_names(
+                    manifest
+                        .tool_definitions
+                        .iter()
+                        .map(|definition| definition.name.as_str()),
+                )
             })
             .unwrap_or_default();
         // Snapshot prompt-visible tool definitions once for this turn. Do not
@@ -3692,6 +3705,7 @@ impl ExecutionEngine {
         let mut allowed_tools = tool_policy.allowed_tools.clone();
         ensure_primary_session_goal_tools(
             &mut allowed_tools,
+            &agent_type,
             context.subagent_parent_info.is_some(),
         );
         let enable_tools = context
@@ -3718,6 +3732,9 @@ impl ExecutionEngine {
             &agent_type,
             context.workspace.as_ref(),
             context.workspace_services.as_ref(),
+            Some(&context.session_id),
+            context.terminal_port.as_ref(),
+            context.remote_exec_port.as_ref(),
             Some(&primary_model_facts),
             &tool_manifest_context_vars,
             &context.runtime_tool_restrictions,
@@ -3752,7 +3769,12 @@ impl ExecutionEngine {
         let runtime_context_needs = tool_manifest
             .as_ref()
             .map(|manifest| {
-                RuntimeContextNeeds::from_tool_names(manifest.allowed_tool_names.iter())
+                RuntimeContextNeeds::from_tool_names(
+                    manifest
+                        .tool_definitions
+                        .iter()
+                        .map(|definition| definition.name.as_str()),
+                )
             })
             .unwrap_or_default();
         // We do not currently keep a session-level cache of resolved tool
@@ -5316,14 +5338,18 @@ mod tests {
     #[test]
     fn primary_session_tool_policy_restores_goal_tools_but_subagents_stay_scoped() {
         let mut primary_tools = vec!["Read".to_string()];
-        ensure_primary_session_goal_tools(&mut primary_tools, false);
+        ensure_primary_session_goal_tools(&mut primary_tools, "agentic", false);
         for tool_name in THREAD_GOAL_TOOL_NAMES {
             assert!(primary_tools.iter().any(|tool| tool == tool_name));
         }
 
         let mut subagent_tools = vec!["Read".to_string()];
-        ensure_primary_session_goal_tools(&mut subagent_tools, true);
+        ensure_primary_session_goal_tools(&mut subagent_tools, "Explore", true);
         assert_eq!(subagent_tools, vec!["Read".to_string()]);
+
+        let mut minimal_tools = vec!["Read".to_string()];
+        ensure_primary_session_goal_tools(&mut minimal_tools, "coding-minimal", false);
+        assert_eq!(minimal_tools, vec!["Read".to_string()]);
     }
 
     #[test]

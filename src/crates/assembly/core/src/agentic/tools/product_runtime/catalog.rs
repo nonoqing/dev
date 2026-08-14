@@ -365,10 +365,13 @@ mod tests {
     use crate::agentic::tools::framework::{
         DynamicMcpToolInfo, DynamicToolInfo, Tool, ToolExposure, ToolResult,
     };
+    use crate::agentic::tools::implementations::exec_command::{
+        background_command_output_capture, BackgroundCommandOutputStatus,
+        StartBackgroundCommandOutputCapture,
+    };
     use crate::agentic::tools::registry::create_tool_registry;
     use crate::agentic::tools::tool_context_runtime::ToolUseContext;
     use crate::agentic::tools::ToolRuntimeRestrictions;
-    #[cfg(feature = "external-sources")]
     use crate::agentic::WorkspaceBinding;
     use bitfun_agent_tools::{
         GetToolSpecCatalogProvider, ToolCatalogSnapshotProvider, CALL_DEFERRED_TOOL_NAME,
@@ -376,11 +379,161 @@ mod tests {
     };
     use serde_json::{json, Value};
     use std::collections::HashMap;
-    #[cfg(feature = "external-sources")]
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
     use std::sync::Arc;
 
+    static NEXT_MINIMAL_TEST_EXEC_SESSION_ID: AtomicI32 = AtomicI32::new(700_000);
+
     struct DeferredMcpCatalogTool;
+
+    #[derive(Debug)]
+    struct SessionStateTerminalPort {
+        active: Arc<AtomicBool>,
+    }
+
+    impl bitfun_runtime_ports::RuntimeServicePort for SessionStateTerminalPort {
+        fn capability(&self) -> bitfun_runtime_ports::RuntimeServiceCapability {
+            bitfun_runtime_ports::RuntimeServiceCapability::Terminal
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl bitfun_runtime_ports::TerminalPort for SessionStateTerminalPort {
+        async fn is_session_active(
+            &self,
+            _session_id: i32,
+        ) -> bitfun_runtime_ports::PortResult<bool> {
+            Ok(self.active.load(Ordering::SeqCst))
+        }
+
+        async fn exec_command(
+            &self,
+            _request: bitfun_runtime_ports::TerminalExecCommandRequest,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::TerminalExecCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn exec_command_streaming(
+            &self,
+            _request: bitfun_runtime_ports::TerminalExecCommandRequest,
+            _output_sink: bitfun_runtime_ports::TerminalExecStreamingOutputSink,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::TerminalExecCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn write_stdin(
+            &self,
+            _request: bitfun_runtime_ports::TerminalWriteStdinRequest,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::TerminalExecCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn write_stdin_streaming(
+            &self,
+            _request: bitfun_runtime_ports::TerminalWriteStdinRequest,
+            _output_sink: bitfun_runtime_ports::TerminalExecStreamingOutputSink,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::TerminalExecCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn send_stdin(
+            &self,
+            _request: bitfun_runtime_ports::TerminalSendStdinRequest,
+        ) -> bitfun_runtime_ports::PortResult<()> {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn control_session(
+            &self,
+            _request: bitfun_runtime_ports::TerminalExecControlRequest,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::TerminalExecCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+    }
+
+    #[derive(Debug)]
+    struct SessionStateRemoteExecPort {
+        active: Arc<AtomicBool>,
+    }
+
+    impl bitfun_runtime_ports::RuntimeServicePort for SessionStateRemoteExecPort {
+        fn capability(&self) -> bitfun_runtime_ports::RuntimeServiceCapability {
+            bitfun_runtime_ports::RuntimeServiceCapability::RemoteExec
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl bitfun_runtime_ports::RemoteExecPort for SessionStateRemoteExecPort {
+        async fn is_session_active(
+            &self,
+            _session_id: i32,
+        ) -> bitfun_runtime_ports::PortResult<bool> {
+            Ok(self.active.load(Ordering::SeqCst))
+        }
+
+        async fn exec_command_once(
+            &self,
+            _request: bitfun_runtime_ports::RemoteExecOneShotCommandRequest,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::RemoteExecOneShotCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn exec_command(
+            &self,
+            _request: bitfun_runtime_ports::RemoteExecCommandRequest,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::RemoteExecCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn exec_command_streaming(
+            &self,
+            _request: bitfun_runtime_ports::RemoteExecCommandRequest,
+            _output_sink: bitfun_runtime_ports::RemoteExecStreamingOutputSink,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::RemoteExecCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn write_stdin(
+            &self,
+            _request: bitfun_runtime_ports::RemoteWriteStdinRequest,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::RemoteExecCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn write_stdin_streaming(
+            &self,
+            _request: bitfun_runtime_ports::RemoteWriteStdinRequest,
+            _output_sink: bitfun_runtime_ports::RemoteExecStreamingOutputSink,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::RemoteExecCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn send_stdin(
+            &self,
+            _request: bitfun_runtime_ports::RemoteSendStdinRequest,
+        ) -> bitfun_runtime_ports::PortResult<()> {
+            unreachable!("manifest tests only query session liveness")
+        }
+
+        async fn control_session(
+            &self,
+            _request: bitfun_runtime_ports::RemoteExecControlRequest,
+        ) -> bitfun_runtime_ports::PortResult<bitfun_runtime_ports::RemoteExecCommandResponse>
+        {
+            unreachable!("manifest tests only query session liveness")
+        }
+    }
 
     #[async_trait::async_trait]
     impl Tool for DeferredMcpCatalogTool {
@@ -445,6 +598,41 @@ mod tests {
             runtime_tool_restrictions: ToolRuntimeRestrictions::default(),
             runtime_handles: bitfun_runtime_ports::ToolRuntimeHandles::default(),
         }
+    }
+
+    async fn coding_minimal_manifest(context: &ToolUseContext) -> super::ResolvedToolManifest {
+        let policy = crate::agentic::agents::get_agent_registry()
+            .get_agent_tool_policy("coding-minimal", context.workspace_root())
+            .await;
+        resolve_product_resolved_tool_manifest(
+            &policy.allowed_tools,
+            &policy.exposure_overrides,
+            context,
+        )
+        .await
+    }
+
+    async fn record_running_command(
+        agent_session_id: &str,
+        exec_session_id: i32,
+        remote: bool,
+    ) -> String {
+        let capture_id = format!("coding-minimal-manifest-{}", uuid::Uuid::new_v4());
+        let output_sender = background_command_output_capture()
+            .start_capture(StartBackgroundCommandOutputCapture {
+                capture_id: capture_id.clone(),
+                agent_session_id: Some(agent_session_id.to_string()),
+                command: "long-running-test-command".to_string(),
+                workdir: None,
+                remote,
+                tty: false,
+            })
+            .await;
+        background_command_output_capture()
+            .set_session_id(&capture_id, Some(exec_session_id))
+            .await;
+        drop(output_sender);
+        capture_id
     }
 
     fn multimodal_anthropic_tool_context(agent_type: Option<&str>) -> ToolUseContext {
@@ -962,6 +1150,159 @@ mod tests {
         assert!(write.parameters["properties"].get("payload").is_some());
         assert!(write.parameters["properties"].get("mode").is_none());
         assert!(write.description.contains("Read tool first"));
+    }
+
+    #[tokio::test]
+    async fn coding_minimal_initial_manifest_is_exactly_four_direct_tools() {
+        let mut context = tool_context(Some("coding-minimal"));
+        context.session_id = Some(format!("minimal-initial-{}", uuid::Uuid::new_v4()));
+        context.custom_data.insert(
+            DEFERRED_TOOL_LOADING_CONTEXT_KEY.to_string(),
+            Value::Bool(true),
+        );
+
+        let manifest = coding_minimal_manifest(&context).await;
+
+        assert_eq!(
+            manifest
+                .tool_definitions
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Read", "Edit", "Write", "ExecCommand"]
+        );
+        assert_eq!(
+            manifest.allowed_tool_names,
+            [
+                "Read",
+                "Edit",
+                "Write",
+                "ExecCommand",
+                "WriteStdin",
+                "ExecControl",
+            ]
+            .map(str::to_string),
+            "the runtime allowlist retains contextual controls while model-visible definitions hide them"
+        );
+        assert!(manifest.deferred_tool_names.is_empty());
+        assert!(manifest.deferred_tool_summaries.is_empty());
+        assert!(!manifest
+            .tool_definitions
+            .iter()
+            .any(|tool| matches!(tool.name.as_str(), "GetToolSpec" | "CallDeferredTool")));
+    }
+
+    #[tokio::test]
+    async fn coding_minimal_local_command_controls_follow_authoritative_liveness() {
+        let active = Arc::new(AtomicBool::new(true));
+        let agent_session_id = format!("minimal-local-{}", uuid::Uuid::new_v4());
+        let exec_session_id = NEXT_MINIMAL_TEST_EXEC_SESSION_ID.fetch_add(1, Ordering::SeqCst);
+        let capture_id = record_running_command(&agent_session_id, exec_session_id, false).await;
+        let terminal_port: Arc<dyn bitfun_runtime_ports::TerminalPort> =
+            Arc::new(SessionStateTerminalPort {
+                active: Arc::clone(&active),
+            });
+        let mut context = tool_context(Some("coding-minimal"));
+        context.session_id = Some(agent_session_id);
+        context.runtime_handles = bitfun_runtime_ports::ToolRuntimeHandles::default()
+            .with_terminal_port(Some(terminal_port));
+
+        let active_manifest = coding_minimal_manifest(&context).await;
+        assert_eq!(
+            active_manifest
+                .tool_definitions
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Read",
+                "Edit",
+                "Write",
+                "ExecCommand",
+                "WriteStdin",
+                "ExecControl",
+            ]
+        );
+        assert!(active_manifest.deferred_tool_names.is_empty());
+
+        active.store(false, Ordering::SeqCst);
+        let ended_manifest = coding_minimal_manifest(&context).await;
+        assert_eq!(
+            ended_manifest
+                .tool_definitions
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Read", "Edit", "Write", "ExecCommand"]
+        );
+        background_command_output_capture()
+            .finish(&capture_id, BackgroundCommandOutputStatus::Exited, Some(0))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn coding_minimal_remote_command_controls_follow_authoritative_liveness() {
+        let active = Arc::new(AtomicBool::new(true));
+        let agent_session_id = format!("minimal-remote-{}", uuid::Uuid::new_v4());
+        let exec_session_id = NEXT_MINIMAL_TEST_EXEC_SESSION_ID.fetch_add(1, Ordering::SeqCst);
+        let capture_id = record_running_command(&agent_session_id, exec_session_id, true).await;
+        let remote_exec_port: Arc<dyn bitfun_runtime_ports::RemoteExecPort> =
+            Arc::new(SessionStateRemoteExecPort {
+                active: Arc::clone(&active),
+            });
+        let session_identity =
+            crate::service::remote_ssh::workspace_state::workspace_session_identity(
+                "/workspace",
+                Some("minimal-remote-connection"),
+                Some("minimal.remote.example"),
+            )
+            .expect("remote test workspace identity");
+        let mut context = tool_context(Some("coding-minimal"));
+        context.session_id = Some(agent_session_id);
+        context.workspace = Some(WorkspaceBinding::new_remote(
+            None,
+            PathBuf::from("/workspace"),
+            "minimal-remote-connection".to_string(),
+            "Minimal Remote".to_string(),
+            session_identity,
+        ));
+        context.runtime_handles = bitfun_runtime_ports::ToolRuntimeHandles::default()
+            .with_remote_exec_port(Some(remote_exec_port));
+
+        let active_manifest = coding_minimal_manifest(&context).await;
+        assert_eq!(
+            active_manifest
+                .tool_definitions
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Read",
+                "Edit",
+                "Write",
+                "ExecCommand",
+                "WriteStdin",
+                "ExecControl",
+            ]
+        );
+
+        active.store(false, Ordering::SeqCst);
+        background_command_output_capture()
+            .finish(
+                &capture_id,
+                BackgroundCommandOutputStatus::Interrupted,
+                None,
+            )
+            .await;
+        let ended_manifest = coding_minimal_manifest(&context).await;
+        assert_eq!(
+            ended_manifest
+                .tool_definitions
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Read", "Edit", "Write", "ExecCommand"]
+        );
     }
 
     #[tokio::test]

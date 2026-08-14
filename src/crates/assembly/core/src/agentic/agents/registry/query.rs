@@ -7,7 +7,7 @@ use super::AgentRegistry;
 use crate::agentic::agents::registry::types::{is_review_agent_entry, AgentEntry, AgentSource};
 use crate::agentic::agents::{
     mode_presentation_rank, resolve_mode_config_profile_id, AgentCategory, AgentInfo,
-    AgentToolPolicy, SubagentListScope, SubagentQueryContext,
+    AgentToolPolicy, SubagentListScope, SubagentQueryContext, CODING_MINIMAL_MODE_ID,
 };
 use crate::agentic::deep_review_policy::canonical_review_worker_agent_type;
 use crate::agentic::tools::get_all_registered_tool_names;
@@ -88,14 +88,25 @@ impl AgentRegistry {
         };
         match entry.category {
             AgentCategory::Mode => {
-                let mode_configs = get_mode_configs().await;
                 let registered_tool_names = get_all_registered_tool_names().await;
                 let valid_tools: HashSet<String> = registered_tool_names.iter().cloned().collect();
-                let profile_id = resolve_mode_config_profile_id(agent_type);
                 let default_tools = entry.agent.default_tools();
-                let config = mode_configs.get(profile_id.as_ref());
-                let resolved_tools = resolve_effective_tools(&default_tools, config, &valid_tools);
-                let allowed_tools = merge_dynamic_mcp_tools(resolved_tools, &registered_tool_names);
+                let allowed_tools = if agent_type == CODING_MINIMAL_MODE_ID {
+                    // Minimal is an explicit closed profile. User mode config,
+                    // dynamic providers, MCP tools, and future registrations
+                    // must not expand or shrink its stable allowlist.
+                    default_tools
+                        .into_iter()
+                        .filter(|tool_name| valid_tools.contains(tool_name))
+                        .collect()
+                } else {
+                    let mode_configs = get_mode_configs().await;
+                    let profile_id = resolve_mode_config_profile_id(agent_type);
+                    let config = mode_configs.get(profile_id.as_ref());
+                    let resolved_tools =
+                        resolve_effective_tools(&default_tools, config, &valid_tools);
+                    merge_dynamic_mcp_tools(resolved_tools, &registered_tool_names)
+                };
                 let allowed_tool_set: HashSet<&str> =
                     allowed_tools.iter().map(String::as_str).collect();
                 let mut exposure_overrides = entry.agent.tool_exposure_overrides().clone();

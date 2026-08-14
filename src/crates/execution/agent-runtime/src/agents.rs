@@ -10,6 +10,10 @@ pub const SHARED_CODING_MODE_PROMPT_TEMPLATE: &str = "agentic_mode";
 pub const SHARED_CODING_MODE_CONFIG_PROFILE_ID: &str = "coding_shared";
 pub const SHARED_CODING_MODE_CONFIG_PROFILE_LABEL: &str = "Coding Shared";
 pub const SHARED_CODING_MODE_IDS: &[&str] = &["agentic", "Plan", "debug", "Multitask"];
+pub const CODING_MINIMAL_MODE_ID: &str = "coding-minimal";
+pub const CODING_MINIMAL_MODE_NAME: &str = "Coding Minimal";
+pub const CODING_MINIMAL_MODE_PROMPT_TEMPLATE: &str = "coding_minimal_mode";
+pub const CODING_MINIMAL_TOOL_PROFILE_ID: &str = "coding-minimal-v1";
 
 pub fn resolve_mode_config_profile_id<'a>(mode_id: &'a str) -> Cow<'a, str> {
     match mode_id.trim() {
@@ -37,13 +41,21 @@ pub fn mode_config_profile_label(profile_id: &str) -> Option<&'static str> {
 pub fn mode_presentation_rank(mode_id: &str) -> u8 {
     match mode_id {
         "agentic" => 0,
-        "Cowork" => 1,
-        "Plan" => 2,
-        "debug" => 3,
-        "Multitask" => 4,
-        "DeepResearch" => 5,
-        "Team" => 6,
+        CODING_MINIMAL_MODE_ID => 1,
+        "Cowork" => 2,
+        "Plan" => 3,
+        "debug" => 4,
+        "Multitask" => 5,
+        "DeepResearch" => 6,
+        "Team" => 7,
         _ => 99,
+    }
+}
+
+pub fn tool_profile_id_for_agent_type(agent_type: &str) -> Option<&'static str> {
+    match agent_type.trim() {
+        CODING_MINIMAL_MODE_ID => Some(CODING_MINIMAL_TOOL_PROFILE_ID),
+        _ => None,
     }
 }
 
@@ -75,6 +87,12 @@ pub fn builtin_agent_definition_specs() -> Vec<BuiltinAgentDefinitionSpec> {
 
     vec![
         builtin_agent_spec("agentic", Mode, "auto", SubagentVisibilityPolicy::default()),
+        builtin_agent_spec(
+            CODING_MINIMAL_MODE_ID,
+            Mode,
+            "auto",
+            SubagentVisibilityPolicy::default(),
+        ),
         builtin_agent_spec("Cowork", Mode, "auto", SubagentVisibilityPolicy::default()),
         builtin_agent_spec("debug", Mode, "auto", SubagentVisibilityPolicy::default()),
         builtin_agent_spec(
@@ -176,8 +194,16 @@ pub fn builtin_agent_definition_specs() -> Vec<BuiltinAgentDefinitionSpec> {
 
 pub fn default_model_id_for_builtin_agent(agent_type: &str) -> &'static str {
     match agent_type {
-        "agentic" | "Cowork" | "ComputerUse" | "Plan" | "debug" | "Claw" | "DeepResearch"
-        | "Team" | "Multitask" => "auto",
+        "agentic"
+        | CODING_MINIMAL_MODE_ID
+        | "Cowork"
+        | "ComputerUse"
+        | "Plan"
+        | "debug"
+        | "Claw"
+        | "DeepResearch"
+        | "Team"
+        | "Multitask" => "auto",
         "Explore" | "FileFinder" | "CodeReview" | "GeneralPurpose" | "MemoryPhase2" => "primary",
         "GenerateDoc"
         | "ResearchSpecialist"

@@ -1,5 +1,6 @@
 mod agentic;
 mod claw;
+mod coding_minimal;
 mod cowork;
 mod debug;
 mod deep_research;
@@ -9,6 +10,7 @@ mod team;
 
 pub use agentic::AgenticMode;
 pub use claw::ClawMode;
+pub use coding_minimal::CodingMinimalMode;
 pub use cowork::CoworkMode;
 pub use debug::DebugMode;
 pub use deep_research::DeepResearchMode;

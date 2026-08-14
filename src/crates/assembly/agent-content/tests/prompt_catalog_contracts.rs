@@ -26,6 +26,10 @@ const CATALOG_PROMPT_SOURCES: &[(&str, &[u8])] = &[
         include_bytes!("../prompts/agents/code_review.md"),
     ),
     (
+        "coding_minimal_mode",
+        include_bytes!("../prompts/agents/coding_minimal_mode.md"),
+    ),
+    (
         "computer_use_mode",
         include_bytes!("../prompts/agents/computer_use_mode.md"),
     ),

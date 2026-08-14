@@ -14,6 +14,8 @@ use async_trait::async_trait;
 pub use bitfun_agent_runtime::agents::{
     mode_config_profile_label, mode_config_profile_member_mode_ids, mode_presentation_rank,
     resolve_mode_config_profile_id, shared_coding_mode_user_context_policy,
+    tool_profile_id_for_agent_type, CODING_MINIMAL_MODE_ID, CODING_MINIMAL_MODE_NAME,
+    CODING_MINIMAL_MODE_PROMPT_TEMPLATE, CODING_MINIMAL_TOOL_PROFILE_ID,
     SHARED_CODING_MODE_CONFIG_PROFILE_ID, SHARED_CODING_MODE_CONFIG_PROFILE_LABEL,
     SHARED_CODING_MODE_IDS, SHARED_CODING_MODE_PROMPT_TEMPLATE,
 };
@@ -27,8 +29,8 @@ pub use definitions::custom::{CustomMode, CustomSubagent, CustomSubagentKind};
 pub(crate) use definitions::external::ExternalProvidedAgent;
 pub use definitions::hidden::{CodeReviewAgent, DeepReviewAgent, GenerateDocAgent};
 pub use definitions::modes::{
-    AgenticMode, ClawMode, CoworkMode, DebugMode, DeepResearchMode, MultitaskMode, PlanMode,
-    TeamMode,
+    AgenticMode, ClawMode, CodingMinimalMode, CoworkMode, DebugMode, DeepResearchMode,
+    MultitaskMode, PlanMode, TeamMode,
 };
 pub use definitions::review::{ReviewFixerAgent, ReviewJudgeAgent, ReviewWorkerAgent};
 pub use definitions::shared::ReadonlySubagent;
@@ -88,6 +90,27 @@ pub fn shared_coding_mode_tool_exposure_overrides() -> AgentToolPolicyOverrides 
     overrides.insert("WebSearch".to_string(), ToolExposure::Direct);
     overrides.insert("WebFetch".to_string(), ToolExposure::Direct);
     overrides
+}
+
+pub fn coding_minimal_mode_tools() -> Vec<String> {
+    [
+        "Read",
+        "Edit",
+        "Write",
+        "ExecCommand",
+        "WriteStdin",
+        "ExecControl",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+pub fn coding_minimal_mode_tool_exposure_overrides() -> AgentToolPolicyOverrides {
+    coding_minimal_mode_tools()
+        .into_iter()
+        .map(|tool_name| (tool_name, ToolExposure::Direct))
+        .collect()
 }
 
 fn append_provider_group_tools(tools: &mut Vec<String>, provider_id: &'static str) {
@@ -278,8 +301,8 @@ pub trait Agent: Send + Sync + 'static {
 mod tests {
     use super::{
         get_embedded_prompt, shared_coding_mode_tool_exposure_overrides, shared_coding_mode_tools,
-        shared_coding_mode_user_context_policy, Agent, AgenticMode, DebugMode, MultitaskMode,
-        PlanMode, EMBEDDED_PROMPTS,
+        shared_coding_mode_user_context_policy, Agent, AgenticMode, CodingMinimalMode, DebugMode,
+        MultitaskMode, PlanMode, EMBEDDED_PROMPTS,
     };
 
     #[test]
@@ -296,6 +319,7 @@ mod tests {
         let multitask = MultitaskMode::new();
         let plan = PlanMode::new();
         let debug = DebugMode::new();
+        let minimal = CodingMinimalMode::new();
 
         assert_eq!(
             agentic.system_prompt_cache_identity(None),
@@ -309,6 +333,10 @@ mod tests {
             agentic.system_prompt_cache_identity(None),
             debug.system_prompt_cache_identity(None)
         );
+        assert_ne!(
+            agentic.system_prompt_cache_identity(None),
+            minimal.system_prompt_cache_identity(None)
+        );
         assert_eq!(
             agentic.user_context_cache_identity(),
             multitask.user_context_cache_identity()
@@ -320,6 +348,10 @@ mod tests {
         assert_eq!(
             agentic.user_context_cache_identity(),
             debug.user_context_cache_identity()
+        );
+        assert_eq!(
+            agentic.user_context_cache_identity(),
+            minimal.user_context_cache_identity()
         );
     }
 

@@ -78,6 +78,24 @@ impl ExecCommandTool {
         }
     }
 
+    async fn description_for_context(context: Option<&ToolUseContext>) -> BitFunResult<String> {
+        let mut description = Self::new().description().await?;
+        if context.is_some() && !super::command_controls_available(context).await {
+            description = description.replace(
+                "- While that session remains active, WriteStdin and ExecControl are available on the next model request. Use WriteStdin to poll for more output or send input to tty=true sessions, and ExecControl to interrupt or kill it.",
+                "- If the process remains active, command controls will be included in the next model request. Use only the controls that are present there.",
+            );
+        }
+        if context.map(ToolUseContext::is_remote).unwrap_or(false) {
+            description = format!(
+                r#"**Remote workspace:** Commands run on the **SSH server** in the remote user's default POSIX shell, invoked as `<shell> -lc <cmd>`. Use **Unix** syntax and POSIX paths — not PowerShell, `cmd.exe`, or Windows paths.
+
+{description}"#
+            );
+        }
+        Ok(description)
+    }
+
     fn command_env() -> HashMap<String, String> {
         exec_command_noninteractive_env()
     }
@@ -551,7 +569,7 @@ TTY modes:
 Waiting and continuation:
 - yield_time_ms waits for output until the process exits or the deadline is reached. It does not stop the process.
 - If the process is still running after `yield_time_ms`, the result includes a numeric session_id.
-- Use WriteStdin to poll for more output or send input to tty=true sessions, and ExecControl to interrupt or kill it.
+- While that session remains active, WriteStdin and ExecControl are available on the next model request. Use WriteStdin to poll for more output or send input to tty=true sessions, and ExecControl to interrupt or kill it.
 
 Output:
 - Output is only what was produced during this tool call's wait window.
@@ -564,16 +582,7 @@ Output:
         &self,
         context: Option<&ToolUseContext>,
     ) -> BitFunResult<String> {
-        let mut base = self.description().await?;
-        if context.map(|c| c.is_remote()).unwrap_or(false) {
-            base = format!(
-                r#"**Remote workspace:** Commands run on the **SSH server** in the remote user's default POSIX shell, invoked as `<shell> -lc <cmd>`. Use **Unix** syntax and POSIX paths — not PowerShell, `cmd.exe`, or Windows paths.
-
-{base}"#,
-                base = base
-            );
-        }
-        Ok(base)
+        Self::description_for_context(context).await
     }
 
     fn short_description(&self) -> String {
@@ -643,9 +652,7 @@ Output:
                 meta: None,
             };
         }
-        if let (Some(context), Some(parsed)) =
-            (context, exec_command_run_input_from_input(input))
-        {
+        if let (Some(context), Some(parsed)) = (context, exec_command_run_input_from_input(input)) {
             if let Some(rejection) =
                 crate::agentic::execution::edit_constraint_guard::check_bash_command(
                     context, parsed.cmd,
@@ -781,6 +788,7 @@ mod tests {
     use super::super::env_snapshot::RemoteEnvSnapshot;
     use super::ExecCommandTool;
     use super::{parse_remote_shell_probe_output, RemoteShell};
+    use crate::agentic::agents::CODING_MINIMAL_MODE_ID;
     use crate::agentic::tools::framework::{Tool, ToolUseContext};
     use crate::agentic::tools::ToolRuntimeRestrictions;
     use crate::agentic::workspace::WorkspaceBinding;
@@ -902,6 +910,41 @@ mod tests {
 
         assert!(assistant.contains("<note>"));
         assert!(assistant.contains("block-buffer pipe output"));
+    }
+
+    #[tokio::test]
+    async fn description_explains_next_request_control_exposure() {
+        let description = ExecCommandTool::new().description().await.unwrap();
+
+        assert!(description.contains("available on the next model request"));
+        assert!(description.contains("session_id"));
+        assert!(description.contains("WriteStdin"));
+        assert!(description.contains("ExecControl"));
+    }
+
+    #[tokio::test]
+    async fn minimal_initial_description_does_not_name_hidden_controls() {
+        let context = ToolUseContext {
+            tool_call_id: None,
+            agent_type: Some(CODING_MINIMAL_MODE_ID.to_string()),
+            session_id: Some("minimal-description-no-active-command".to_string()),
+            dialog_turn_id: None,
+            workspace: None,
+            loaded_deferred_tool_specs: Vec::new(),
+            primary_model_facts: tool_runtime::context::PrimaryModelFacts::default(),
+            custom_data: HashMap::new(),
+            computer_use_host: None,
+            runtime_tool_restrictions: ToolRuntimeRestrictions::default(),
+            runtime_handles: bitfun_runtime_ports::ToolRuntimeHandles::default(),
+        };
+
+        let description = ExecCommandTool::description_for_context(Some(&context))
+            .await
+            .unwrap();
+
+        assert!(description.contains("included in the next model request"));
+        assert!(!description.contains("WriteStdin"));
+        assert!(!description.contains("ExecControl"));
     }
 
     #[test]

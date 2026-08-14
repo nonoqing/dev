@@ -5,7 +5,8 @@ use bitfun_agent_runtime::agents::{
     shared_coding_mode_user_context_policy, subagent_source_kind,
     subagent_source_presentation_rank, BuiltinAgentCategory, BuiltinSubagentExposure,
     SubAgentSource, SubagentOverrideLayers, SubagentOverrideState, SubagentSourceKind,
-    SubagentStateReason, SubagentVisibilityPolicy, SHARED_CODING_MODE_CONFIG_PROFILE_ID,
+    SubagentStateReason, SubagentVisibilityPolicy, CODING_MINIMAL_MODE_ID,
+    CODING_MINIMAL_TOOL_PROFILE_ID, SHARED_CODING_MODE_CONFIG_PROFILE_ID,
     SHARED_CODING_MODE_CONFIG_PROFILE_LABEL, SHARED_CODING_MODE_IDS,
 };
 use bitfun_agent_runtime::deep_review::canonical_review_worker_agent_type;
@@ -114,6 +115,11 @@ fn shared_coding_modes_resolve_to_the_same_config_profile() {
 
     assert_eq!(resolve_mode_config_profile_id("Cowork").as_ref(), "Cowork");
     assert_eq!(
+        resolve_mode_config_profile_id(CODING_MINIMAL_MODE_ID).as_ref(),
+        CODING_MINIMAL_MODE_ID
+    );
+    assert!(!SHARED_CODING_MODE_IDS.contains(&CODING_MINIMAL_MODE_ID));
+    assert_eq!(
         mode_config_profile_member_mode_ids(SHARED_CODING_MODE_CONFIG_PROFILE_ID),
         SHARED_CODING_MODE_IDS
     );
@@ -165,8 +171,9 @@ fn subagent_source_contract_preserves_runtime_kind_and_presentation_order() {
 #[test]
 fn mode_presentation_and_shared_context_policy_match_existing_mode_contract() {
     assert_eq!(mode_presentation_rank("agentic"), 0);
-    assert_eq!(mode_presentation_rank("Cowork"), 1);
-    assert_eq!(mode_presentation_rank("Team"), 6);
+    assert_eq!(mode_presentation_rank(CODING_MINIMAL_MODE_ID), 1);
+    assert_eq!(mode_presentation_rank("Cowork"), 2);
+    assert_eq!(mode_presentation_rank("Team"), 7);
     assert_eq!(mode_presentation_rank("unknown"), 99);
 
     assert_eq!(
@@ -183,6 +190,7 @@ fn builtin_agent_definition_catalog_preserves_order_categories_models_and_visibi
         ids,
         vec![
             "agentic",
+            "coding-minimal",
             "Cowork",
             "debug",
             "Multitask",
@@ -206,13 +214,21 @@ fn builtin_agent_definition_catalog_preserves_order_categories_models_and_visibi
     );
 
     assert_eq!(specs[0].category, BuiltinAgentCategory::Mode);
-    assert_eq!(specs[8].category, BuiltinAgentCategory::SubAgent);
-    assert_eq!(specs[16].category, BuiltinAgentCategory::SubAgent);
-    assert!(specs[16]
+    assert_eq!(specs[9].category, BuiltinAgentCategory::SubAgent);
+    assert_eq!(specs[17].category, BuiltinAgentCategory::SubAgent);
+    assert!(specs[17]
         .visibility_policy
         .can_access_from_parent(Some("agentic")));
-    assert!(!specs[16].visibility_policy.show_in_global_registry);
+    assert!(!specs[17].visibility_policy.show_in_global_registry);
     assert_eq!(default_model_id_for_builtin_agent("agentic"), "auto");
+    assert_eq!(
+        default_model_id_for_builtin_agent(CODING_MINIMAL_MODE_ID),
+        "auto"
+    );
+    assert_eq!(
+        bitfun_agent_runtime::agents::tool_profile_id_for_agent_type(CODING_MINIMAL_MODE_ID),
+        Some(CODING_MINIMAL_TOOL_PROFILE_ID)
+    );
     assert_eq!(default_model_id_for_builtin_agent("Explore"), "primary");
     assert_eq!(
         default_model_id_for_builtin_agent("GeneralPurpose"),

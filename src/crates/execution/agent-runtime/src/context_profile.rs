@@ -207,7 +207,13 @@ impl ContextProfilePolicy {
 fn is_long_task_agent(agent_type: &str) -> bool {
     matches!(
         agent_type,
-        "agentic" | "Multitask" | "DeepReview" | "DeepResearch" | "ComputerUse" | "Team"
+        "agentic"
+            | "coding-minimal"
+            | "Multitask"
+            | "DeepReview"
+            | "DeepResearch"
+            | "ComputerUse"
+            | "Team"
     ) || agent_type.starts_with("Review")
 }
 

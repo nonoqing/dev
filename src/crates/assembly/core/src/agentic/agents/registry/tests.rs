@@ -234,6 +234,7 @@ async fn review_lookup_cold_loads_the_requested_project_registry() {
 fn top_level_modes_default_to_auto() {
     for agent_type in [
         "agentic",
+        "coding-minimal",
         "Multitask",
         "Cowork",
         "Plan",
@@ -328,6 +329,12 @@ fn every_builtin_primary_mode_defaults_to_the_thread_goal_lifecycle() {
         .filter(|spec| spec.category == AgentCategory::Mode)
     {
         let mode = (spec.factory)();
+        if mode.id() == "coding-minimal" {
+            assert!(THREAD_GOAL_TOOL_NAMES
+                .iter()
+                .all(|tool_name| !mode.default_tools().iter().any(|tool| tool == tool_name)));
+            continue;
+        }
         let default_tools = mode.default_tools();
         for tool_name in THREAD_GOAL_TOOL_NAMES {
             assert!(
@@ -338,6 +345,34 @@ fn every_builtin_primary_mode_defaults_to_the_thread_goal_lifecycle() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn coding_minimal_is_created_by_the_real_registry_with_a_closed_policy() {
+    let registry = AgentRegistry::new();
+    let agent = registry
+        .get_agent("coding-minimal", None)
+        .expect("coding-minimal should be a registered built-in mode");
+    assert_eq!(agent.name(), "Coding Minimal");
+
+    let policy = registry.get_agent_tool_policy("coding-minimal", None).await;
+    assert_eq!(
+        policy.allowed_tools,
+        [
+            "Read",
+            "Edit",
+            "Write",
+            "ExecCommand",
+            "WriteStdin",
+            "ExecControl",
+        ]
+        .map(str::to_string)
+    );
+    assert_eq!(policy.exposure_overrides.len(), 6);
+    assert!(policy
+        .exposure_overrides
+        .values()
+        .all(|exposure| *exposure == crate::agentic::tools::framework::ToolExposure::Direct));
 }
 
 #[test]

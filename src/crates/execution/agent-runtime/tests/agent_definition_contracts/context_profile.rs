@@ -6,6 +6,7 @@ use bitfun_agent_runtime::context_profile::{
 fn context_profile_maps_long_running_agents_to_long_task_profile() {
     for agent_type in [
         "agentic",
+        "coding-minimal",
         "DeepReview",
         "DeepResearch",
         "ComputerUse",
