@@ -60,6 +60,8 @@ export type AppearanceMarketSubmissionStatus =
   | 'rejected'
   | 'withdrawn';
 
+export type AppearanceMarketPublicationStatus = 'published' | 'yanked' | 'unpublished';
+
 export interface AppearanceMarketSubmission {
   submissionId: string;
   listingId?: string;
@@ -77,6 +79,7 @@ export interface AppearanceMarketSubmission {
   license: AppearanceMarketLicense;
   repositoryUrl?: string;
   status: AppearanceMarketSubmissionStatus;
+  publicationStatus?: AppearanceMarketPublicationStatus;
   packageSha256?: string;
   packageSize?: number;
   previewUrl?: string;
@@ -113,6 +116,15 @@ export interface AppearanceMarketDownloadRequest {
   packageVersion: string;
   packageSha256: string;
   packageSize: number;
+}
+
+export interface AppearanceMarketSubmitPackageRequest {
+  packagePath: string;
+  slug?: string;
+  minBitfunVersion?: string;
+  changelog?: string;
+  license: AppearanceMarketLicense;
+  repositoryUrl?: string;
 }
 
 function isolatedArrayBuffer(value: ArrayBuffer | Uint8Array): ArrayBuffer {
@@ -164,6 +176,34 @@ export class AppearanceMarketAPI {
       return await api.invoke('appearance_market_list_submissions', {});
     } catch (error) {
       throw createTauriCommandError('appearance_market_list_submissions', error);
+    }
+  }
+
+  async chooseSubmissionPackage(title: string): Promise<string | null> {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const selected = await open({
+      directory: false,
+      multiple: false,
+      title,
+      filters: [{ name: 'BitFun Appearance', extensions: ['bitfun-appearance'] }],
+    });
+    return typeof selected === 'string' && selected.length > 0 ? selected : null;
+  }
+
+  async submitPackage(
+    request: AppearanceMarketSubmitPackageRequest,
+  ): Promise<AppearanceMarketSubmission> {
+    try {
+      return await api.invoke(
+        'appearance_market_submit_package',
+        { request },
+        { timeout: 300_000 },
+      );
+    } catch (error) {
+      throw createTauriCommandError('appearance_market_submit_package', error, {
+        ...request,
+        packagePath: request.packagePath.split(/[\\/]/).pop() ?? '<selected package>',
+      });
     }
   }
 

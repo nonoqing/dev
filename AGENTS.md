@@ -16,13 +16,14 @@ copy long rule bodies back into this entry.
 2. Desktop: prefer `pnpm run desktop:dev`. Use `pnpm run desktop:preview:debug` only for faster frontend-only cold start (no Rust auto-rebuild). See [`docs/development/common-commands.md`](docs/development/common-commands.md).
 3. After Rust edits: `pnpm run fmt:rs` (changed/staged `.rs` only). Use `cargo fmt` only when you intentionally want broader formatting coverage.
 4. Use **Route by task** / **Standards map**, then pick checks from [`docs/development/verification.md`](docs/development/verification.md).
-5. Root workspace dependencies own compatible versions; consuming crates select only the features they use. Keep test-only features in `dev-dependencies`, attach feature-gated service capabilities to the owning crate feature, and do not use `tokio/full` to bypass dependency boundaries.
+5. Root workspace dependencies own compatible versions; consuming crates select only the features they use. Keep test-only features in `dev-dependencies`, attach feature-gated service capabilities to the owning crate feature, and disable third-party defaults in `[workspace.dependencies]` when they are not part of every consumer's contract. Internal crates whose guarded `default` is empty do not repeat `default-features = false` on every edge; narrow consumers of an intentional compatibility default such as ACP still disable it explicitly. Manifests copied into a standalone Docker build context keep explicit versions and default policy. Do not use `tokio/full` to bypass dependency boundaries.
 
 ## How to use this file
 
 1. Prefer the nearest module `AGENTS.md` / `AGENTS-CN.md` when editing under that directory.
 2. **Standards map** = norm types. **Architecture index** = STD-01 subtopics. **Cross-cutting index** = host/logging/agent-loop topics. **Route by task** = change → read → verify.
 3. Open linked authorities for detail. Keep this file and [`AGENTS-CN.md`](AGENTS-CN.md) in sync.
+4. Use [`docs/README.md`](docs/README.md) for the complete documentation map; placement and migration rules remain in [`docs-governance.md`](docs/development/docs-governance.md).
 
 ## Language (repo docs)
 
@@ -76,7 +77,7 @@ Condition-triggered rules. Open only when the task matches; details stay in the 
 | Topic | Open when | Authority |
 |---|---|---|
 | Logging | Adding or changing log output / observability text | Repository-wide policy: [`docs/development/logging.md`](docs/development/logging.md); frontend API: [`src/web-ui/LOGGING.md`](src/web-ui/LOGGING.md); Rust API: [`src/crates/LOGGING.md`](src/crates/LOGGING.md) |
-| Tauri / platform / remote | Desktop commands, UI↔host boundaries, remote workspace support | [`docs/development/host-platform-and-remote.md`](docs/development/host-platform-and-remote.md); [`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md) |
+| Tauri / platform / remote / upgrade | Desktop commands, UI↔host boundaries, remote scenarios, and cross-version behavior | [`docs/development/host-platform-and-remote.md`](docs/development/host-platform-and-remote.md); [`src/apps/desktop/AGENTS.md`](src/apps/desktop/AGENTS.md) |
 | Agent loop | Agent loop, repeated tool calls, anti-loop safeguards | [`docs/development/agent-loop-behavior.md`](docs/development/agent-loop-behavior.md); nearest `src/crates/execution/*/AGENTS.md` |
 
 ## Route by task

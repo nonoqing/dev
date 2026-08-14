@@ -1,4 +1,4 @@
-﻿//! Platform-neutral filesystem owner.
+//! Platform-neutral filesystem owner.
 //!
 //! This module owns local file operations, directory listings, file-tree
 //! construction, and search primitives. Product/runtime adapters in
@@ -8,6 +8,7 @@
 mod error;
 mod factory;
 mod listing;
+mod metadata_ops;
 mod operations;
 mod service;
 mod tree;
@@ -23,6 +24,7 @@ pub use operations::{
     normalize_text_for_editor_disk_sync, FileInfo, FileOperationOptions, FileOperationService,
     FileReadResult, FileWriteResult,
 };
+pub use metadata_ops::{path_has_multiple_hard_links, set_mode_async};
 pub use service::FileSystemService;
 pub use tree::{
     BatchedFileSearchProgressSink, FileContentSearchOptions, FileNameSearchOptions,

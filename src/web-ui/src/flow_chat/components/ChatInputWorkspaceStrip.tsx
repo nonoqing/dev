@@ -3,6 +3,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Activity,
@@ -10,6 +11,7 @@ import {
   EyeOff,
   GitBranch,
   RefreshCw,
+  Settings,
   Shield,
   ShieldAlert,
   ShieldCheck,
@@ -21,7 +23,9 @@ import type { ThreadGoalSnapshot } from '../services/goalService';
 import { Tooltip, IconButton } from '@/component-library';
 import { useGitState } from '@/tools/git/hooks/useGitState';
 import type { SessionExecutionTarget } from '@/infrastructure/api/service-api/WorktreeAPI';
+import { getAppearanceOverlayHost } from '@/infrastructure/appearance/runtime/AppearanceOverlayHost';
 import { useI18n } from '@/infrastructure/i18n';
+import { useAnchoredPopoverPosition } from '@/shared/utils/useAnchoredPopoverPosition';
 import { DispatchResultDialog } from '@/features/dispatch/DispatchResultDialog';
 import { DispatchTargetPicker } from '@/features/dispatch/DispatchTargetPicker';
 import type { DispatchSelection, DispatchTarget } from '@/features/dispatch/types';
@@ -43,14 +47,40 @@ export interface ChatInputWorkspaceStripProps {
     goal: ThreadGoalSnapshot | null;
     onOpen: () => void;
   };
-  /** Global native-tool permission mode exposed as a compact strip control. */
+  /** Native-tool permission mode for this session, exposed as a compact strip control. */
   permissionControl?: {
+    /**
+     * The session-scoped mode. This is what the checkmark marks, so it stays
+     * separate from `nextTurnMode`: one is session state, the other a temporary
+     * override, and conflating them would make the menu lie about which is
+     * which once a one-off is armed.
+     */
     mode: ChatInputPermissionMode;
     saving?: boolean;
     disabled?: boolean;
     options?: Array<Exclude<ChatInputPermissionMode, 'acp'>>;
     scopeLabel?: string;
+    /**
+     * The session chose its own mode instead of following the default. Shown so
+     * two sessions sitting on different modes is legible rather than confusing.
+     */
+    overridden?: boolean;
+    /** Clears the session's own selection and follows the default again. */
+    onResetToDefault?: () => void | Promise<void>;
+    /** Opens the settings page that owns the default this row follows. */
+    onOpenDefaultSettings?: () => void;
+    /**
+     * Mode armed for the next submission only, or `null` when none is.
+     * Scope is chosen per click rather than by a separate toggle, so a mode
+     * can never be written to the session by one click and then be "corrected"
+     * to one-off by a later one.
+     */
+    nextTurnMode?: ChatInputPermissionMode | null;
     onChange?: (mode: Exclude<ChatInputPermissionMode, 'acp'>) => void | Promise<void>;
+    /** Arms the mode for the next submission; re-picking the armed one disarms it. */
+    onChangeForNextTurn?: (
+      mode: Exclude<ChatInputPermissionMode, 'acp'>,
+    ) => void | Promise<void>;
     onHide?: () => void | Promise<void>;
   };
   /** Keep the strip on cached Git state while historical content is still restoring. */
@@ -87,11 +117,24 @@ export interface ChatInputWorkspaceStripProps {
 
 export type ChatInputPermissionMode = 'ask' | 'auto' | 'full_access' | 'reject' | 'acp';
 
-const NATIVE_PERMISSION_MODES: Array<Exclude<ChatInputPermissionMode, 'acp' | 'reject'>> = [
+const NATIVE_PERMISSION_MODES: Array<Exclude<ChatInputPermissionMode, 'acp'>> = [
   'ask',
   'auto',
+  'reject',
   'full_access',
 ];
+
+/**
+ * Risk ramp shared by the trigger and the menu rows: the shield gains a mark as
+ * the mode gives up more confirmation, and its color follows the same ramp.
+ */
+const PERMISSION_MODE_ICONS: Record<ChatInputPermissionMode, typeof Shield> = {
+  ask: Shield,
+  auto: ShieldCheck,
+  full_access: ShieldAlert,
+  reject: Shield,
+  acp: Shield,
+};
 
 export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = ({
   repositoryPath,
@@ -108,8 +151,19 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
   const { t: tWorktrees } = useI18n('worktrees');
   const { t: tCommon } = useI18n('common');
   const permissionRootRef = useRef<HTMLDivElement>(null);
+  const permissionTriggerRef = useRef<HTMLButtonElement>(null);
+  const permissionMenuRef = useRef<HTMLDivElement>(null);
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
   const [resultDialogOpen, setResultDialogOpen] = useState(false);
+  const permissionMenuLayout = useAnchoredPopoverPosition({
+    open: permissionMenuOpen,
+    anchorRef: permissionTriggerRef,
+    popoverRef: permissionMenuRef,
+    preferredPlacement: 'top',
+    alignment: 'end',
+    gap: 7,
+    layoutRevision: `${permissionControl?.options?.length ?? 0}:${Boolean(permissionControl?.onHide)}`,
+  });
   const trimmedPath = repositoryPath.trim();
   const label = workspaceLabel.trim();
 
@@ -177,7 +231,11 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
     if (!permissionMenuOpen) return;
 
     const handlePointerDown = (event: PointerEvent) => {
-      if (!permissionRootRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (
+        !permissionRootRef.current?.contains(target)
+        && !permissionMenuRef.current?.contains(target)
+      ) {
         setPermissionMenuOpen(false);
       }
     };
@@ -241,15 +299,23 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
     permissionControl?.disabled
     || permissionControl?.saving
     || permissionMode === 'acp';
-  const permissionModeLabel = permissionCopy[permissionMode].label;
+  const permissionOverridden = !!permissionControl?.overridden && permissionMode !== 'acp';
+  const permissionNextTurnMode = permissionMode === 'acp'
+    ? null
+    : permissionControl?.nextTurnMode ?? null;
+  const permissionNextTurnArmed = permissionNextTurnMode !== null;
+  // The trigger reports what the next submission will actually run with, so an
+  // armed one-off outranks the session mode there.
+  const permissionDisplayMode = permissionNextTurnMode ?? permissionMode;
+  const permissionModeLabel = permissionCopy[permissionDisplayMode].label;
   const permissionTooltip = permissionMode === 'acp'
     ? t('chatInput.permissionMode.acp.tooltip')
-    : t('chatInput.permissionMode.current', { mode: permissionModeLabel });
-  const PermissionIcon = permissionMode === 'auto'
-    ? ShieldCheck
-    : permissionMode === 'full_access'
-      ? ShieldAlert
-      : Shield;
+    : permissionNextTurnArmed
+      ? t('chatInput.permissionMode.currentTurnOverride', { mode: permissionModeLabel })
+      : permissionOverridden
+        ? t('chatInput.permissionMode.currentSessionOverride', { mode: permissionModeLabel })
+        : t('chatInput.permissionMode.current', { mode: permissionModeLabel });
+  const PermissionIcon = PERMISSION_MODE_ICONS[permissionDisplayMode];
   const showPermissionLabel = permissionMode !== 'acp';
 
   const handleWorktreeToggle = () => {
@@ -331,7 +397,9 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
                     aria-hidden
                   />
                 )}
-                <span>{tWorktrees('strip.toggleLabel')}</span>
+                <span className="bitfun-chat-input-workspace-strip__worktree-label">
+                  {tWorktrees('strip.toggleLabel')}
+                </span>
               </button>
             </Tooltip>
           ) : null}
@@ -388,10 +456,11 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
             >
               <Tooltip content={permissionTooltip} placement="top">
                 <button
+                  ref={permissionTriggerRef}
                   type="button"
                   className={[
                     'bitfun-chat-input-workspace-strip__permission-trigger',
-                    `bitfun-chat-input-workspace-strip__permission-trigger--${permissionMode}`,
+                    `bitfun-chat-input-workspace-strip__permission-trigger--${permissionDisplayMode}`,
                     permissionMenuOpen && 'bitfun-chat-input-workspace-strip__permission-trigger--open',
                   ]
                     .filter(Boolean)
@@ -401,7 +470,9 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
                   aria-expanded={permissionDisabled ? undefined : permissionMenuOpen}
                   disabled={permissionDisabled}
                   data-testid="chat-input-permission-trigger"
-                  data-permission-mode={permissionMode}
+                  data-permission-mode={permissionDisplayMode}
+                  data-permission-overridden={permissionOverridden ? 'true' : undefined}
+                  data-permission-next-turn={permissionNextTurnArmed ? 'true' : undefined}
                   onClick={event => {
                     event.stopPropagation();
                     if (!permissionDisabled) {
@@ -415,15 +486,32 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
                       {permissionModeLabel}
                     </span>
                   ) : null}
+                  {/* Only a one-off override gets a dot: a session-level choice
+                      is already legible from the label the trigger shows, and
+                      marking both made every customized session look pending. */}
+                  {permissionNextTurnArmed ? (
+                    <span
+                      className="bitfun-chat-input-workspace-strip__permission-next-turn-dot"
+                      data-testid="chat-input-permission-next-turn-dot"
+                      aria-hidden
+                    />
+                  ) : null}
                 </button>
               </Tooltip>
 
-              {permissionMenuOpen && permissionMode !== 'acp' ? (
+              {permissionMenuOpen && permissionMode !== 'acp' ? createPortal(
                 <div
+                  ref={permissionMenuRef}
                   data-bf-component="chat-input-workspace-strip"
                   data-bf-part="permissionMenu"
                   data-bf-state="open"
+                  data-bf-placement={permissionMenuLayout?.placement ?? 'top'}
                   className="bitfun-chat-input-workspace-strip__permission-menu"
+                  style={{
+                    top: `${permissionMenuLayout?.top ?? 0}px`,
+                    left: `${permissionMenuLayout?.left ?? 0}px`,
+                    visibility: permissionMenuLayout ? 'visible' : 'hidden',
+                  }}
                   role="menu"
                   aria-label={t('chatInput.permissionMode.menuLabel')}
                   data-testid="chat-input-permission-menu"
@@ -438,42 +526,153 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
                     {permissionModes.map(mode => {
                       const selected = permissionMode === mode;
                       const copy = permissionCopy[mode];
+                      const armed = permissionNextTurnMode === mode;
+                      const OptionIcon = PERMISSION_MODE_ICONS[mode];
                       return (
-                        <button data-bf-component="chat-input-workspace-strip" data-bf-part="permissionOption"
-                          data-bf-state={selected ? 'selected' : undefined}
+                        <div
                           key={mode}
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={selected}
+                          data-bf-component="chat-input-workspace-strip"
+                          data-bf-part="permissionOptionRow"
+                          data-bf-state={[selected && 'selected', armed && 'armed']
+                            .filter(Boolean)
+                            .join(' ') || undefined}
                           className={[
-                            'bitfun-chat-input-workspace-strip__permission-option',
-                            selected && 'bitfun-chat-input-workspace-strip__permission-option--selected',
+                            'bitfun-chat-input-workspace-strip__permission-option-row',
+                            selected && 'bitfun-chat-input-workspace-strip__permission-option-row--selected',
+                            armed && 'bitfun-chat-input-workspace-strip__permission-option-row--armed',
                           ]
                             .filter(Boolean)
                             .join(' ')}
-                          disabled={permissionControl.saving}
-                          data-testid={`chat-input-permission-option-${mode}`}
-                          onClick={event => {
-                            event.stopPropagation();
-                            setPermissionMenuOpen(false);
-                            if (!selected) {
-                              void permissionControl.onChange?.(mode);
-                            }
-                          }}
                         >
-                          <span className="bitfun-chat-input-workspace-strip__permission-option-copy">
-                            <span className="bitfun-chat-input-workspace-strip__permission-option-label">
-                              {copy.label}
-                            </span>
-                            <span className="bitfun-chat-input-workspace-strip__permission-option-description">
-                              {copy.description}
-                            </span>
+                          {/* The description moved to a tooltip to keep the menu
+                              compact, so it is repeated in the accessible name
+                              rather than being dropped for screen readers. */}
+                          <Tooltip content={copy.description} placement="left">
+                            <button data-bf-component="chat-input-workspace-strip" data-bf-part="permissionOption"
+                              data-bf-state={selected ? 'selected' : undefined}
+                              type="button"
+                              role="menuitemradio"
+                              aria-checked={selected}
+                              aria-label={`${copy.label} — ${copy.description}`}
+                              className="bitfun-chat-input-workspace-strip__permission-option"
+                              disabled={permissionControl.saving}
+                              data-testid={`chat-input-permission-option-${mode}`}
+                              onClick={event => {
+                                event.stopPropagation();
+                                setPermissionMenuOpen(false);
+                                void permissionControl.onChange?.(mode);
+                              }}
+                            >
+                              <OptionIcon
+                                size={13}
+                                strokeWidth={2}
+                                className={`bitfun-chat-input-workspace-strip__permission-option-icon bitfun-chat-input-workspace-strip__permission-option-icon--${mode}`}
+                                aria-hidden
+                              />
+                              <span className="bitfun-chat-input-workspace-strip__permission-option-label">
+                                {copy.label}
+                              </span>
+                            </button>
+                          </Tooltip>
+                          {/* One trailing slot: the checkmark reports session
+                              state, the one-off chip reports a temporary
+                              override, and they never claim it together. */}
+                          <span
+                            data-bf-component="chat-input-workspace-strip"
+                            data-bf-part="permissionOptionTrailing"
+                            className="bitfun-chat-input-workspace-strip__permission-option-trailing"
+                          >
+                            {selected ? (
+                              <Check
+                                size={14}
+                                strokeWidth={2.2}
+                                className="bitfun-chat-input-workspace-strip__permission-option-check"
+                                data-testid={`chat-input-permission-selected-${mode}`}
+                                aria-hidden
+                              />
+                            ) : null}
+                            {permissionControl.onChangeForNextTurn ? (
+                              <Tooltip
+                                content={t('chatInput.permissionMode.nextTurnOnly', {
+                                  mode: copy.label,
+                                })}
+                                placement="top"
+                              >
+                                <button
+                                  type="button"
+                                  role="menuitemcheckbox"
+                                  aria-checked={armed}
+                                  aria-label={t('chatInput.permissionMode.nextTurnOnly', {
+                                    mode: copy.label,
+                                  })}
+                                  data-bf-component="chat-input-workspace-strip"
+                                  data-bf-part="permissionOptionNextTurn"
+                                  data-bf-state={armed ? 'armed' : undefined}
+                                  className={[
+                                    'bitfun-chat-input-workspace-strip__permission-option-next-turn',
+                                    armed && 'bitfun-chat-input-workspace-strip__permission-option-next-turn--armed',
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' ')}
+                                  disabled={permissionControl.saving}
+                                  data-testid={`chat-input-permission-next-turn-${mode}`}
+                                  onClick={event => {
+                                    event.stopPropagation();
+                                    setPermissionMenuOpen(false);
+                                    void permissionControl.onChangeForNextTurn?.(mode);
+                                  }}
+                                >
+                                  {t('chatInput.permissionMode.nextTurnOnlyShort')}
+                                </button>
+                              </Tooltip>
+                            ) : null}
                           </span>
-                          {selected ? <Check size={14} strokeWidth={2.2} aria-hidden /> : null}
-                        </button>
+                        </div>
                       );
                     })}
                   </div>
+                  {permissionOverridden && permissionControl.onResetToDefault ? (
+                    <>
+                      <div className="bitfun-chat-input-workspace-strip__permission-menu-divider" role="separator" />
+                      <div className="bitfun-chat-input-workspace-strip__permission-action-row">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="bitfun-chat-input-workspace-strip__permission-visibility-action"
+                          data-testid="chat-input-permission-reset-default"
+                          disabled={permissionControl.saving}
+                          onClick={event => {
+                            event.stopPropagation();
+                            setPermissionMenuOpen(false);
+                            void permissionControl.onResetToDefault?.();
+                          }}
+                        >
+                          {t('chatInput.permissionMode.resetToDefault')}
+                        </button>
+                        {permissionControl.onOpenDefaultSettings ? (
+                          <Tooltip
+                            content={t('chatInput.permissionMode.openDefaultSettings')}
+                            placement="top"
+                          >
+                            <button
+                              type="button"
+                              role="menuitem"
+                              aria-label={t('chatInput.permissionMode.openDefaultSettings')}
+                              className="bitfun-chat-input-workspace-strip__permission-action-settings"
+                              data-testid="chat-input-permission-open-default-settings"
+                              onClick={event => {
+                                event.stopPropagation();
+                                setPermissionMenuOpen(false);
+                                permissionControl.onOpenDefaultSettings?.();
+                              }}
+                            >
+                              <Settings size={13} strokeWidth={2} aria-hidden />
+                            </button>
+                          </Tooltip>
+                        ) : null}
+                      </div>
+                    </>
+                  ) : null}
                   {permissionControl.onHide ? (
                     <>
                       <div className="bitfun-chat-input-workspace-strip__permission-menu-divider" role="separator" />
@@ -493,7 +692,8 @@ export const ChatInputWorkspaceStrip: React.FC<ChatInputWorkspaceStripProps> = (
                       </button>
                     </>
                   ) : null}
-                </div>
+                </div>,
+                getAppearanceOverlayHost(),
               ) : null}
             </div>
           ) : null}

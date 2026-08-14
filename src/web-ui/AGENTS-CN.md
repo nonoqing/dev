@@ -41,21 +41,22 @@ Peer Device Mode（同账号远程完整客户端）的边界见 `docs/architect
   `pnpm run i18n:generate`，Web UI 文案留在 `src/web-ui/src/locales`。
 - 路由或功能文案使用 `useI18n(namespace)` 保持非 bootstrap namespace 懒加载；直接调用
   `i18nService.t(...)` 必须有 bootstrap namespace 覆盖。
+- 稳定 DOM selector 与 E2E 属性遵循 [`docs/development/ui-testids.zh-CN.md`](../../docs/development/ui-testids.zh-CN.md)；
+  不要从本地化文案或纯展示文本派生 test ID。
 - 遵循 `src/web-ui/LOGGING.md`：仅英文、无 emoji、结构化日志
 
 ## 命令
 
-以下命令仅供参考，不是默认预检清单；PR 应按下方“验证”选择范围。
+这里只维护开发/构建入口；验证命令统一放在下方“验证”章节。
 
 ```bash
 pnpm --dir src/web-ui dev
-pnpm --dir src/web-ui run lint
-pnpm --dir src/web-ui run type-check
-pnpm --dir src/web-ui run test:run     # 大范围测试；本地优先用精确路径
-pnpm run i18n:contract:test
-pnpm run i18n:audit
 pnpm run build:web                     # 构建相关改动或复现 CI
 ```
+
+`pnpm run build:web` 会并发执行类型检查与 Vite 构建，错误出现顺序不固定，输出分别带
+`[type-check]` / `[vite-build]` 前缀。只有网络盘或 WSL 挂载等原生文件事件漏报场景才设置
+`VITE_USE_POLLING=1`。
 
 ## 验证
 

@@ -9,7 +9,6 @@
 /// - Single command execution
 /// - Batch task processing
 mod account;
-mod account_sync;
 mod acp_cli;
 mod actions;
 mod agent;
@@ -19,6 +18,7 @@ mod config;
 mod daemon;
 mod diagnostics;
 mod dispatch;
+mod embedded_app_server;
 mod hook_import;
 mod logging;
 mod management;
@@ -34,7 +34,9 @@ mod root_handlers;
 mod runtime;
 mod self_update;
 mod shared_runtime;
+mod shared_tui_backend;
 mod terminal_attention;
+mod tui_backend;
 mod ui;
 
 use anyhow::{anyhow, Result};
@@ -43,8 +45,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use agent::context_reload_client::CliContextReloadClient;
-use agent::runtime_client::CliAgentRuntimeClient;
+use agent::tui_client::TuiAgentClient;
 use config::CliConfig;
 use hook_import::HookAction;
 use mcp_import::{McpImportCommand, McpImportOutputFormat};
@@ -88,6 +89,48 @@ pub fn get_mcp_service() -> Option<&'static std::sync::Arc<bitfun_core::service:
     MCP_SERVICE.get()
 }
 
+fn ensure_cli_mcp_service(
+    config_service: Arc<bitfun_core::service::config::ConfigService>,
+) -> Option<Arc<bitfun_core::service::mcp::MCPService>> {
+    if let Some(service) = get_mcp_service() {
+        return Some(service.clone());
+    }
+
+    let service = match bitfun_core::service::mcp::MCPService::new(config_service) {
+        Ok(service) => Arc::new(service),
+        Err(error) => {
+            tracing::warn!("Failed to create MCP service: {}", error);
+            get_mcp_init_status().store(3, Ordering::Relaxed);
+            return None;
+        }
+    };
+
+    if MCP_SERVICE.set(service.clone()).is_err() {
+        return get_mcp_service().cloned();
+    }
+    bitfun_core::service::mcp::set_global_mcp_service(service.clone());
+    get_mcp_init_status().store(1, Ordering::Relaxed);
+
+    // Shared TUI keeps the pre-migration CLI-local MCP compatibility path. It
+    // is intentionally separate from the MCP manager inside Shared Runtime;
+    // this process must not be mistaken for that Runtime's owner.
+    let initializing = service.clone();
+    tokio::spawn(async move {
+        match initializing.server_manager().initialize_all().await {
+            Ok(_) => {
+                tracing::info!("MCP servers initialized successfully");
+                get_mcp_init_status().store(2, Ordering::Relaxed);
+            }
+            Err(error) => {
+                tracing::warn!("Failed to initialize MCP servers: {}", error);
+                get_mcp_init_status().store(3, Ordering::Relaxed);
+            }
+        }
+    });
+
+    Some(service)
+}
+
 #[derive(Parser)]
 #[command(name = "bitfun")]
 #[command(about = "BitFun CLI - AI agent-driven command-line programming assistant", long_about = None)]
@@ -105,6 +148,22 @@ struct Cli {
     /// Automation, desktop, and remote modes remain unchanged.
     #[arg(long, verbatim_doc_comment)]
     shared: bool,
+
+    /// Continue the most recent session (skip startup page)
+    #[arg(long = "continue", conflicts_with = "session")]
+    continue_last: bool,
+
+    /// Open a specific session by ID (or "last" for the most recent)
+    #[arg(long, conflicts_with = "continue_last")]
+    session: Option<String>,
+
+    /// Specify the model ID for this session
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Specify the agent type for this session
+    #[arg(long)]
+    agent: Option<String>,
 }
 
 fn shared_tui_requested(shared: bool, command: &Option<Commands>) -> Result<bool> {
@@ -236,6 +295,48 @@ enum Commands {
         session_id: Option<String>,
     },
 
+    /// Show token usage and cost statistics across sessions
+    Stats {
+        /// Show stats for the last N days (default: all time)
+        #[arg(long)]
+        days: Option<u32>,
+
+        /// Number of tools to show (default: all)
+        #[arg(long)]
+        tools: Option<usize>,
+
+        /// Show model statistics (default: hidden). Pass a number to show top N
+        #[arg(long, num_args = 0..=1, default_missing_value = "0")]
+        models: Option<usize>,
+
+        /// Filter by project: "all" for all projects, or a specific workspace path
+        #[arg(long)]
+        project: Option<String>,
+    },
+
+    /// Export a session transcript as Markdown to stdout or file
+    Export {
+        /// Session ID to export (omit to interactively select, or use "last")
+        session_id: Option<String>,
+
+        /// Write to file instead of stdout
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Include reasoning/thinking content
+        #[arg(long)]
+        include_reasoning: bool,
+
+        /// Include tool call details
+        #[arg(long)]
+        include_tool_details: bool,
+
+        /// Open the exported Markdown in the external editor (VISUAL or EDITOR).
+        /// Without --output, a temporary file is used and removed afterwards.
+        #[arg(long)]
+        open_in_editor: bool,
+    },
+
     /// Diagnostic check
     Doctor,
 
@@ -321,6 +422,24 @@ enum McpAction {
         /// Output format for automation
         #[arg(long, value_enum, default_value_t = McpImportOutputFormat::Text)]
         format: McpImportOutputFormat,
+    },
+    /// Add an MCP server (three-step wizard: name, type, command/URL)
+    Add {
+        /// Step 1: server name (also used as id; no spaces)
+        #[arg(long)]
+        name: Option<String>,
+        /// Step 2: server type — accepts `local` or `remote`
+        #[arg(long, value_parser = ["local", "remote"])]
+        r#type: Option<String>,
+        /// Step 3: launch command for a local server (e.g. `npx -y @modelcontextprotocol/server-xxx`)
+        #[arg(long)]
+        command: Option<String>,
+        /// Step 3: server URL for a remote server
+        #[arg(long)]
+        url: Option<String>,
+        /// Skip interactive prompts for missing fields; error instead
+        #[arg(long)]
+        non_interactive: bool,
     },
 }
 
@@ -582,6 +701,12 @@ enum DaemonAction {
     Uninstall,
     /// Show daemon and auto-start service status
     Status,
+    #[command(name = "__dispatch_identity", hide = true)]
+    DispatchIdentity,
+    #[command(name = "__dispatch_provision", hide = true)]
+    DispatchProvision { request_path: std::path::PathBuf },
+    #[command(name = "__dispatch_deprovision", hide = true)]
+    DispatchDeprovision { device_id: String, user_id: String },
 }
 
 #[derive(Subcommand)]
@@ -794,38 +919,10 @@ async fn initialize_core_services_for_deployment(
         }
     }
 
-    // Initialize MCP service in background (non-blocking)
+    // Initialize MCP service in background (non-blocking).
     if bootstrap_profile.starts_mcp() {
-        if let Some(ref cfg_svc) = config_service {
-            match bitfun_core::service::mcp::MCPService::new(cfg_svc.clone()) {
-                Ok(mcp_service) => {
-                    let mcp_service = std::sync::Arc::new(mcp_service);
-                    MCP_SERVICE.set(mcp_service.clone()).ok();
-                    bitfun_core::service::mcp::set_global_mcp_service(mcp_service.clone());
-
-                    // Mark as in progress
-                    get_mcp_init_status().store(1, Ordering::Relaxed);
-
-                    // Background async initialization
-                    tokio::spawn(async move {
-                        let result = mcp_service.server_manager().initialize_all().await;
-                        match result {
-                            Ok(_) => {
-                                tracing::info!("MCP servers initialized successfully");
-                                get_mcp_init_status().store(2, Ordering::Relaxed);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to initialize MCP servers: {}", e);
-                                get_mcp_init_status().store(3, Ordering::Relaxed);
-                            }
-                        }
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create MCP service: {}", e);
-                    get_mcp_init_status().store(3, Ordering::Relaxed);
-                }
-            }
+        if let Some(config_service) = config_service {
+            ensure_cli_mcp_service(config_service);
         }
     }
 
@@ -851,6 +948,9 @@ async fn run_interactive(
     default_agent: String,
     _workspace_str: String,
     shared: bool,
+    agent_override: Option<String>,
+    model_id: Option<String>,
+    session_override: Option<String>,
 ) -> Result<()> {
     use ui::startup::{StartupPage, StartupResult};
 
@@ -878,30 +978,58 @@ async fn run_interactive(
             .await?,
         )
     };
-    let (agent, context_reload) = if let Some(runtime) = &runtime {
-        (
-            Arc::new(CliAgentRuntimeClient::new(
-                runtime.as_ref(),
-                Some(workspace_path.clone()),
-            )),
-            CliContextReloadClient::embedded(runtime.compatibility().clone()),
-        )
+    let embedded_app_server = if let Some(runtime) = &runtime {
+        Some(embedded_app_server::EmbeddedAppServerHost::start(runtime).await?)
+    } else {
+        None
+    };
+    let agent = if let Some(runtime) = &runtime {
+        let backend = embedded_app_server
+            .as_ref()
+            .expect("Embedded App Server should be started with the Runtime")
+            .backend();
+        Arc::new(TuiAgentClient::new(
+            backend,
+            Some(workspace_path.clone()),
+            false,
+            runtime.approval_policy(),
+        ))
     } else {
         let client = shared_runtime::connect_or_start(&workspace_path).await?;
-        (
-            Arc::new(CliAgentRuntimeClient::new_shared(
-                client.clone(),
-                Some(workspace_path.clone()),
-            )),
-            CliContextReloadClient::shared(client),
-        )
+        let config_service = bitfun_core::service::config::get_global_config_service()
+            .await
+            .map_err(|error| anyhow!("Failed to load Shared TUI management config: {error}"))?;
+        ensure_cli_mcp_service(config_service);
+        let management = Arc::new(bitfun_app_server::AppManagementService::load().await?);
+        let backend: Arc<dyn tui_backend::TuiBackend> = Arc::new(
+            shared_tui_backend::SharedTuiBackend::new(client, management),
+        );
+        let backend_initialized = backend
+            .initialize(bitfun_app_server_protocol::app::InitializeRequest {
+                protocol_version: bitfun_app_server_protocol::PROTOCOL_VERSION,
+                client: bitfun_app_server_protocol::app::ClientInfo {
+                    name: "bitfun-tui".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            })
+            .await?;
+        if backend_initialized.protocol_version != bitfun_app_server_protocol::PROTOCOL_VERSION {
+            anyhow::bail!("Shared TUI Host negotiated an incompatible protocol");
+        }
+        backend.health().await?;
+        Arc::new(TuiAgentClient::new(
+            backend,
+            Some(workspace_path.clone()),
+            true,
+            runtime::approval::CliApprovalPolicy::Ask,
+        ))
     };
-    let compatibility = runtime
-        .as_ref()
-        .map(|runtime| runtime.compatibility().clone());
     // 3.5 Restore persisted account session (if any)
     if !shared {
-        if let Some(user_id) = account::try_restore_session().await {
+        let runtime = runtime
+            .as_ref()
+            .expect("Embedded account startup requires the CLI Runtime");
+        if let Some(user_id) = runtime.account_runtime().try_restore_session().await {
             tracing::info!("Restored account session for user {user_id}");
             if daemon::is_daemon_running() {
                 tracing::info!(
@@ -910,7 +1038,11 @@ async fn run_interactive(
             } else {
                 let device = DeviceIdentity::from_current_machine()
                     .map_err(|e| anyhow!("detect device: {e}"))?;
-                if let Err(e) = account::restore_device_routing(&device.device_name).await {
+                if let Err(e) = runtime
+                    .account_runtime()
+                    .restore_device_routing(&device.device_name)
+                    .await
+                {
                     tracing::warn!("Failed to restore device routing: {e}");
                 }
             }
@@ -920,23 +1052,58 @@ async fn run_interactive(
     // 3.6 Continuous account settings sync (30s pull + debounced push).
     // Safe to start before login: cycles skip while logged out.
     if !shared {
-        account_sync::start_settings_sync_loop();
+        runtime
+            .as_ref()
+            .expect("Embedded settings sync requires the CLI Runtime")
+            .account_runtime()
+            .start_settings_sync_loop();
+    }
+
+    // Resolve agent override: validate against the agent registry AFTER core services init
+    let effective_agent = if let Some(ref override_val) = agent_override {
+        match resolve_agent_override(override_val).await {
+            Ok(valid_id) => valid_id,
+            Err(warning) => {
+                eprintln!("{warning}");
+                default_agent.clone()
+            }
+        }
+    } else {
+        default_agent.clone()
+    };
+
+    // If --continue or --session was given, skip the startup page and go directly
+    // to chat with the resolved session.
+    if let Some(ref session_spec) = session_override {
+        let restore_session_id = resolve_startup_session_override(&agent, session_spec).await?;
+
+        let mut chat_mode = ChatMode::new(config, effective_agent, workspace, agent)
+            .with_restore_session(restore_session_id);
+        if let Some(mid) = model_id {
+            chat_mode = chat_mode.with_model(mid);
+        }
+        let chat_result = chat_mode.run(Some(terminal));
+
+        if !shared {
+            shutdown_mcp_servers().await;
+        }
+        let _exit_reason = chat_result?;
+        println!("Goodbye!");
+        return Ok(());
     }
 
     // 4. Show startup page (with full command support)
     let mut startup_page = StartupPage::new(
         config,
         Arc::clone(&agent),
-        compatibility.clone(),
-        default_agent,
+        effective_agent,
         workspace.clone(),
     );
+    startup_page.set_model_override(model_id.clone());
     let startup_result = startup_page.run(&mut terminal)?;
 
     if let StartupResult::Exit = startup_result {
-        if !shared {
-            shutdown_mcp_servers().await;
-        }
+        shutdown_mcp_servers().await;
         ui::restore_terminal(terminal)?;
         println!("Goodbye!");
         return Ok(());
@@ -950,33 +1117,68 @@ async fn run_interactive(
     };
 
     let agent_type = startup_page.agent_type().to_string();
+    if matches!(startup_result, StartupResult::NewSession { .. }) {
+        if let Some(model_id) = startup_page.selected_model_id().map(str::to_string) {
+            agent
+                .ensure_session_with_model(&agent_type, Some(model_id))
+                .await?;
+        }
+    }
     // Use the current project workspace selected at process start.
     let workspace = startup_page.workspace();
     let config = startup_page.config().clone();
-    let mut chat_mode = ChatMode::new(
-        config,
-        agent_type,
-        workspace,
-        agent,
-        context_reload,
-        compatibility,
-    );
+    let mut chat_mode = ChatMode::new(config, agent_type, workspace, agent);
     if let Some(session_id) = restore_session_id {
         chat_mode = chat_mode.with_restore_session(session_id);
     }
     if let Some(prompt) = initial_prompt {
         chat_mode = chat_mode.with_initial_prompt(prompt);
     }
+    if let Some(mid) = model_id {
+        chat_mode = chat_mode.with_model(mid);
+    }
     let chat_result = chat_mode.run(Some(terminal));
 
     // 6. Cleanup, including fatal event-stream exits.
-    if !shared {
-        shutdown_mcp_servers().await;
-    }
+    shutdown_mcp_servers().await;
     let _exit_reason = chat_result?;
     println!("Goodbye!");
 
     Ok(())
+}
+
+/// Resolve a `--session` / `--continue` override to a concrete session ID.
+/// "last" (or empty for --continue) resolves to the most recent session.
+async fn resolve_startup_session_override(
+    agent: &Arc<TuiAgentClient>,
+    session_spec: &str,
+) -> Result<String> {
+    if session_spec == "last" || session_spec.is_empty() {
+        let sessions = agent.list_sessions().await?;
+        return sessions
+            .first()
+            .map(|s| s.session_id.clone())
+            .ok_or_else(|| anyhow!("No history sessions for current project"));
+    }
+    bitfun_agent_runtime::session_control::validate_session_id(session_spec)
+        .map_err(anyhow::Error::msg)?;
+    Ok(session_spec.to_string())
+}
+
+/// Validate an agent override against the agent registry.
+/// Returns the valid agent ID, or an error with a warning message.
+async fn resolve_agent_override(agent_override: &str) -> std::result::Result<String, String> {
+    let registry = bitfun_core::agentic::get_agent_registry();
+    let modes = registry.get_modes_info().await;
+    if modes.iter().any(|m| m.id == agent_override) {
+        Ok(agent_override.to_string())
+    } else {
+        let available: Vec<&str> = modes.iter().map(|m| m.id.as_str()).collect();
+        Err(format!(
+            "Warning: Agent '{agent_override}' not found. Available: {}. Using default.",
+            available.join(", ")
+        ))
+    }
 }
 
 // ======================== Main ========================
@@ -996,6 +1198,21 @@ impl std::error::Error for ReportedCliError {}
 
 fn is_dispatch_command(command: &Option<Commands>) -> bool {
     matches!(command, Some(Commands::Dispatch { .. }))
+}
+
+fn delivery_profile_for_command(
+    command: &Option<Commands>,
+) -> bitfun_core::product_assembly::DeliveryProfile {
+    if matches!(
+        command,
+        Some(Commands::Acp {
+            action: None | Some(AcpAction::Serve),
+        })
+    ) {
+        bitfun_core::product_assembly::DeliveryProfile::Acp
+    } else {
+        bitfun_core::product_assembly::DeliveryProfile::Cli
+    }
 }
 
 async fn run_cli() -> Result<()> {
@@ -1030,6 +1247,13 @@ async fn run_cli() -> Result<()> {
         }
         Err(error) => error.exit(),
     };
+
+    // Configuration canonicalization can initialize the process-wide tool
+    // registry. Select the owning product profile before telemetry initializes
+    // configuration so ACP cannot be claimed by the CLI/product-full profile.
+    agent::agentic_system::select_agentic_system_profile(delivery_profile_for_command(
+        &cli.command,
+    ))?;
 
     let is_tui_mode = matches!(cli.command, None | Some(Commands::Chat { .. }));
     let is_shared_service = matches!(cli.command, Some(Commands::SharedRuntime { .. }));
@@ -1071,6 +1295,19 @@ async fn run_cli() -> Result<()> {
             .init();
     }
 
+    let telemetry_runtime = initialize_cli_telemetry().await?;
+    let _telemetry_shutdown = telemetry_runtime.shutdown_guard();
+    let startup_observation = telemetry_runtime.startup_guard();
+    if CLI_TELEMETRY_RUNTIME.set(telemetry_runtime).is_err() {
+        tracing::error!(
+            operation = "register_cli_telemetry_runtime",
+            error_type = "already_initialized",
+            "Failed to register CLI telemetry runtime"
+        );
+        return Err(anyhow!("CLI telemetry runtime was already initialized"));
+    }
+    startup_observation.complete();
+
     let config = CliConfig::load().unwrap_or_else(|e| {
         if !is_tui_mode {
             eprintln!("Warning: Failed to load config: {}", e);
@@ -1085,7 +1322,16 @@ async fn run_cli() -> Result<()> {
     match cli.command {
         Some(Commands::Chat { agent, .. }) => {
             // Interactive mode with startup page, scoped to the current directory.
-            run_interactive(config, agent, ".".to_string(), use_shared_runtime).await?;
+            run_interactive(
+                config,
+                agent,
+                ".".to_string(),
+                use_shared_runtime,
+                cli.agent.clone(),
+                cli.model.clone(),
+                None,
+            )
+            .await?;
         }
 
         Some(Commands::SharedRuntime {
@@ -1140,6 +1386,23 @@ async fn run_cli() -> Result<()> {
             .await?;
         }
 
+        Some(Commands::Export {
+            session_id,
+            output,
+            include_reasoning,
+            include_tool_details,
+            open_in_editor,
+        }) => {
+            root_handlers::handle_export_action(
+                session_id,
+                output,
+                include_reasoning,
+                include_tool_details,
+                open_in_editor,
+            )
+            .await?;
+        }
+
         Some(Commands::Sessions { action }) => {
             if let Some((session_id, runtime)) =
                 root_handlers::handle_session_action(action).await?
@@ -1183,6 +1446,22 @@ async fn run_cli() -> Result<()> {
                     candidates: candidate,
                     native_id,
                     format,
+                })
+                .await?;
+            }
+            Some(McpAction::Add {
+                name,
+                r#type,
+                command,
+                url,
+                non_interactive,
+            }) => {
+                management::add_mcp_server(management::McpAddInput {
+                    name,
+                    r#type,
+                    command,
+                    url,
+                    non_interactive,
                 })
                 .await?;
             }
@@ -1230,13 +1509,22 @@ async fn run_cli() -> Result<()> {
             management::print_usage_report(session_id.as_deref()).await?;
         }
 
+        Some(Commands::Stats {
+            days,
+            tools,
+            models,
+            project,
+        }) => {
+            management::print_stats_report(days, tools, models, project).await?;
+        }
+
         Some(Commands::Doctor) => {
             let workspace = std::env::current_dir()?;
             let (_, services) =
                 bitfun_core::product_runtime::build_local_runtime_services(&workspace, 16)?;
             let product_runtime = product_assembly::assemble_cli_runtime_parts(services)?;
             if !management::print_doctor(&product_runtime).await? {
-                std::process::exit(1);
+                return Err(anyhow::Error::new(ReportedCliError { exit_code: 1 }));
             }
         }
 
@@ -1257,6 +1545,11 @@ async fn run_cli() -> Result<()> {
             DaemonAction::Install => daemon::install_service()?,
             DaemonAction::Uninstall => daemon::uninstall_service()?,
             DaemonAction::Status => daemon::print_status()?,
+            DaemonAction::DispatchIdentity => daemon::print_identity()?,
+            DaemonAction::DispatchProvision { request_path } => daemon::provision(request_path)?,
+            DaemonAction::DispatchDeprovision { device_id, user_id } => {
+                daemon::deprovision(device_id, user_id)?
+            }
         },
 
         Some(Commands::Dispatch { action }) => {
@@ -1279,7 +1572,7 @@ async fn run_cli() -> Result<()> {
             action: Some(AcpAction::Doctor { command }),
         }) => {
             if !acp_cli::print_doctor(&command).await? {
-                std::process::exit(1);
+                return Err(anyhow::Error::new(ReportedCliError { exit_code: 1 }));
             }
         }
 
@@ -1295,7 +1588,7 @@ async fn run_cli() -> Result<()> {
             AcpClientsAction::List => acp_cli::list_external_clients().await?,
             AcpClientsAction::Doctor => {
                 if !acp_cli::doctor_external_clients().await? {
-                    std::process::exit(1);
+                    return Err(anyhow::Error::new(ReportedCliError { exit_code: 1 }));
                 }
             }
             AcpClientsAction::Enable { client, permission } => {
@@ -1325,11 +1618,73 @@ async fn run_cli() -> Result<()> {
             let workspace_str = ".".to_string();
 
             let default_agent = config.behavior.default_agent.clone();
-            run_interactive(config, default_agent, workspace_str, use_shared_runtime).await?;
+
+            // Resolve --continue / --session into a session override spec.
+            let session_override = if cli.continue_last {
+                Some("last".to_string())
+            } else {
+                cli.session.clone()
+            };
+
+            run_interactive(
+                config,
+                default_agent,
+                workspace_str,
+                use_shared_runtime,
+                cli.agent.clone(),
+                cli.model.clone(),
+                session_override,
+            )
+            .await?;
         }
     }
 
     Ok(())
+}
+
+static CLI_TELEMETRY_RUNTIME: OnceLock<bitfun_observability_otel::TelemetryRuntimeHandle> =
+    OnceLock::new();
+
+pub(crate) fn cli_telemetry() -> bitfun_observability::Telemetry {
+    CLI_TELEMETRY_RUNTIME
+        .get()
+        .map_or_else(bitfun_observability::Telemetry::noop, |runtime| {
+            runtime.telemetry()
+        })
+}
+
+async fn initialize_cli_telemetry() -> Result<bitfun_observability_otel::TelemetryRuntimeHandle> {
+    use bitfun_observability_otel::{
+        SystemKeyringTelemetrySecrets, TelemetryDeploymentConfig, TelemetryRuntimeHandle,
+        TelemetryRuntimeMetadata,
+    };
+
+    bitfun_core::service::config::initialize_global_config()
+        .await
+        .map_err(|error| anyhow!("Failed to initialize global config service: {error}"))?;
+    let path_manager = bitfun_core::infrastructure::try_get_path_manager_arc()
+        .map_err(|error| anyhow!(error.to_string()))?;
+    let runtime = TelemetryRuntimeHandle::new(
+        TelemetryRuntimeMetadata::new(
+            bitfun_observability::TelemetryEntrypoint::Cli,
+            path_manager.user_data_dir(),
+        ),
+        std::sync::Arc::new(SystemKeyringTelemetrySecrets),
+    );
+    let service = bitfun_core::service::config::get_global_config_service().await?;
+    let config = service
+        .get_config::<bitfun_core::service::config::GlobalConfig>(None)
+        .await?;
+    if let Err(error) = runtime.apply_config(
+        &config.app.telemetry,
+        &TelemetryDeploymentConfig::from_product_build(),
+    ) {
+        tracing::warn!(
+            "Telemetry is unavailable; effective level is off: {}",
+            error
+        );
+    }
+    Ok(runtime)
 }
 
 fn exec_requests_json_output(args: &[std::ffi::OsString]) -> bool {
@@ -1359,12 +1714,13 @@ async fn run_interactive_with_session(
 
     let workspace_path = runtime.workspace_root().to_path_buf();
     let workspace = Some(workspace_path.to_string_lossy().to_string());
-    let agent = Arc::new(CliAgentRuntimeClient::new(
-        runtime.as_ref(),
+    let embedded_app_server = embedded_app_server::EmbeddedAppServerHost::start(&runtime).await?;
+    let agent = Arc::new(TuiAgentClient::new(
+        embedded_app_server.backend(),
         Some(workspace_path),
+        false,
+        runtime.approval_policy(),
     ));
-    let compatibility = runtime.compatibility().clone();
-    let context_reload = CliContextReloadClient::embedded(compatibility.clone());
     let sessions = agent.list_sessions().await?;
     let agent_type = sessions
         .iter()
@@ -1377,15 +1733,8 @@ async fn run_interactive_with_session(
             )
         })?;
 
-    let mut chat_mode = ChatMode::new(
-        config,
-        agent_type,
-        workspace,
-        agent,
-        context_reload,
-        Some(compatibility),
-    )
-    .with_restore_session(session_id);
+    let mut chat_mode =
+        ChatMode::new(config, agent_type, workspace, agent).with_restore_session(session_id);
     let run_result = chat_mode.run(Some(terminal));
 
     shutdown_mcp_servers().await;
@@ -1873,5 +2222,62 @@ mod dispatch_command_tests {
             .render_long_help()
             .to_string();
         assert!(!dispatch_help.contains("__run"));
+    }
+}
+
+#[cfg(test)]
+mod daemon_command_tests {
+    use super::{Cli, Commands, DaemonAction};
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn dispatch_daemon_bootstrap_commands_parse_and_stay_hidden() {
+        let identity = Cli::try_parse_from(["bitfun", "daemon", "__dispatch_identity"])
+            .expect("parse target identity command");
+        assert!(matches!(
+            identity.command,
+            Some(Commands::Daemon {
+                action: DaemonAction::DispatchIdentity
+            })
+        ));
+
+        let provision = Cli::try_parse_from([
+            "bitfun",
+            "daemon",
+            "__dispatch_provision",
+            "/tmp/request.json",
+        ])
+        .expect("parse target provisioning command");
+        assert!(matches!(
+            provision.command,
+            Some(Commands::Daemon {
+                action: DaemonAction::DispatchProvision { ref request_path }
+            }) if request_path == std::path::Path::new("/tmp/request.json")
+        ));
+
+        let rollback = Cli::try_parse_from([
+            "bitfun",
+            "daemon",
+            "__dispatch_deprovision",
+            "device-1",
+            "user-1",
+        ])
+        .expect("parse target rollback command");
+        assert!(matches!(
+            rollback.command,
+            Some(Commands::Daemon {
+                action: DaemonAction::DispatchDeprovision {
+                    ref device_id,
+                    ref user_id,
+                }
+            }) if device_id == "device-1" && user_id == "user-1"
+        ));
+
+        let daemon_help = Cli::command()
+            .find_subcommand_mut("daemon")
+            .expect("daemon command")
+            .render_long_help()
+            .to_string();
+        assert!(!daemon_help.contains("__dispatch_"));
     }
 }

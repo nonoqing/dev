@@ -1,5 +1,9 @@
-import { BASE_DISPATCH_CAPABILITIES } from './dispatchPreflight';
 // @vitest-environment jsdom
+
+import {
+  BASE_DISPATCH_CAPABILITIES,
+  DISPATCH_PROTOCOL_VERSION,
+} from './dispatchPreflight';
 
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -8,11 +12,24 @@ import { DispatchInstallDialog } from './DispatchInstallDialog';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
+/**
+ * What a usable target advertises. The approval policy is switched in the
+ * composer between turns, so setup accepts a target only when it can serve
+ * every policy the user may later pick.
+ */
+const READY_CAPABILITIES = [
+  ...BASE_DISPATCH_CAPABILITIES,
+  'approval_auto',
+  'approval_reject_and_report',
+  'approval_remote',
+];
+
 const mocks = vi.hoisted(() => ({
   probeTarget: vi.fn(),
-  syncModelConfig: vi.fn(),
-  confirmWarning: vi.fn(),
-  getConfig: vi.fn(),
+  installCliStart: vi.fn(),
+  installCliPoll: vi.fn(),
+  installCliCancel: vi.fn(),
+  provisionTarget: vi.fn(),
   getFreshConfig: vi.fn(),
   resolveRevision: vi.fn(),
   modalOnClose: null as (() => void) | null,
@@ -25,7 +42,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock('./dispatchApi', () => ({
   dispatchApi: {
     probeTarget: mocks.probeTarget,
-    syncModelConfig: mocks.syncModelConfig,
+    installCliStart: mocks.installCliStart,
+    installCliPoll: mocks.installCliPoll,
+    installCliCancel: mocks.installCliCancel,
+    provisionTarget: mocks.provisionTarget,
   },
 }));
 
@@ -35,21 +55,12 @@ vi.mock('@/infrastructure/i18n', () => ({
   }),
 }));
 
-vi.mock('@/infrastructure/config', () => ({
-  configManager: { getConfig: mocks.getConfig },
-}));
-
 vi.mock('@/infrastructure/api/service-api/ConfigAPI', () => ({
   configAPI: { getConfig: mocks.getFreshConfig },
 }));
 
 vi.mock('@/infrastructure/api/service-api/GitAPI', () => ({
   gitAPI: { resolveRevision: mocks.resolveRevision },
-}));
-
-vi.mock('@/infrastructure/config/services/modelConfigs', () => ({
-  getModelDisplayName: (config: { name?: string; model_name?: string }) =>
-    `${config.name ?? ''}/${config.model_name ?? ''}`,
 }));
 
 vi.mock('@/component-library', () => ({
@@ -106,7 +117,6 @@ vi.mock('@/component-library', () => ({
     };
     return isOpen ? <div>{children}</div> : null;
   },
-  confirmWarning: mocks.confirmWarning,
 }));
 
 function createDeferred<T>() {
@@ -139,8 +149,23 @@ describe('DispatchInstallDialog target preparation', () => {
         sha256: 'abc123',
       },
     });
-    mocks.confirmWarning.mockResolvedValue(true);
-    mocks.getConfig.mockResolvedValue([]);
+    mocks.installCliStart.mockResolvedValue({
+      scriptPath: '/tmp/install.sh',
+      version: '1.2.3',
+      target: 'x86_64-unknown-linux-gnu',
+      url: 'https://example.test/bitfun',
+      sha256: 'abc123',
+    });
+    mocks.installCliPoll.mockResolvedValue({
+      cursor: 1,
+      output: '',
+      status: 'succeeded',
+    });
+    mocks.installCliCancel.mockResolvedValue(undefined);
+    mocks.provisionTarget.mockResolvedValue({
+      accountStatus: 'skipped_not_logged_in',
+      daemonInstalled: false,
+    });
     mocks.getFreshConfig.mockResolvedValue(undefined);
     mocks.resolveRevision.mockResolvedValue('a'.repeat(40));
     container = document.createElement('div');
@@ -153,9 +178,42 @@ describe('DispatchInstallDialog target preparation', () => {
     container.remove();
   });
 
-  it('shows the verified release as automatic and follows the worktree copy setting', async () => {
+  it('deploys the verified release with one click and follows the worktree copy setting', async () => {
     const onReady = vi.fn();
     mocks.getFreshConfig.mockResolvedValue({ copyLocalChanges: true });
+    let installed = false;
+    mocks.installCliPoll.mockImplementation(async () => {
+      installed = true;
+      return { cursor: 1, output: '', status: 'succeeded' };
+    });
+    mocks.probeTarget.mockImplementation(async () => installed
+      ? {
+          cliInstalled: true,
+          os: 'linux',
+          arch: 'x86_64',
+          installSupported: false,
+          protocol: {
+            protocolVersion: DISPATCH_PROTOCOL_VERSION,
+            cliVersion: '1.2.3',
+            os: 'linux',
+            arch: 'x86_64',
+            capabilities: READY_CAPABILITIES,
+            modelConfigured: true,
+            availableModels: ['model-a'],
+          },
+        }
+      : {
+          cliInstalled: false,
+          os: 'linux',
+          arch: 'x86_64',
+          installSupported: true,
+          release: {
+            version: '1.2.3',
+            target: 'x86_64-unknown-linux-gnu',
+            url: 'https://example.test/bitfun',
+            sha256: 'abc123',
+          },
+        });
 
     await act(async () => {
       root.render(
@@ -175,11 +233,12 @@ describe('DispatchInstallDialog target preparation', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('dispatch.installAutomaticDescription');
+    expect(container.textContent).toContain('dispatch.oneClickDeployDescription');
+    expect(container.textContent).toContain('dispatch.oneClickDeploy');
     expect(container.textContent).toContain('1.2.3');
     expect(container.textContent).toContain('abc123');
     expect(container.querySelector('details')?.open).toBe(false);
-    expect(container.textContent).not.toContain('dispatch.installConfirm');
+    expect(container.textContent).not.toContain('dispatch.installAutomaticDescription');
     expect(mocks.modalLifecycleProps).toEqual({
       closeOnOverlayClick: true,
       showCloseButton: true,
@@ -187,11 +246,27 @@ describe('DispatchInstallDialog target preparation', () => {
     const includeUncommitted = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
     expect(includeUncommitted?.checked).toBe(true);
 
+    const useTargetBeforeSetup = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('dispatch.useTarget'));
+    expect(useTargetBeforeSetup?.disabled).toBe(true);
+
     await act(async () => {
       Array.from(container.querySelectorAll('button'))
-        .find(button => button.textContent?.includes('dispatch.approvalReject'))
+        .find(button => button.textContent?.includes('dispatch.oneClickDeploy'))
         ?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
     });
+
+    expect(mocks.installCliStart).toHaveBeenCalledWith(
+      'ssh-1',
+      expect.objectContaining({ version: '1.2.3', sha256: 'abc123' }),
+    );
+    expect(mocks.installCliPoll).toHaveBeenCalledWith('ssh-1', 0);
+    expect(mocks.provisionTarget).toHaveBeenCalledWith('ssh-1');
+    expect(container.textContent).toContain('dispatch.prepareSucceededCliOnly');
 
     await act(async () => {
       Array.from(container.querySelectorAll('button'))
@@ -208,9 +283,88 @@ describe('DispatchInstallDialog target preparation', () => {
     expect(onReady).toHaveBeenCalledWith(expect.objectContaining({
       baseRef: 'HEAD',
       includeUncommitted: true,
-      approvalPolicy: 'reject-and-report',
       request: { kind: 'ssh', connectionId: 'ssh-1', workspacePath: '' },
     }));
+    expect(onReady.mock.calls[0][0]).not.toHaveProperty('approvalPolicy');
+  });
+
+  it('retries only account and service provisioning after the CLI is installed', async () => {
+    let installed = false;
+    mocks.installCliPoll.mockImplementation(async () => {
+      installed = true;
+      return { cursor: 1, output: '', status: 'succeeded' };
+    });
+    mocks.probeTarget.mockImplementation(async () => installed
+      ? {
+          cliInstalled: true,
+          os: 'linux',
+          arch: 'x86_64',
+          installSupported: false,
+          protocol: {
+            protocolVersion: DISPATCH_PROTOCOL_VERSION,
+            cliVersion: '1.2.3',
+            os: 'linux',
+            arch: 'x86_64',
+            capabilities: READY_CAPABILITIES,
+            modelConfigured: true,
+            availableModels: ['model-a'],
+          },
+        }
+      : {
+          cliInstalled: false,
+          os: 'linux',
+          arch: 'x86_64',
+          installSupported: true,
+          release: {
+            version: '1.2.3',
+            target: 'x86_64-unknown-linux-gnu',
+            url: 'https://example.test/bitfun',
+            sha256: 'abc123',
+          },
+        });
+    mocks.provisionTarget
+      .mockRejectedValueOnce(new Error('relay temporarily unavailable'))
+      .mockResolvedValueOnce({ accountStatus: 'synced', daemonInstalled: true });
+
+    await act(async () => {
+      root.render(
+        <DispatchInstallDialog
+          open
+          target={{ kind: 'ssh', connectionId: 'ssh-1', displayName: 'build-host' }}
+          sourceWorkspacePath="/home/me/project"
+          onClose={vi.fn()}
+          onReady={vi.fn()}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find(button => button.textContent?.includes('dispatch.oneClickDeploy'))
+        ?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.installCliStart).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('dispatch.retryProvisionDescription');
+
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find(button => button.textContent?.includes('dispatch.retryProvision'))
+        ?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.installCliStart).toHaveBeenCalledTimes(1);
+    expect(mocks.provisionTarget).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('dispatch.prepareSucceededWithAccount');
   });
 
   it('does not overwrite a user choice when the worktree default resolves late', async () => {
@@ -252,6 +406,21 @@ describe('DispatchInstallDialog target preparation', () => {
   it('keeps setup open and reports an invalid base revision before creating a session', async () => {
     const onReady = vi.fn();
     mocks.resolveRevision.mockRejectedValue(new Error('unknown revision'));
+    mocks.probeTarget.mockResolvedValue({
+      cliInstalled: true,
+      os: 'linux',
+      arch: 'x86_64',
+      installSupported: false,
+      protocol: {
+        protocolVersion: DISPATCH_PROTOCOL_VERSION,
+        cliVersion: '1.2.3',
+        os: 'linux',
+        arch: 'x86_64',
+        capabilities: READY_CAPABILITIES,
+        modelConfigured: true,
+        availableModels: ['model-a'],
+      },
+    });
 
     await act(async () => {
       root.render(
@@ -278,9 +447,6 @@ describe('DispatchInstallDialog target preparation', () => {
         )?.set?.call(baseRefInput, 'missing/ref');
         baseRefInput.dispatchEvent(new Event('input', { bubbles: true }));
       }
-      Array.from(container.querySelectorAll('button'))
-        .find(button => button.textContent?.includes('dispatch.approvalReject'))
-        ?.click();
     });
 
     await act(async () => {
@@ -331,11 +497,6 @@ describe('DispatchInstallDialog target preparation', () => {
     expect(container.textContent).not.toContain('sourceBuild');
     expect(container.textContent).not.toContain('dispatch.installAutomaticDescription');
 
-    await act(async () => {
-      Array.from(container.querySelectorAll('button'))
-        .find(button => button.textContent?.includes('dispatch.approvalReject'))
-        ?.click();
-    });
     const useTarget = Array.from(container.querySelectorAll('button'))
       .find(button => button.textContent?.includes('dispatch.useTarget'));
     expect(
@@ -351,11 +512,11 @@ describe('DispatchInstallDialog target preparation', () => {
       arch: 'x86_64',
       installSupported: false,
       protocol: {
-        protocolVersion: 4,
+        protocolVersion: DISPATCH_PROTOCOL_VERSION,
         cliVersion: '1.2.3',
         os: 'linux',
         arch: 'x86_64',
-        capabilities: BASE_DISPATCH_CAPABILITIES.filter(
+        capabilities: READY_CAPABILITIES.filter(
           capability => capability !== 'workspace_git_sync',
         ),
         modelConfigured: true,
@@ -423,7 +584,7 @@ describe('DispatchInstallDialog target preparation', () => {
     expect(container.textContent).not.toContain('dispatch.snapshotResultLocationHint');
   });
 
-  it('preserves protocol v4 target model facts without a delivery-mode choice', async () => {
+  it('carries the target model snapshot without asking about models or approval', async () => {
     const onReady = vi.fn();
     mocks.probeTarget.mockResolvedValue({
       cliInstalled: true,
@@ -431,11 +592,11 @@ describe('DispatchInstallDialog target preparation', () => {
       arch: 'x86_64',
       installSupported: false,
       protocol: {
-        protocolVersion: 4,
+        protocolVersion: DISPATCH_PROTOCOL_VERSION,
         cliVersion: '1.2.3',
         os: 'linux',
         arch: 'x86_64',
-        capabilities: [...BASE_DISPATCH_CAPABILITIES, 'approval_remote'],
+        capabilities: READY_CAPABILITIES,
         modelConfigured: true,
         availableModels: ['model-a', 'model-b'],
         defaultModel: 'model-b',
@@ -456,11 +617,108 @@ describe('DispatchInstallDialog target preparation', () => {
       await Promise.resolve();
     });
 
-    const remoteApproval = Array.from(container.querySelectorAll('button'))
-      .find(button => button.textContent?.includes('dispatch.approvalRemote'));
+    // Both are ordinary composer controls, so setup neither shows nor asks.
+    expect(container.textContent).not.toContain('dispatch.approval');
+    expect(container.textContent).not.toContain('dispatch.modelStatus');
+    expect(container.textContent).not.toContain('dispatch.syncModel');
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+
+    const useTarget = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('dispatch.useTarget'));
+    expect(
+      useTarget?.disabled,
+      'a ready target needs no further choice before it can be used',
+    ).toBe(false);
+
     await act(async () => {
-      remoteApproval?.click();
+      useTarget?.click();
+      await Promise.resolve();
+      await Promise.resolve();
     });
+    expect(onReady).toHaveBeenCalledWith(expect.objectContaining({
+      includeUncommitted: false,
+      availableModels: ['model-a', 'model-b'],
+      defaultModel: 'model-b',
+    }));
+  });
+
+  it('rejects a target that cannot serve every approval policy', async () => {
+    // The policy is switched between turns, so a target that only supports the
+    // one the user happens to start with would break on the next turn.
+    mocks.probeTarget.mockResolvedValue({
+      cliInstalled: true,
+      os: 'linux',
+      arch: 'x86_64',
+      installSupported: false,
+      protocol: {
+        protocolVersion: DISPATCH_PROTOCOL_VERSION,
+        cliVersion: '1.2.3',
+        os: 'linux',
+        arch: 'x86_64',
+        capabilities: READY_CAPABILITIES.filter(
+          capability => capability !== 'approval_remote',
+        ),
+        modelConfigured: true,
+        availableModels: ['model-a'],
+      },
+    });
+
+    await act(async () => {
+      root.render(
+        <DispatchInstallDialog
+          open
+          target={{ kind: 'ssh', connectionId: 'ssh-1', displayName: 'build-host' }}
+          sourceWorkspacePath="/home/me/project"
+          onClose={vi.fn()}
+          onReady={vi.fn()}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('dispatch.cliUpdateRequired');
+    expect(container.textContent).not.toContain('approval_remote');
+    const useTarget = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('dispatch.useTarget'));
+    expect(useTarget?.disabled).toBe(true);
+  });
+
+  it('accepts a target with no model configured at all', async () => {
+    // Submission pushes this device's model configuration to a target that
+    // cannot serve the choice, so an empty target is a setup step the backend
+    // owns rather than a reason to refuse the target here.
+    const onReady = vi.fn();
+    mocks.probeTarget.mockResolvedValue({
+      cliInstalled: true,
+      os: 'linux',
+      arch: 'x86_64',
+      installSupported: false,
+      protocol: {
+        protocolVersion: DISPATCH_PROTOCOL_VERSION,
+        cliVersion: '1.2.3',
+        os: 'linux',
+        arch: 'x86_64',
+        capabilities: READY_CAPABILITIES,
+        modelConfigured: false,
+        availableModels: [],
+      },
+    });
+
+    await act(async () => {
+      root.render(
+        <DispatchInstallDialog
+          open
+          target={{ kind: 'ssh', connectionId: 'ssh-1', displayName: 'build-host' }}
+          sourceWorkspacePath="/home/me/project"
+          onClose={vi.fn()}
+          onReady={onReady}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
     const useTarget = Array.from(container.querySelectorAll('button'))
       .find(button => button.textContent?.includes('dispatch.useTarget'));
     expect(useTarget?.disabled).toBe(false);
@@ -470,274 +728,6 @@ describe('DispatchInstallDialog target preparation', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(onReady).toHaveBeenCalledWith(expect.objectContaining({
-      includeUncommitted: false,
-      approvalPolicy: 'remote',
-      availableModels: ['model-a', 'model-b'],
-      defaultModel: 'model-b',
-    }));
-  });
-
-});
-
-describe('DispatchInstallDialog model configuration sync', () => {
-  let container: HTMLDivElement;
-  let root: Root;
-  let modelConfigured: boolean;
-
-  const target = {
-    kind: 'ssh' as const,
-    connectionId: 'ssh-1',
-    displayName: 'build-host',
-  };
-
-  function probeResult() {
-    return {
-      cliInstalled: true,
-      os: 'linux',
-      arch: 'x86_64',
-      installSupported: true,
-      protocol: {
-        protocolVersion: 4,
-        cliVersion: '1.2.3',
-        os: 'linux',
-        arch: 'x86_64',
-        capabilities: [...BASE_DISPATCH_CAPABILITIES],
-        modelConfigured,
-        availableModels: modelConfigured ? ['claude'] : [],
-        defaultModel: modelConfigured ? 'claude' : undefined,
-      },
-    };
-  }
-
-  function syncButton() {
-    return Array.from(container.querySelectorAll('button'))
-      .find(button => button.textContent?.includes('dispatch.syncModelConfirm'));
-  }
-
-  async function mount(onClose = vi.fn()) {
-    await act(async () => {
-      root.render(
-        <DispatchInstallDialog
-          open
-          target={target}
-          onClose={onClose}
-          onReady={vi.fn()}
-        />,
-      );
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-  }
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    modelConfigured = false;
-    mocks.modalOnClose = null;
-    mocks.probeTarget.mockImplementation(async () => probeResult());
-    mocks.confirmWarning.mockResolvedValue(true);
-    mocks.getConfig.mockResolvedValue([
-      { id: 'claude', enabled: true, api_key: 'secret' },
-    ]);
-    mocks.getFreshConfig.mockResolvedValue(undefined);
-    mocks.resolveRevision.mockResolvedValue('a'.repeat(40));
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = createRoot(container);
-  });
-
-  afterEach(() => {
-    act(() => root.unmount());
-    container.remove();
-  });
-
-  it('hides model sync after the target matches this device', async () => {
-    await mount();
-    expect(syncButton()).toBeDefined();
-
-    mocks.syncModelConfig.mockImplementation(async () => {
-      modelConfigured = true;
-    });
-    const probesBeforeSync = mocks.probeTarget.mock.calls.length;
-
-    await act(async () => {
-      syncButton()?.click();
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(mocks.confirmWarning).toHaveBeenCalledTimes(1);
-    expect(mocks.syncModelConfig).toHaveBeenCalledWith('ssh-1');
-    // The sync re-probes so the model check reflects the target, not the write.
-    expect(mocks.probeTarget.mock.calls.length).toBeGreaterThan(probesBeforeSync);
-    expect(syncButton()).toBeUndefined();
-  });
-
-  it('does not write the credential-bearing config when the confirmation is declined', async () => {
-    await mount();
-    mocks.confirmWarning.mockResolvedValue(false);
-
-    await act(async () => {
-      syncButton()?.click();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(mocks.syncModelConfig).not.toHaveBeenCalled();
-    expect(syncButton()).toBeDefined();
-  });
-
-  it('keeps the dialog open while model sync is in progress', async () => {
-    const sync = createDeferred<void>();
-    const onClose = vi.fn();
-    mocks.syncModelConfig.mockReturnValue(sync.promise);
-    await mount(onClose);
-
-    await act(async () => {
-      syncButton()?.click();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(mocks.syncModelConfig).toHaveBeenCalledTimes(1);
-    const probesBeforeSettle = mocks.probeTarget.mock.calls.length;
-
-    await act(async () => {
-      mocks.modalOnClose?.();
-      await Promise.resolve();
-    });
-
-    expect(onClose).not.toHaveBeenCalled();
-    expect(mocks.modalLifecycleProps).toEqual({
-      closeOnOverlayClick: false,
-      showCloseButton: false,
-    });
-
-    await act(async () => {
-      modelConfigured = true;
-      sync.resolve(undefined);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(mocks.probeTarget.mock.calls.length).toBeGreaterThan(probesBeforeSettle);
-    expect(syncButton()).toBeUndefined();
-  });
-});
-
-describe('DispatchInstallDialog target model readout', () => {
-  let container: HTMLDivElement;
-  let root: Root;
-
-  const target = {
-    kind: 'ssh' as const,
-    connectionId: 'ssh-1',
-    displayName: 'build-host',
-  };
-
-  function localModel(id: string, modelName: string) {
-    return {
-      id,
-      name: 'Anthropic',
-      model_name: modelName,
-      provider: 'anthropic',
-      base_url: 'https://example.test',
-      api_key: 'secret',
-      enabled: true,
-      category: 'chat',
-      capabilities: [],
-    };
-  }
-
-  function probeWith(availableModels: string[], defaultModel: string) {
-    return {
-      cliInstalled: true,
-      os: 'linux',
-      arch: 'x86_64',
-      installSupported: true,
-      protocol: {
-        protocolVersion: 4,
-        cliVersion: '1.2.3',
-        os: 'linux',
-        arch: 'x86_64',
-        capabilities: [...BASE_DISPATCH_CAPABILITIES],
-        modelConfigured: true,
-        availableModels,
-        defaultModel,
-      },
-    };
-  }
-
-  async function mount() {
-    await act(async () => {
-      root.render(
-        <DispatchInstallDialog
-          open
-          target={target}
-          onClose={vi.fn()}
-          onReady={vi.fn()}
-        />,
-      );
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-  }
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mocks.modalOnClose = null;
-    mocks.confirmWarning.mockResolvedValue(true);
-    mocks.getFreshConfig.mockResolvedValue(undefined);
-    mocks.resolveRevision.mockResolvedValue('a'.repeat(40));
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = createRoot(container);
-  });
-
-  afterEach(() => {
-    act(() => root.unmount());
-    container.remove();
-  });
-
-  it('reports parity with this device instead of an opaque config id', async () => {
-    mocks.probeTarget.mockResolvedValue(
-      probeWith(['model_1', 'model_2'], 'model_2'),
-    );
-    mocks.getConfig.mockResolvedValue([
-      localModel('model_1', 'claude-haiku'),
-      localModel('model_2', 'claude-opus'),
-    ]);
-
-    await mount();
-
-    expect(container.textContent).toContain('dispatch.modelMatchesLocal');
-    expect(container.textContent).not.toContain('dispatch.modelDiffersFromLocal');
-    // The id itself must never be what the user is asked to read.
-    expect(container.textContent).not.toContain('model_2');
-  });
-
-  it('reports the target model count when the catalogs differ', async () => {
-    mocks.probeTarget.mockResolvedValue(probeWith(['model_1'], 'model_1'));
-    mocks.getConfig.mockResolvedValue([
-      localModel('model_1', 'claude-haiku'),
-      localModel('model_2', 'claude-opus'),
-    ]);
-
-    await mount();
-
-    expect(container.textContent).toContain('dispatch.modelDiffersFromLocal');
-    expect(container.textContent).not.toContain('dispatch.modelMatchesLocal');
-  });
-
-  it('claims no parity when the local catalog cannot be read', async () => {
-    mocks.probeTarget.mockResolvedValue(probeWith(['model_1'], 'model_1'));
-    mocks.getConfig.mockRejectedValue(new Error('config unavailable'));
-
-    await mount();
-
-    expect(container.textContent).toContain('dispatch.modelReadyCount');
-    expect(container.textContent).not.toContain('dispatch.modelMatchesLocal');
-    expect(container.textContent).not.toContain('dispatch.modelDiffersFromLocal');
+    expect(onReady).toHaveBeenCalledTimes(1);
   });
 });

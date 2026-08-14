@@ -80,9 +80,12 @@ import {
 } from '../main/ets/services/VoiceInputLifecycleController';
 import { VoiceInputCallbacks, VoiceInputService } from '../main/ets/services/VoiceInputService';
 import { AppShellState } from '../main/ets/pages/state/AppShellState';
+import { ConversationCoreState } from '../main/ets/pages/state/ConversationCoreState';
 import { GeneralChatPageState } from '../main/ets/pages/state/GeneralChatPageState';
+import { RemoteCreateSessionState } from '../main/ets/pages/state/RemoteCreateSessionState';
 import { RemotePageState } from '../main/ets/pages/state/RemotePageState';
 import { ConversationViewState } from '../main/ets/pages/state/ConversationViewState';
+import { ConversationController } from '../main/ets/pages/viewmodel/ConversationController';
 import {
   GENERAL_CHAT_COMPOSER_CAPABILITIES,
   REMOTE_CHAT_COMPOSER_CAPABILITIES
@@ -253,6 +256,24 @@ export default function conversationStateUnitTest() {
       expect(items[1].type).assertEqual('assistant_live_turn');
       expect(items[1].isFinalizing).assertEqual(true);
     });
+
+    it('offers retry only for the latest unresolved failed message', 0, () => {
+      const interrupted = chatMessage('assistant-failed-1', 'assistant', 'Partial reply', 'failed');
+      interrupted.detail = 'Retry prompt';
+      const unresolved = ChatTimelineProjector.project([
+        chatMessage('user-1', 'user', 'Retry prompt'),
+        interrupted
+      ], [], chatMessage('', 'assistant', ''), false);
+      const continued = ChatTimelineProjector.project([
+        chatMessage('user-1', 'user', 'Retry prompt'),
+        interrupted,
+        chatMessage('user-2', 'user', 'Continue')
+      ], [], chatMessage('', 'assistant', ''), false);
+
+      expect(unresolved[1].showRetryAction).assertTrue();
+      expect(continued[1].showRetryAction).assertFalse();
+      expect(continued[2].showRetryAction).assertFalse();
+    });
   });
 
   describe('ChatTimelineStore', () => {
@@ -290,6 +311,61 @@ export default function conversationStateUnitTest() {
       state = store.snapshot();
       expect(state.persistedMessages.length).assertEqual(2);
       expect(state.activeTurn ? state.activeTurn.id : '').assertEqual('');
+    });
+
+    it('never offers a placeholder id as the turn to cancel', 0, () => {
+      const store = new ChatTimelineStore();
+      store.reset('session-stop');
+      store.appendOptimisticMessage(chatMessage('local-1', 'user', 'Run it'));
+      const pendingActiveId = store.setPendingActiveTurn('local-1');
+      const pendingTurn = store.snapshot().activeTurn;
+
+      // The placeholder is what the user sees while the desktop has not yet
+      // reported a turn — asking to cancel `pending-local-1` would be refused
+      // as stale, so this window must resolve to "cancel whatever is running".
+      expect(pendingActiveId).assertEqual('active-pending-local-1');
+      expect(ChatTimelineStore.cancelableTurnId(pendingTurn!)).assertEqual('');
+
+      store.setLocalActiveTurn('turn-9');
+      expect(ChatTimelineStore.cancelableTurnId(store.snapshot().activeTurn!)).assertEqual('turn-9');
+    });
+
+    it('keeps a message sent mid-run below the reply it is waiting on', 0, () => {
+      const store = new ChatTimelineStore();
+      store.reset('session-queue');
+      // The turn the desktop is already running: its own user message came back
+      // persisted, which is what leaves nothing for the turn to sit behind.
+      store.mergePersistedMessages([chatMessage('user-1', 'user', 'First')]);
+      store.setLocalActiveTurn('turn-1');
+      store.appendOptimisticMessage(chatMessage('local-2', 'user', 'Second'));
+
+      const items = store.project(false);
+      expect(items.length).assertEqual(3);
+      expect(items[0].type).assertEqual('user_message');
+      expect(items[1].type).assertEqual('assistant_live_turn');
+      expect(items[2].type).assertEqual('optimistic_user_message');
+      expect(items[2].message ? items[2].message!.id : '').assertEqual('local-2');
+    });
+
+    it('still draws the first reply under the message that started it', 0, () => {
+      const store = new ChatTimelineStore();
+      store.reset('session-first');
+      store.appendOptimisticMessage(chatMessage('local-1', 'user', 'First'));
+      store.setPendingActiveTurn('local-1');
+
+      // Nothing has been persisted yet, so without the anchor the placeholder
+      // would render above the message the user just sent.
+      expect(store.activeTurnAnchorId()).assertEqual('local-1');
+      const pending = store.project(false);
+      expect(pending[0].type).assertEqual('optimistic_user_message');
+      expect(pending[1].type).assertEqual('assistant_live_turn');
+
+      // Promoting the placeholder to the real turn must not lose the anchor.
+      store.setLocalActiveTurn('turn-1');
+      expect(store.activeTurnAnchorId()).assertEqual('local-1');
+      const promoted = store.project(false);
+      expect(promoted[0].type).assertEqual('optimistic_user_message');
+      expect(promoted[1].type).assertEqual('assistant_live_turn');
     });
 
     it('projects empty state through the store', 0, () => {
@@ -546,6 +622,81 @@ export default function conversationStateUnitTest() {
     });
   });
 
+  describe('ConversationController', () => {
+    it('keeps composer state isolated while the visible route changes', 0, () => {
+      const general = new GeneralChatPageState();
+      const remote = new RemotePageState();
+      const remoteCreate = new RemoteCreateSessionState();
+      let route = AppRoute.ChatHome;
+      const controller = new ConversationController(
+        general,
+        remote,
+        remoteCreate,
+        { currentRoute: (): AppRoute => route }
+      );
+
+      controller.setChatInput(AppRoute.ChatHome, 'general draft');
+      controller.setChatInput(AppRoute.RemoteChat, 'remote draft');
+      controller.setChatInput(AppRoute.RemoteCreate, 'create draft');
+
+      expect(controller.visibleChatInput()).assertEqual('general draft');
+      route = AppRoute.RemoteChat;
+      expect(controller.visibleChatInput()).assertEqual('remote draft');
+      route = AppRoute.RemoteCreate;
+      expect(controller.visibleChatInput()).assertEqual('create draft');
+      expect(general.chatInput).assertEqual('general draft');
+      expect(remote.chatInput).assertEqual('remote draft');
+    });
+
+    it('clears voice state for every conversation surface on teardown', 0, () => {
+      const general = new GeneralChatPageState();
+      const remote = new RemotePageState();
+      const remoteCreate = new RemoteCreateSessionState();
+      const controller = new ConversationController(
+        general,
+        remote,
+        remoteCreate,
+        { currentRoute: (): AppRoute => AppRoute.RemoteCreate }
+      );
+      controller.setVoiceListening(AppRoute.ChatHome, true);
+      controller.setVoiceListening(AppRoute.RemoteChat, true);
+      controller.setVoiceListening(AppRoute.RemoteCreate, true);
+
+      controller.clearAllVoiceListening();
+
+      expect(general.isVoiceListening).assertFalse();
+      expect(remote.isVoiceListening).assertFalse();
+      expect(remoteCreate.isVoiceListening).assertFalse();
+    });
+  });
+
+  describe('ConversationCoreState', () => {
+    it('owns shared conversation data while keeping product surfaces isolated', 0, () => {
+      const general = new ConversationCoreState('chat');
+      const remote = new ConversationCoreState('code');
+      general.setActiveSession({
+        sessionId: 'general-core', title: 'General', workspacePath: '', agentType: 'code'
+      });
+      remote.setActiveSession({
+        sessionId: 'remote-core', title: 'Remote', workspacePath: '/workspace', agentType: 'code'
+      });
+      general.setChatInput('general draft');
+      remote.setChatInput('remote draft');
+      general.setBusy(true);
+
+      expect(general.activeSession.agentType).assertEqual('chat');
+      expect(remote.activeSession.agentType).assertEqual('code');
+      expect(general.chatInput).assertEqual('general draft');
+      expect(remote.chatInput).assertEqual('remote draft');
+      expect(remote.isBusy).assertFalse();
+
+      general.clearActiveSession();
+      expect(general.activeSession.sessionId).assertEqual('');
+      expect(remote.activeSession.sessionId).assertEqual('remote-core');
+      expect(remote.chatInput).assertEqual('remote draft');
+    });
+  });
+
   describe('GeneralChatPageState', () => {
     it('projects configuration, busy state, and status text', 0, () => {
       const state = new GeneralChatPageState();
@@ -779,6 +930,9 @@ export default function conversationStateUnitTest() {
       });
       state.setTimelineProjection([userMessage], [], activeTurn, false, timelineItems);
       state.setModelCatalog(modelCatalog, 'model-a');
+      state.setConversationLoading(true);
+      state.setPendingSessionId('remote-2');
+      state.setConversationDismissed(true);
       timelineItems.length = 0;
 
       expect(state.activeSession.sessionId).assertEqual('remote-1');
@@ -787,6 +941,14 @@ export default function conversationStateUnitTest() {
       expect(state.hasRunningActiveTurn()).assertTrue();
       expect(state.modelCatalog.version).assertEqual(2);
       expect(state.selectedModelId).assertEqual('model-a');
+      expect(state.isLoadingConversation).assertTrue();
+      expect(state.pendingSessionId).assertEqual('remote-2');
+      expect(state.isConversationDismissed).assertTrue();
+
+      state.clearActiveSession();
+      expect(state.pendingSessionId).assertEqual('');
+      expect(state.isLoadingConversation).assertFalse();
+      expect(state.isConversationDismissed).assertFalse();
     });
 
     it('copies nested remote session projection and replaces streaming turn snapshots', 0, () => {
@@ -914,6 +1076,7 @@ export default function conversationStateUnitTest() {
       remote.setActiveSession({
         sessionId: 'remote-session', title: 'Remote', workspacePath: '/repo', agentType: 'code'
       });
+      remote.setConversationLoading(true);
       const general = new GeneralChatPageState();
       general.setChatInput('general draft');
       general.setActiveSession({
@@ -923,7 +1086,9 @@ export default function conversationStateUnitTest() {
       const remoteProjection = ConversationViewState.project(AppRoute.RemoteChat, remote, general, '');
       expect(remoteProjection.surface).assertEqual(ChatSurface.Remote);
       expect(remoteProjection.chatInput).assertEqual('remote draft');
-      expect(remoteProjection.activeSession.sessionId).assertEqual('remote-session');
+      expect(remoteProjection.activeSession.sessionId).assertEqual('');
+      expect(remote.activeSession.sessionId).assertEqual('remote-session');
+      expect(remoteProjection.isLoadingConversation).assertTrue();
 
       const generalProjection = ConversationViewState.project(AppRoute.ChatHome, remote, general, 'Configure model');
       expect(generalProjection.surface).assertEqual(ChatSurface.General);
@@ -950,6 +1115,39 @@ export default function conversationStateUnitTest() {
       expect(sessions[0].id).assertEqual('shared-session');
       expect(sessions[1].id).assertEqual('one-session');
       expect(sessions[2].id).assertEqual('two-session');
+    });
+
+    // Listings run several at a time, so the result can no longer be read off
+    // the order they happened to finish in.
+    it('keeps results in path order across concurrency batches', 0, async () => {
+      const source = new FakeRemoteWorkspaceDataSource();
+      const paths: string[] = [];
+      for (let index = 0; index < 9; index++) {
+        const path = `/workspace-${index}`;
+        paths.push(path);
+        source.sessionsByPath.set(path, [remoteSession(`session-${index}`, `Session ${index}`)]);
+      }
+      const coordinator = new RemoteWorkspaceCoordinator(source);
+
+      const sessions = await coordinator.sessionsForWorkspaces(paths);
+      expect(sessions.length).assertEqual(9);
+      expect(sessions[0].id).assertEqual('session-0');
+      expect(sessions[4].id).assertEqual('session-4');
+      expect(sessions[8].id).assertEqual('session-8');
+      expect(source.listedPaths.length).assertEqual(9);
+    });
+
+    it('keeps the other workspaces when one of them cannot be listed', 0, async () => {
+      const source = new FakeRemoteWorkspaceDataSource();
+      source.sessionsByPath.set('/one', [remoteSession('one-session', 'One')]);
+      source.sessionsByPath.set('/three', [remoteSession('three-session', 'Three')]);
+      source.failingPaths = ['/two'];
+      const coordinator = new RemoteWorkspaceCoordinator(source);
+
+      const sessions = await coordinator.sessionsForWorkspaces(['/one', '/two', '/three']);
+      expect(sessions.length).assertEqual(2);
+      expect(sessions[0].id).assertEqual('one-session');
+      expect(sessions[1].id).assertEqual('three-session');
     });
   });
 

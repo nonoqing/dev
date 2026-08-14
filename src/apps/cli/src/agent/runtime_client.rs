@@ -13,8 +13,8 @@ use tokio::sync::{broadcast, Mutex};
 
 use bitfun_agent_runtime::sdk::{
     AgentDialogSteerRequest, AgentDialogTurnExecution, AgentDialogTurnRequest, AgentEventReceiver,
-    AgentInputAttachment, AgentLocalCommandTurnRecordRequest,
-    AgentMessageWorkspaceReferencesRequest, AgentRuntime, AgentSessionCompactionRequest,
+    AgentInputAttachment, AgentMessageWorkspaceReferencesRequest, AgentRuntime,
+    AgentSessionCompactionRequest,
     AgentSessionCreateRequest, AgentSessionDeleteRequest, AgentSessionForkBeforeTurnRequest,
     AgentSessionForkRequest, AgentSessionForkResult, AgentSessionLineageCancellationRequest,
     AgentSessionLineageInspection, AgentSessionLineageRequest, AgentSessionLineageSnapshot,
@@ -287,7 +287,7 @@ fn same_workspace_location(left: &Path, right: &Path) -> bool {
 
 /// CLI-owned client for the portable Agent Runtime SDK.
 /// Stateless regarding agent_type; callers pass it per call.
-pub(crate) struct CliAgentRuntimeClient {
+pub(crate) struct ExecAgentRuntimeClient {
     backend: CliAgentRuntimeBackend,
     approval_policy: Arc<RwLock<CliApprovalPolicy>>,
     workspace_paths: Arc<RwLock<CliWorkspacePaths>>,
@@ -306,9 +306,17 @@ enum CliAgentRuntimeBackend {
     Shared(RuntimeIpcClient),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CliAgentMode {
+    pub(crate) id: String,
+    pub(crate) description: String,
+    pub(crate) model_id: Option<String>,
+    pub(crate) is_external: bool,
+}
+
 type SharedBroadcast<T> = Arc<RwLock<Option<broadcast::Sender<T>>>>;
 
-impl CliAgentRuntimeClient {
+impl ExecAgentRuntimeClient {
     pub(crate) fn new(runtime: &CliRuntimeContext, workspace_path: Option<PathBuf>) -> Self {
         Self {
             backend: CliAgentRuntimeBackend::Embedded(runtime.agent_runtime().clone()),
@@ -351,6 +359,58 @@ impl CliAgentRuntimeClient {
 
     pub(crate) fn is_shared(&self) -> bool {
         matches!(self.backend, CliAgentRuntimeBackend::Shared(_))
+    }
+
+    /// Read the main-agent catalog from the execution owner. Embedded and
+    /// Shared TUI expose the same small presentation projection; Shared never
+    /// consults the controller process's local registry.
+    pub(crate) async fn available_agent_modes(&self) -> Result<Vec<CliAgentMode>> {
+        match &self.backend {
+            CliAgentRuntimeBackend::Embedded(_) => {
+                let workspace = self.workspace_path_buf();
+                if let Err(error) =
+                    bitfun_core::external_sources::ensure_external_source_workspace_snapshot(Some(
+                        &workspace,
+                    ))
+                    .await
+                {
+                    tracing::warn!("Failed to initialize external agent sources: {error}");
+                }
+                let registry = bitfun_core::agentic::agents::get_agent_registry();
+                Ok(registry
+                    .get_modes_info_for_workspace(Some(&workspace), true)
+                    .await
+                    .into_iter()
+                    .map(|mode| CliAgentMode {
+                        id: mode.id,
+                        description: mode.description,
+                        model_id: mode.model,
+                        is_external: mode.source
+                            == bitfun_core::agentic::agents::AgentSource::External,
+                    })
+                    .collect())
+            }
+            CliAgentRuntimeBackend::Shared(client) => {
+                let session_id = self.session_id.lock().await.clone();
+                match client
+                    .request(RuntimeIpcOperation::ListAgentModes { session_id })
+                    .await?
+                {
+                    RuntimeIpcOperationResult::AgentModes { modes } => Ok(modes
+                        .into_iter()
+                        .map(|mode| CliAgentMode {
+                            id: mode.id,
+                            description: mode.description,
+                            model_id: mode.model_id,
+                            is_external: mode.is_external,
+                        })
+                        .collect()),
+                    other => Err(anyhow::anyhow!(
+                    "Shared Runtime returned an unexpected result for list_agent_modes: {other:?}"
+                )),
+                }
+            }
+        }
     }
 
     fn embedded_runtime(&self, operation: &str) -> Result<&AgentRuntime> {
@@ -423,17 +483,6 @@ impl CliAgentRuntimeClient {
                 )
             }
         }
-    }
-
-    pub(crate) async fn record_completed_local_command_turn(
-        &self,
-        request: AgentLocalCommandTurnRecordRequest,
-    ) -> Result<()> {
-        self.embedded_runtime("recording local command turns")?
-            .record_completed_local_command_turn(request)
-            .await
-            .map(|_| ())
-            .map_err(|error| anyhow::anyhow!(error.into_message()))
     }
 
     pub(crate) fn set_approval_policy(&self, policy: CliApprovalPolicy) {
@@ -636,7 +685,7 @@ impl CliAgentRuntimeClient {
         let previous_summary =
             validated_session_summary(&sessions, session_id, &project_workspace)?;
 
-        let (restored, transcript, shared_pending) = match &self.backend {
+        let (restored, transcript, shared_pending, shared_workspace_binding) = match &self.backend {
             CliAgentRuntimeBackend::Embedded(runtime) => {
                 let restored = runtime
                     .restore_session(AgentSessionRestoreRequest {
@@ -666,7 +715,7 @@ impl CliAgentRuntimeClient {
                             messages: Vec::new(),
                         }
                     });
-                (restored, transcript, None)
+                (restored, transcript, None, None)
             }
             CliAgentRuntimeBackend::Shared(client) => match client
                 .request(RuntimeIpcOperation::RestoreSession {
@@ -680,16 +729,27 @@ impl CliAgentRuntimeClient {
             {
                 RuntimeIpcOperationResult::SessionRestored {
                     session,
+                    workspace_binding,
                     transcript,
                     pending_permissions,
-                } => (session, transcript, Some(pending_permissions)),
+                    ..
+                } => (
+                    session,
+                    transcript,
+                    Some(pending_permissions),
+                    Some(workspace_binding),
+                ),
                 _ => return Err(unexpected_shared_result("restore_session")),
             },
         };
 
-        let binding = self
-            .resolve_session_workspace_binding(session_id, &project_workspace)
-            .await?;
+        let binding = if let Some(binding) = shared_workspace_binding {
+            self.set_workspace_binding(&binding);
+            binding
+        } else {
+            self.resolve_session_workspace_binding(session_id, &project_workspace)
+                .await?
+        };
         let mut session_id_guard = self.session_id.lock().await;
         let mut turn_id_guard = self.current_turn_id.lock().await;
         *session_id_guard = Some(session_id.to_string());
@@ -885,7 +945,7 @@ impl CliAgentRuntimeClient {
     )> {
         let source_session_id = self.require_session_id().await?;
         let workspace_path = self.project_workspace_path_string();
-        let (session, transcript) = match &self.backend {
+        let (session, transcript, shared_workspace_binding) = match &self.backend {
             CliAgentRuntimeBackend::Embedded(runtime) => {
                 let forked = match before_turn_id {
                     Some(source_turn_id) => {
@@ -928,7 +988,7 @@ impl CliAgentRuntimeClient {
                     })
                     .await
                     .map_err(|error| anyhow::anyhow!(error.into_message()))?;
-                (restored.session, transcript)
+                (restored.session, transcript, None)
             }
             CliAgentRuntimeBackend::Shared(client) => match client
                 .request(RuntimeIpcOperation::ForkSession {
@@ -941,15 +1001,20 @@ impl CliAgentRuntimeClient {
             {
                 RuntimeIpcOperationResult::SessionForked {
                     session,
+                    workspace_binding,
                     transcript,
-                } => (session, transcript),
+                } => (session, transcript, Some(workspace_binding)),
                 _ => return Err(unexpected_shared_result("fork_session")),
             },
         };
 
-        let binding = self
-            .resolve_session_workspace_binding(&session.session_id, Path::new(&workspace_path))
-            .await?;
+        let binding = if let Some(binding) = shared_workspace_binding {
+            self.set_workspace_binding(&binding);
+            binding
+        } else {
+            self.resolve_session_workspace_binding(&session.session_id, Path::new(&workspace_path))
+                .await?
+        };
         *self.session_id.lock().await = Some(session.session_id.clone());
         *self.current_turn_id.lock().await = None;
         self.shared_pending_permissions
@@ -1195,8 +1260,18 @@ impl CliAgentRuntimeClient {
     }
 }
 
-impl CliAgentRuntimeClient {
+impl ExecAgentRuntimeClient {
     pub(crate) async fn ensure_session(&self, agent_type: &str) -> Result<String> {
+        self.ensure_session_with_model(agent_type, None).await
+    }
+
+    /// Ensure the startup Session exists, preserving an explicit user model
+    /// selection in the authoritative creation request.
+    pub(crate) async fn ensure_session_with_model(
+        &self,
+        agent_type: &str,
+        model_id: Option<String>,
+    ) -> Result<String> {
         let mut session_id_guard = self.session_id.lock().await;
 
         if let Some(ref id) = *session_id_guard {
@@ -1212,7 +1287,7 @@ impl CliAgentRuntimeClient {
             workspace_id: None,
             remote_connection_id: None,
             remote_ssh_host: None,
-            model_id: None,
+            model_id,
             metadata: serde_json::Map::new(),
         };
         let session = match &self.backend {
@@ -1457,6 +1532,9 @@ impl CliAgentRuntimeClient {
             turn_id: turn_id.clone(),
             content,
             display_content,
+            // The CLI steer prompt is text; attachments ride turn submissions.
+            attachments: Vec::new(),
+            metadata: serde_json::Map::new(),
         };
 
         match &self.backend {
@@ -1887,7 +1965,7 @@ fn unexpected_shared_result(operation: &str) -> anyhow::Error {
 mod recovery_tests {
     use bitfun_agent_runtime::sdk::{PortError, PortErrorKind, RuntimeError};
 
-    use super::CliAgentRuntimeClient;
+    use super::ExecAgentRuntimeClient;
 
     #[test]
     fn session_recovery_requires_structured_not_found_error() {
@@ -1896,10 +1974,10 @@ mod recovery_tests {
         let unrelated_backend_error =
             RuntimeError::Port(PortError::new(PortErrorKind::Backend, "model not found"));
 
-        assert!(CliAgentRuntimeClient::is_session_not_found_error(
+        assert!(ExecAgentRuntimeClient::is_session_not_found_error(
             &missing_session
         ));
-        assert!(!CliAgentRuntimeClient::is_session_not_found_error(
+        assert!(!ExecAgentRuntimeClient::is_session_not_found_error(
             &unrelated_backend_error
         ));
     }
@@ -2119,6 +2197,23 @@ mod tests {
     }
 
     #[test]
+    fn startup_model_selection_is_sent_in_the_session_creation_request() {
+        let source = include_str!("runtime_client.rs").replace("\r\n", "\n");
+        let creation = source
+            .split_once("pub(crate) async fn ensure_session_with_model(")
+            .expect("explicit startup session creation method")
+            .1
+            .split_once("pub(crate) async fn start_session_compaction(")
+            .expect("explicit startup session creation boundary")
+            .0;
+
+        assert!(creation.contains("model_id: Option<String>"));
+        assert!(creation.contains("AgentSessionCreateRequest"));
+        assert!(creation.contains("model_id,"));
+        assert!(creation.contains("RuntimeIpcOperation::CreateSession { request }"));
+    }
+
+    #[test]
     fn session_rename_uses_direct_runtime_or_private_shared_ipc() {
         let source = include_str!("runtime_client.rs").replace("\r\n", "\n");
         let rename = source
@@ -2332,6 +2427,7 @@ mod tests {
             session_name: "Workspace session".to_string(),
             agent_type: "agentic".to_string(),
             model_id: None,
+            reasoning_preset: None,
             last_user_dialog_agent_type: None,
             last_submitted_agent_type: None,
             turn_count: 1,

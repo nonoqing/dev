@@ -17,9 +17,11 @@ use crate::startup_trace::DesktopStartupTrace;
 use bitfun_agent_runtime::deep_review::sanitize_focused_review_public_metadata;
 use bitfun_agent_runtime::sdk::{
     AgentDialogSteerRequest, AgentDialogTurnExecution, AgentDialogTurnRequest,
-    AgentInputAttachment, AgentSessionCreateResult, AgentSessionModelUpdateRequest,
-    AgentSubmissionSource, AgentTurnCancellationRequest, DialogSteerOutcome, PermissionAuditRecord,
-    PermissionGrant, PermissionGrantKey, PermissionReply, PermissionRequest,
+    AgentInputAttachment, AgentSessionCreateResult, AgentSessionModeUpdateRequest,
+    AgentSessionModelSelection, AgentSessionModelSelectionUpdateRequest,
+    AgentSessionModelUpdateRequest, AgentSubmissionSource, AgentTurnCancellationRequest,
+    DialogSteerOutcome, PermissionAuditRecord, PermissionGrant, PermissionGrantKey,
+    PermissionReply, PermissionRequest,
 };
 use bitfun_core::agentic::agents::AgentSource;
 use bitfun_core::agentic::coordination::{
@@ -49,9 +51,10 @@ use bitfun_core::service::config::project_permission_store::{
     deserialize_project_permission_config, project_permission_file_path,
     project_permission_file_path_for_remote, ProjectPermissionConfig,
 };
+use bitfun_core::service::remote_ssh::workspace_state::is_remote_path;
 use bitfun_core::service::remote_ssh::workspace_state::resolve_workspace_session_identity;
 use bitfun_core::service::session::{
-    DialogTurnData, SessionMemoryMode, SessionMetadata, SessionRelationship,
+    DialogTurnData, SessionContextUsage, SessionMemoryMode, SessionMetadata, SessionRelationship,
     SessionRelationshipKind, SessionTurnCatalog, SessionTurnWindowResponse,
 };
 use bitfun_core::service::workspace::WorkspaceKind;
@@ -62,7 +65,7 @@ use bitfun_core_types::{
     WorktreeError, WorktreeErrorCode,
 };
 use bitfun_product_domains::tool_permissions::PermissionRule;
-use bitfun_runtime_ports::SessionTurnWindowRequest;
+use bitfun_runtime_ports::{PermissionMode, SessionTurnWindowRequest};
 
 const SESSION_VIEW_TOOL_RESULT_TOTAL_CHAR_BUDGET: usize = 512 * 1024;
 const SESSION_VIEW_TOOL_RESULT_STRING_CHAR_LIMIT: usize = 16 * 1024;
@@ -144,6 +147,8 @@ pub struct SessionConfigDTO {
     pub enable_context_compression: Option<bool>,
     pub model_name: Option<String>,
     #[serde(default)]
+    pub reasoning_preset: Option<String>,
+    #[serde(default)]
     pub remote_connection_id: Option<String>,
     #[serde(default)]
     pub remote_ssh_host: Option<String>,
@@ -200,6 +205,8 @@ fn existing_session_create_response(
         metadata.agent_type.clone(),
     );
     response.workspace_path = metadata.workspace_path.clone();
+    response.model_id =
+        (!metadata.model_name.trim().is_empty()).then(|| metadata.model_name.clone());
     response.workspace_id = request.workspace_id.clone();
     response.project_workspace_path = metadata.project_workspace_path.clone();
     response.execution_target = metadata.execution_target.clone();
@@ -224,6 +231,56 @@ fn is_idempotent_review_create(request: &CreateSessionRequest) -> bool {
 pub struct UpdateSessionModelRequest {
     pub session_id: String,
     pub model_name: String,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pub reasoning_preset: Option<Option<String>>,
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+    #[serde(default)]
+    pub remote_connection_id: Option<String>,
+    #[serde(default)]
+    pub remote_ssh_host: Option<String>,
+    #[serde(default)]
+    pub include_internal: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSessionPermissionModeRequest {
+    pub session_id: String,
+    /// `None` clears the session override so the session follows the
+    /// user-level default again, including later changes to that default.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+    #[serde(default)]
+    pub remote_connection_id: Option<String>,
+    #[serde(default)]
+    pub remote_ssh_host: Option<String>,
+    #[serde(default)]
+    pub include_internal: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPermissionModeResponse {
+    /// The session's own selection, or `null` when it follows the default.
+    pub mode: Option<PermissionMode>,
+}
+
+fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSessionModeRequest {
+    pub session_id: String,
+    pub mode_id: String,
     #[serde(default)]
     pub workspace_path: Option<String>,
     #[serde(default)]
@@ -448,6 +505,7 @@ pub struct SessionResponse {
     pub agent_type: String,
     /// Current/default model selection for the next dialog turn.
     pub model_name: Option<String>,
+    pub reasoning_preset: Option<String>,
     /// Mode of the last surviving user dialog turn in session history.
     pub last_user_dialog_agent_type: Option<String>,
     /// Mode of the most recent user submission accepted by the scheduler.
@@ -469,6 +527,7 @@ pub struct RestoreSessionWithTurnsResponse {
 pub struct RestoreSessionViewResponse {
     pub session: SessionResponse,
     pub turns: Vec<DialogTurnData>,
+    pub current_context_usage: Option<SessionContextUsage>,
     pub turn_catalog: SessionTurnCatalog,
     pub context_restore_state: String,
     pub is_partial: bool,
@@ -692,6 +751,14 @@ pub struct SteerDialogTurnRequest {
     /// Original user text for UI rendering (defaults to `content`).
     #[serde(default)]
     pub display_content: Option<String>,
+    /// Images attached to the steering message. Same shape the composer sends
+    /// when it starts a turn — a message keeps its attachments whether it is
+    /// submitted at a turn boundary or injected into a running turn.
+    #[serde(default)]
+    pub image_contexts: Option<Vec<ImageContextData>>,
+    /// Structured metadata carried with the steering message.
+    #[serde(default)]
+    pub user_message_metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1577,6 +1644,7 @@ pub async fn create_session(
             remote_connection_id: remote_conn.clone(),
             remote_ssh_host: remote_ssh_host.clone(),
             model_id: c.model_name,
+            reasoning_preset: c.reasoning_preset,
             ..Default::default()
         })
         .unwrap_or(SessionConfig {
@@ -1687,6 +1755,34 @@ pub async fn create_session(
 }
 
 #[tauri::command]
+pub async fn update_session_mode(
+    runtime: State<'_, DesktopRuntimeContext>,
+    request: UpdateSessionModeRequest,
+) -> Result<(), String> {
+    let session_id = request.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("session_id is required".to_string());
+    }
+    ensure_session_loaded_for_selector_update(
+        runtime.inner(),
+        &session_id,
+        request.workspace_path,
+        request.remote_connection_id,
+        request.remote_ssh_host,
+        request.include_internal,
+    )
+    .await?;
+    runtime
+        .agent_runtime()
+        .update_session_mode(AgentSessionModeUpdateRequest {
+            session_id,
+            mode_id: request.mode_id,
+        })
+        .await
+        .map_err(|error| format!("Failed to update session mode: {}", error.into_message()))
+}
+
+#[tauri::command]
 pub async fn update_session_model(
     runtime: State<'_, DesktopRuntimeContext>,
     request: UpdateSessionModelRequest,
@@ -1695,34 +1791,148 @@ pub async fn update_session_model(
     if session_id.is_empty() {
         return Err("session_id is required".to_string());
     }
-    if let Some(workspace_path) = request
-        .workspace_path
+    ensure_session_loaded_for_selector_update(
+        runtime.inner(),
+        &session_id,
+        request.workspace_path,
+        request.remote_connection_id,
+        request.remote_ssh_host,
+        request.include_internal,
+    )
+    .await?;
+    let update_result = match request.reasoning_preset {
+        Some(reasoning_preset) => {
+            let reasoning_preset = reasoning_preset
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            runtime
+                .agent_runtime()
+                .update_session_model_selection(AgentSessionModelSelectionUpdateRequest {
+                    session_id,
+                    selection: AgentSessionModelSelection {
+                        model_id: request.model_name,
+                        reasoning_preset,
+                    },
+                })
+                .await
+        }
+        None => {
+            runtime
+                .agent_runtime()
+                .update_session_model(AgentSessionModelUpdateRequest {
+                    session_id,
+                    model_id: request.model_name,
+                })
+                .await
+        }
+    };
+    update_result
+        .map_err(|error| format!("Failed to update session model: {}", error.into_message()))
+}
+
+/// Sets the tool permission mode this session runs with.
+///
+/// The mode is a per-session selector, so switching it in one conversation
+/// leaves every other open session on its own selection. Passing no mode clears
+/// the override and returns the session to the user-level default.
+#[tauri::command]
+pub async fn update_session_permission_mode(
+    runtime: State<'_, DesktopRuntimeContext>,
+    coordinator: State<'_, Arc<ConversationCoordinator>>,
+    request: UpdateSessionPermissionModeRequest,
+) -> Result<SessionPermissionModeResponse, String> {
+    let session_id = request.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("session_id is required".to_string());
+    }
+    let mode = match request.mode.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(value) => Some(
+            PermissionMode::parse(value)
+                .ok_or_else(|| format!("unsupported permission mode: {value}"))?,
+        ),
+    };
+
+    ensure_session_loaded_for_selector_update(
+        runtime.inner(),
+        &session_id,
+        request.workspace_path,
+        request.remote_connection_id,
+        request.remote_ssh_host,
+        request.include_internal,
+    )
+    .await?;
+
+    coordinator
+        .get_session_manager()
+        .update_session_permission_mode(&session_id, mode)
+        .await
+        .map_err(|error| format!("Failed to update session permission mode: {error}"))?;
+
+    Ok(SessionPermissionModeResponse { mode })
+}
+
+/// Reads the session's own permission mode selection.
+///
+/// `null` means the session never chose one and follows the user-level default.
+#[tauri::command]
+pub async fn get_session_permission_mode(
+    runtime: State<'_, DesktopRuntimeContext>,
+    coordinator: State<'_, Arc<ConversationCoordinator>>,
+    request: UpdateSessionPermissionModeRequest,
+) -> Result<SessionPermissionModeResponse, String> {
+    let session_id = request.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("session_id is required".to_string());
+    }
+    ensure_session_loaded_for_selector_update(
+        runtime.inner(),
+        &session_id,
+        request.workspace_path,
+        request.remote_connection_id,
+        request.remote_ssh_host,
+        request.include_internal,
+    )
+    .await?;
+
+    Ok(SessionPermissionModeResponse {
+        mode: coordinator
+            .get_session_manager()
+            .session_permission_mode(&session_id),
+    })
+}
+
+async fn ensure_session_loaded_for_selector_update(
+    runtime: &DesktopRuntimeContext,
+    session_id: &str,
+    workspace_path: Option<String>,
+    remote_connection_id: Option<String>,
+    remote_ssh_host: Option<String>,
+    include_internal: bool,
+) -> Result<(), String> {
+    let Some(workspace_path) = workspace_path
         .as_deref()
         .map(str::trim)
         .filter(|path| !path.is_empty())
-    {
-        runtime
-            .session_application()
-            .ensure_session_loaded(
-                desktop_session_scope(
-                    workspace_path.to_string(),
-                    request.remote_connection_id,
-                    request.remote_ssh_host,
-                ),
-                &session_id,
-                request.include_internal,
-            )
-            .await
-            .map_err(|error| format!("Failed to restore session before model update: {error}"))?;
-    }
+    else {
+        return Ok(());
+    };
     runtime
-        .agent_runtime()
-        .update_session_model(AgentSessionModelUpdateRequest {
+        .session_application()
+        .ensure_session_loaded(
+            desktop_session_scope(
+                workspace_path.to_string(),
+                remote_connection_id,
+                remote_ssh_host,
+            ),
             session_id,
-            model_id: request.model_name,
-        })
+            include_internal,
+        )
         .await
-        .map_err(|error| format!("Failed to update session model: {}", error.into_message()))
+        .map_err(|error| format!("Failed to restore session before selector update: {error}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2547,12 +2757,23 @@ pub async fn steer_dialog_turn(
         dialog_turn_id,
         content,
         display_content,
+        image_contexts,
+        user_message_metadata,
     } = request;
 
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
+    let attachments: Vec<AgentInputAttachment> = image_contexts
+        .unwrap_or_default()
+        .into_iter()
+        .map(desktop_image_attachment)
+        .collect();
+
+    // An image-only steering message is a real message; only a message with
+    // neither text nor attachments is empty.
+    if content.trim().is_empty() && attachments.is_empty() {
         return Err("Steering content cannot be empty".to_string());
     }
+
+    let metadata = desktop_user_message_metadata(user_message_metadata);
 
     let outcome = runtime
         .agent_runtime()
@@ -2561,6 +2782,8 @@ pub async fn steer_dialog_turn(
             turn_id: dialog_turn_id,
             content,
             display_content,
+            attachments,
+            metadata,
         })
         .await
         .map_err(|error| format!("Failed to steer dialog turn: {}", error.into_message()))?;
@@ -2968,6 +3191,7 @@ pub async fn restore_session_view(
             .map_err(|error| format!("Failed to restore session view: {error}"))?;
         let session = restored.session;
         let mut turns = restored.turns;
+        let current_context_usage = restored.current_context_usage;
         let total_turn_count = restored.total_turn_count;
         let turn_catalog = restored.turn_catalog;
         let timings = restored.timings;
@@ -3020,6 +3244,7 @@ pub async fn restore_session_view(
         Ok(RestoreSessionViewResponse {
             session: session_to_response_with_turn_count(session, total_turn_count),
             turns,
+            current_context_usage,
             turn_catalog,
             context_restore_state: "pending".to_string(),
             is_partial,
@@ -3206,6 +3431,7 @@ pub async fn list_sessions(
             session_name: summary.session_name,
             agent_type: summary.agent_type,
             model_name: None,
+            reasoning_preset: None,
             last_user_dialog_agent_type: summary.last_user_dialog_agent_type,
             last_submitted_agent_type: summary.last_submitted_agent_type,
             state: format!("{:?}", summary.state),
@@ -3236,9 +3462,31 @@ pub async fn generate_session_title(
 pub async fn get_available_modes(
     state: State<'_, AppState>,
     startup_trace: State<'_, DesktopStartupTrace>,
+    request: Option<GetAvailableModesRequest>,
 ) -> Result<Vec<ModeInfoDTO>, String> {
     let trace_started = Instant::now();
-    let mode_infos = state.agent_registry.get_modes_info().await;
+    let request = request.unwrap_or_default();
+    let workspace_path = request
+        .workspace_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from);
+    let external_sources_supported =
+        mode_catalog_supports_external_sources(&request, workspace_path.as_deref()).await;
+    if external_sources_supported {
+        if let Err(error) =
+            bitfun_core::external_sources::ensure_external_source_workspace_snapshot(
+                workspace_path.as_deref(),
+            )
+            .await
+        {
+            warn!("Failed to initialize external agent sources for mode selector: {error}");
+        }
+    }
+    let mode_infos = state
+        .agent_registry
+        .get_modes_info_for_workspace(workspace_path.as_deref(), external_sources_supported)
+        .await;
 
     let dtos: Vec<ModeInfoDTO> = mode_infos
         .into_iter()
@@ -3267,6 +3515,36 @@ pub async fn get_available_modes(
 
     startup_trace.record_tauri_command_elapsed("get_available_modes", None, trace_started);
     Ok(dtos)
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAvailableModesRequest {
+    pub workspace_path: Option<String>,
+    pub remote_connection_id: Option<String>,
+    pub remote_ssh_host: Option<String>,
+}
+
+async fn mode_catalog_supports_external_sources(
+    request: &GetAvailableModesRequest,
+    workspace_path: Option<&Path>,
+) -> bool {
+    let has_remote_identity = request
+        .remote_connection_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || request
+            .remote_ssh_host
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    if has_remote_identity {
+        return false;
+    }
+
+    match workspace_path {
+        Some(path) => path.is_absolute() && !is_remote_path(&path.to_string_lossy()).await,
+        None => false,
+    }
 }
 
 #[tauri::command]
@@ -3358,6 +3636,7 @@ fn session_to_response_with_turn_count(session: Session, turn_count: usize) -> S
         session_name: session.session_name,
         agent_type: session.agent_type,
         model_name: session.config.model_id,
+        reasoning_preset: session.config.reasoning_preset,
         last_user_dialog_agent_type: session.last_user_dialog_agent_type,
         last_submitted_agent_type: session.last_submitted_agent_type,
         state: format!("{:?}", session.state),
@@ -3384,6 +3663,45 @@ mod tests {
     };
     use bitfun_product_domains::tool_permissions::{PermissionEffect, PermissionRule};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn remote_mode_catalog_never_scans_an_absolute_desktop_host_path() {
+        let desktop_host_path = std::env::current_dir().expect("desktop host working directory");
+        assert!(desktop_host_path.is_absolute());
+        let request = GetAvailableModesRequest {
+            workspace_path: Some(desktop_host_path.to_string_lossy().into_owned()),
+            remote_connection_id: Some("remote-1".to_string()),
+            remote_ssh_host: Some("build-host".to_string()),
+        };
+
+        assert!(!mode_catalog_supports_external_sources(&request, Some(&desktop_host_path)).await);
+    }
+
+    #[test]
+    fn update_session_model_distinguishes_omitted_null_and_explicit_reasoning_presets() {
+        let omitted: UpdateSessionModelRequest = serde_json::from_value(json!({
+            "sessionId": "session-1",
+            "modelName": "model-a"
+        }))
+        .expect("omitted reasoning preset");
+        assert_eq!(omitted.reasoning_preset, None);
+
+        let automatic: UpdateSessionModelRequest = serde_json::from_value(json!({
+            "sessionId": "session-1",
+            "modelName": "model-a",
+            "reasoningPreset": null
+        }))
+        .expect("null reasoning preset");
+        assert_eq!(automatic.reasoning_preset, Some(None));
+
+        let explicit: UpdateSessionModelRequest = serde_json::from_value(json!({
+            "sessionId": "session-1",
+            "modelName": "model-a",
+            "reasoningPreset": "high"
+        }))
+        .expect("explicit reasoning preset");
+        assert_eq!(explicit.reasoning_preset, Some(Some("high".to_string())));
+    }
 
     #[test]
     fn desktop_steering_uses_the_same_agent_runtime_port_as_other_surfaces() {

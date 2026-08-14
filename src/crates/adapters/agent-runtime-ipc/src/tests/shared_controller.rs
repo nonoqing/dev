@@ -12,8 +12,9 @@ use bitfun_runtime_ports::{
     AgentSessionCreateRequest, AgentSessionCreateResult, AgentSessionLineageCancellationRequest,
     AgentSessionLineageTranscriptRequest, AgentSessionModeUpdateRequest,
     AgentSessionModelUpdateRequest, AgentSessionRevertRequest, AgentSessionRevertResult,
-    AgentSessionSummary, AgentSubmissionSource, AgentUserShellCommandRequest,
-    DialogSubmissionPolicy, SessionTranscript,
+    AgentSessionSummary, AgentSessionWorkspaceBinding, AgentSubmissionSource,
+    AgentUserShellCommandRequest, DialogSubmissionPolicy, SessionExecutionTarget,
+    SessionTranscript,
 };
 use serde_json::Map;
 use std::path::Path;
@@ -226,6 +227,7 @@ impl RuntimeIpcRequestHandler for FakeHandler {
                         session_id: "session-fork".to_string(),
                         messages: Vec::new(),
                     },
+                    workspace_binding: workspace_binding(),
                 })
             }
             RuntimeIpcOperation::SubmitTurn { request } => {
@@ -605,6 +607,7 @@ fn summary(session_id: &str) -> AgentSessionSummary {
         session_name: "Shared session".to_string(),
         agent_type: "agentic".to_string(),
         model_id: None,
+        reasoning_preset: None,
         last_user_dialog_agent_type: None,
         last_submitted_agent_type: None,
         turn_count: 0,
@@ -616,11 +619,24 @@ fn summary(session_id: &str) -> AgentSessionSummary {
 fn restored(session_id: &str) -> RuntimeIpcOperationResult {
     RuntimeIpcOperationResult::SessionRestored {
         session: summary(session_id),
+        state: crate::RuntimeSessionState::Idle,
         transcript: SessionTranscript {
             session_id: session_id.to_string(),
             messages: Vec::new(),
         },
         pending_permissions: Vec::new(),
+        workspace_binding: workspace_binding(),
+    }
+}
+
+fn workspace_binding() -> AgentSessionWorkspaceBinding {
+    AgentSessionWorkspaceBinding {
+        workspace_id: Some("workspace-fixture".to_string()),
+        workspace_path: "/workspace".to_string(),
+        project_workspace_path: Some("/workspace".to_string()),
+        execution_target: Some(SessionExecutionTarget::local("/workspace")),
+        remote_connection_id: None,
+        remote_ssh_host: None,
     }
 }
 
@@ -689,6 +705,8 @@ fn steer_operation(session_id: &str, turn_id: &str) -> RuntimeIpcOperation {
             turn_id: turn_id.to_string(),
             content: "check tests".to_string(),
             display_content: None,
+            attachments: Vec::new(),
+            metadata: serde_json::Map::new(),
         },
     }
 }
@@ -910,6 +928,45 @@ async fn session_switching_is_exclusive_and_disconnect_releases_control() {
     )
     .await;
     drop(second);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn session_scoped_agent_catalog_requires_the_current_controller() {
+    let server = TestServer::start(server_config(), Arc::new(FakeHandler::default())).await;
+    let mut client = server.connect("catalog-controller").await;
+
+    expect_response(
+        &mut client,
+        2,
+        RuntimeIpcOperation::ListAgentModes { session_id: None },
+    )
+    .await;
+    expect_error(
+        &mut client,
+        3,
+        RuntimeIpcOperation::ListAgentModes {
+            session_id: Some("session-a".to_string()),
+        },
+        RuntimeIpcErrorCode::ControllerRequired,
+    )
+    .await;
+    expect_response(
+        &mut client,
+        4,
+        restore_operation(server.workspace.path(), "session-a"),
+    )
+    .await;
+    expect_response(
+        &mut client,
+        5,
+        RuntimeIpcOperation::ListAgentModes {
+            session_id: Some("session-a".to_string()),
+        },
+    )
+    .await;
+
+    drop(client);
     server.finish().await;
 }
 

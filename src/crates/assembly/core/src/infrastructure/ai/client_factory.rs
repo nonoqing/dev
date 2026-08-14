@@ -6,11 +6,20 @@
 //! 3. Invalidate cache when configuration changes
 //! 4. Provide global singleton access
 
-use crate::infrastructure::ai::{build_stream_options_for_model, AIClient};
-use crate::infrastructure::subscription_auth::{self, SubscriptionProvider as AdapterProvider};
-use crate::service::config::types::{
-    model_runtime_binding_fingerprint, AuthConfig, SubscriptionProvider,
+use crate::infrastructure::ai::reasoning_catalog::{
+    apply_default_reasoning_preset, apply_selected_reasoning_preset,
+    load_models_dev_reasoning_catalog, project_model_reasoning_catalog,
+    resolve_default_reasoning_preset,
 };
+use crate::infrastructure::ai::{build_stream_options_for_model, AIClient};
+#[cfg(feature = "subscription-auth")]
+use crate::infrastructure::subscription_auth::{
+    self, OpenCodePlan as AdapterOpenCodePlan, SubscriptionHttpOptions,
+    SubscriptionProvider as AdapterProvider,
+};
+use crate::service::config::types::{model_runtime_binding_fingerprint, AuthConfig};
+#[cfg(feature = "subscription-auth")]
+use crate::service::config::types::{OpenCodePlan, SubscriptionProvider};
 use crate::service::config::{get_global_config_service, ConfigService};
 use crate::util::errors::{BitFunError, BitFunResult};
 use crate::util::types::AIConfig;
@@ -27,18 +36,21 @@ pub struct AIClientFactory {
 
 struct CachedAIClient {
     configuration_fingerprint: String,
+    default_reasoning_preset: Option<bitfun_core_types::ReasoningPresetDescriptor>,
     client: Arc<AIClient>,
-    /// Unix seconds when the resolved subscription credential expires;
-    /// `None` for API-key auth or non-expiring credentials.
+    /// Unix seconds when the resolved subscription credential expires.
+    #[cfg(feature = "subscription-auth")]
     credential_expires_at: Option<i64>,
 }
 
 /// Once a cached subscription credential is within this window of expiry, the
-/// client is rebuilt so `apply_subscription_auth` refreshes the token. Kept
+/// client is rebuilt so subscription authentication refreshes the token. Kept
 /// equal to the providers' refresh leeway so the rebuilt client always gets a
 /// fresh token.
+#[cfg(feature = "subscription-auth")]
 const SUBSCRIPTION_CREDENTIAL_STALE_LEEWAY_SECS: i64 = 5 * 60;
 
+#[cfg(feature = "subscription-auth")]
 fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -46,6 +58,7 @@ fn now_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(feature = "subscription-auth")]
 fn subscription_credential_stale(auth: &AuthConfig, cached: &CachedAIClient) -> bool {
     if !matches!(auth, AuthConfig::Subscription { .. }) {
         return false;
@@ -53,6 +66,11 @@ fn subscription_credential_stale(auth: &AuthConfig, cached: &CachedAIClient) -> 
     cached.credential_expires_at.is_some_and(|expires_at| {
         expires_at <= now_unix_secs() + SUBSCRIPTION_CREDENTIAL_STALE_LEEWAY_SECS
     })
+}
+
+#[cfg(not(feature = "subscription-auth"))]
+fn subscription_credential_stale(auth: &AuthConfig, _cached: &CachedAIClient) -> bool {
+    matches!(auth, AuthConfig::Subscription { .. })
 }
 
 fn functional_agent_model_selector<'a>(
@@ -99,18 +117,83 @@ impl AIClientFactory {
             .await
     }
 
+    /// Resolve an approved base client and apply one session preset without
+    /// inserting the derived client into the factory cache.
+    pub async fn get_client_by_approved_binding_with_reasoning_preset(
+        &self,
+        model_id: &str,
+        configuration_fingerprint: &str,
+        reasoning_preset: Option<&str>,
+    ) -> Result<Arc<AIClient>> {
+        let client = self
+            .get_client_by_approved_binding(model_id, configuration_fingerprint)
+            .await?;
+        self.apply_session_reasoning_preset(model_id, client, reasoning_preset)
+            .await
+    }
+
     /// Get a client (supports resolving primary/fast)
     pub async fn get_client_resolved(&self, model_id: &str) -> Result<Arc<AIClient>> {
+        let resolved_model_id = self.resolve_model_id(model_id).await?;
+        self.get_or_create_client(&resolved_model_id, None).await
+    }
+
+    /// Resolve a base client and apply one session preset without caching the
+    /// derived client. An unknown preset fails closed to the model default.
+    pub async fn get_client_resolved_with_reasoning_preset(
+        &self,
+        model_id: &str,
+        reasoning_preset: Option<&str>,
+    ) -> Result<Arc<AIClient>> {
+        let resolved_model_id = self.resolve_model_id(model_id).await?;
+        let client = self.get_or_create_client(&resolved_model_id, None).await?;
+        self.apply_session_reasoning_preset(&resolved_model_id, client, reasoning_preset)
+            .await
+    }
+
+    async fn resolve_model_id(&self, model_id: &str) -> Result<String> {
         let global_config: crate::service::config::GlobalConfig =
             self.config_service.get_config(None).await?;
-        let resolved_model_id = resolve_required_model_selector(
+        resolve_required_model_selector(
             model_id,
             |selector| global_config.ai.resolve_model_selection(selector),
             |model_ref| global_config.ai.resolve_model_reference(model_ref),
         )
-        .map_err(|error| anyhow!(error.to_string()))?;
+        .map_err(|error| anyhow!(error.to_string()))
+    }
 
-        self.get_or_create_client(&resolved_model_id, None).await
+    async fn apply_session_reasoning_preset(
+        &self,
+        model_id: &str,
+        client: Arc<AIClient>,
+        reasoning_preset: Option<&str>,
+    ) -> Result<Arc<AIClient>> {
+        let Some(reasoning_preset) = reasoning_preset
+            .map(str::trim)
+            .filter(|preset| !preset.is_empty())
+        else {
+            return Ok(client);
+        };
+        let global_config: crate::service::config::GlobalConfig =
+            self.config_service.get_config(None).await?;
+        let model = global_config
+            .ai
+            .models
+            .iter()
+            .find(|model| model.id == model_id)
+            .ok_or_else(|| anyhow!("Model configuration not found: {}", model_id))?;
+        let models_dev = load_models_dev_reasoning_catalog().await;
+        let projection = project_model_reasoning_catalog(model, models_dev.catalog.as_deref());
+        let Some(client) = apply_selected_reasoning_preset(&client, &projection, reasoning_preset)
+        else {
+            warn!(
+                "Session reasoning preset is not available for the resolved model; falling back to model default: model_id={}, preset_id={}",
+                model_id, reasoning_preset
+            );
+            return Ok(client);
+        };
+
+        Ok(Arc::new(client))
     }
 
     pub fn invalidate_cache(&self) {
@@ -209,6 +292,12 @@ impl AIClientFactory {
             ));
         }
 
+        let models_dev = load_models_dev_reasoning_catalog().await;
+        let reasoning_projection =
+            project_model_reasoning_catalog(model_config, models_dev.catalog.as_deref());
+        let default_reasoning_preset =
+            resolve_default_reasoning_preset(&reasoning_projection).cloned();
+
         {
             let cache = match self.client_cache.read() {
                 Ok(cache) => cache,
@@ -221,6 +310,7 @@ impl AIClientFactory {
             };
             if let Some(cached) = cache.get(&normalized_model_id) {
                 if cached.configuration_fingerprint == configuration_fingerprint
+                    && cached.default_reasoning_preset == default_reasoning_preset
                     && !subscription_credential_stale(&model_config.auth, cached)
                 {
                     return Ok(cached.client.clone());
@@ -230,21 +320,28 @@ impl AIClientFactory {
 
         let mut ai_config = AIConfig::try_from(model_config.clone())
             .map_err(|e| anyhow!("AI configuration conversion failed: {}", e))?;
-        let credential_expires_at =
-            apply_subscription_auth(&model_config.auth, &mut ai_config).await?;
-
+        let skip_ssl_verify = ai_config.skip_ssl_verify;
         let proxy_config = if global_config.ai.proxy.enabled {
             Some(global_config.ai.proxy.clone())
         } else {
             None
         };
+        let credential_expires_at = apply_configured_auth(
+            &model_config.auth,
+            &mut ai_config,
+            proxy_config.clone(),
+            skip_ssl_verify,
+        )
+        .await?;
+        #[cfg(not(feature = "subscription-auth"))]
+        let _ = credential_expires_at;
 
         let stream_options = build_stream_options_for_model(&global_config.ai, Some(model_config));
-        let client = Arc::new(AIClient::new_with_runtime_options(
-            ai_config,
-            proxy_config,
-            stream_options,
-        ));
+        let client = apply_default_reasoning_preset(
+            AIClient::new_with_runtime_options(ai_config, proxy_config, stream_options),
+            &reasoning_projection,
+        );
+        let client = Arc::new(client);
 
         {
             let mut cache = match self.client_cache.write() {
@@ -260,7 +357,9 @@ impl AIClientFactory {
                 model_config.id.clone(),
                 CachedAIClient {
                     configuration_fingerprint,
+                    default_reasoning_preset,
                     client: client.clone(),
+                    #[cfg(feature = "subscription-auth")]
                     credential_expires_at,
                 },
             );
@@ -346,11 +445,20 @@ pub async fn initialize_global_ai_client_factory() -> BitFunResult<()> {
     AIClientFactory::initialize_global().await
 }
 
+#[cfg(feature = "subscription-auth")]
 fn to_adapter_provider(provider: SubscriptionProvider) -> AdapterProvider {
     match provider {
         SubscriptionProvider::Codex => AdapterProvider::Codex,
         SubscriptionProvider::Antigravity => AdapterProvider::Antigravity,
         SubscriptionProvider::Opencode => AdapterProvider::Opencode,
+    }
+}
+
+#[cfg(feature = "subscription-auth")]
+fn to_adapter_opencode_plan(plan: OpenCodePlan) -> AdapterOpenCodePlan {
+    match plan {
+        OpenCodePlan::Zen => AdapterOpenCodePlan::Zen,
+        OpenCodePlan::Go => AdapterOpenCodePlan::Go,
     }
 }
 
@@ -362,18 +470,81 @@ pub async fn apply_subscription_auth(
     auth: &AuthConfig,
     ai_config: &mut AIConfig,
 ) -> Result<Option<i64>> {
+    #[cfg(feature = "subscription-auth")]
+    return apply_subscription_auth_with_options(
+        auth,
+        ai_config,
+        &SubscriptionHttpOptions::default(),
+    )
+    .await;
+
+    #[cfg(not(feature = "subscription-auth"))]
+    {
+        let _ = ai_config;
+        match auth {
+            AuthConfig::ApiKey => Ok(None),
+            AuthConfig::Subscription { .. } => Err(anyhow!(
+                "Subscription authentication is not available in this product build"
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "subscription-auth")]
+async fn apply_configured_auth(
+    auth: &AuthConfig,
+    ai_config: &mut AIConfig,
+    proxy_config: Option<bitfun_core_types::ProxyConfig>,
+    skip_ssl_verify: bool,
+) -> Result<Option<i64>> {
+    let options = SubscriptionHttpOptions::new(proxy_config, skip_ssl_verify);
+    apply_subscription_auth_with_options(auth, ai_config, &options).await
+}
+
+#[cfg(not(feature = "subscription-auth"))]
+async fn apply_configured_auth(
+    auth: &AuthConfig,
+    ai_config: &mut AIConfig,
+    _proxy_config: Option<bitfun_core_types::ProxyConfig>,
+    _skip_ssl_verify: bool,
+) -> Result<Option<i64>> {
+    apply_subscription_auth(auth, ai_config).await
+}
+
+/// Resolves subscription authentication with an explicit transport policy.
+#[cfg(feature = "subscription-auth")]
+pub async fn apply_subscription_auth_with_options(
+    auth: &AuthConfig,
+    ai_config: &mut AIConfig,
+    options: &SubscriptionHttpOptions,
+) -> Result<Option<i64>> {
     let resolved = match auth {
         AuthConfig::ApiKey => return Ok(None),
-        AuthConfig::Subscription { provider } => {
-            subscription_auth::resolve(to_adapter_provider(*provider))
-                .await
-                .map_err(|e| {
-                    anyhow!(
-                        "Failed to resolve {provider:?} subscription credential: {e:#}. \
+        AuthConfig::Subscription { provider, plan } => {
+            let resolved = match (*provider, *plan) {
+                (SubscriptionProvider::Opencode, Some(plan)) => {
+                    subscription_auth::resolve_opencode_with_options(
+                        to_adapter_opencode_plan(plan),
+                        &ai_config.format,
+                        options,
+                    )
+                    .await
+                }
+                (_, None) => {
+                    subscription_auth::resolve_with_options(to_adapter_provider(*provider), options)
+                        .await
+                }
+                (_, Some(plan)) => Err(anyhow!(
+                    "OpenCode plan {plan:?} cannot be used with provider {provider:?}"
+                )),
+            };
+            resolved.map_err(|e| {
+                anyhow!(
+                    "Failed to resolve {provider:?} subscription credential: {e:#}. \
                      Subscription logins are stored on the local machine and are not \
                      available in remote workspaces."
-                    )
-                })?
+                )
+            })?
         }
     };
 
@@ -408,15 +579,20 @@ pub async fn apply_subscription_auth(
 }
 
 /// List subscription accounts (Codex / Antigravity / OpenCode).
+#[cfg(feature = "subscription-auth")]
 pub async fn list_subscription_accounts() -> Vec<subscription_auth::SubscriptionAccount> {
     subscription_auth::list_accounts().await
 }
 
 #[cfg(test)]
 mod tests {
+    use super::apply_subscription_auth;
+    #[cfg(not(feature = "subscription-auth"))]
+    use crate::service::config::types::SubscriptionProvider;
     use crate::service::config::types::{
-        model_runtime_binding_fingerprint, AIModelConfig, GlobalConfig,
+        model_runtime_binding_fingerprint, AIModelConfig, AuthConfig, GlobalConfig,
     };
+    use crate::util::types::AIConfig;
     use bitfun_ai_adapters::{
         classify_model_selector, resolve_required_model_selector, ModelSelectorKind,
     };
@@ -430,6 +606,60 @@ mod tests {
             enabled: true,
             ..Default::default()
         }
+    }
+
+    fn test_runtime_ai_config() -> AIConfig {
+        AIConfig {
+            name: "test".to_string(),
+            base_url: "https://example.test".to_string(),
+            request_url: String::new(),
+            api_key: "unchanged".to_string(),
+            model: "test-model".to_string(),
+            format: "openai".to_string(),
+            context_window: 4096,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            inline_think_in_text: false,
+            custom_headers: None,
+            custom_headers_mode: None,
+            skip_ssl_verify: false,
+            custom_request_body: None,
+            custom_request_body_mode: None,
+        }
+    }
+
+    #[cfg(feature = "subscription-auth")]
+    #[tokio::test]
+    async fn api_key_auth_remains_a_noop_when_subscription_support_is_compiled() {
+        let mut config = test_runtime_ai_config();
+
+        let expires_at = apply_subscription_auth(&AuthConfig::ApiKey, &mut config)
+            .await
+            .expect("API-key auth");
+
+        assert_eq!(expires_at, None);
+        assert_eq!(config.api_key, "unchanged");
+        assert_eq!(config.base_url, "https://example.test");
+    }
+
+    #[cfg(not(feature = "subscription-auth"))]
+    #[tokio::test]
+    async fn subscription_auth_fails_closed_when_not_compiled() {
+        let auth = AuthConfig::Subscription {
+            provider: SubscriptionProvider::Codex,
+            plan: None,
+        };
+        let mut config = test_runtime_ai_config();
+
+        let error = apply_subscription_auth(&auth, &mut config)
+            .await
+            .expect_err("subscription auth must not degrade to an API-key client");
+
+        assert!(error
+            .to_string()
+            .contains("Subscription authentication is not available"));
+        assert_eq!(config.api_key, "unchanged");
     }
 
     #[test]
@@ -485,6 +715,21 @@ mod tests {
 
         model.base_url = "https://models.example/v2".to_string();
         assert_ne!(model_runtime_binding_fingerprint(&model), first);
+    }
+
+    #[test]
+    fn runtime_binding_fingerprint_ignores_favorite_toggle() {
+        let mut model = build_model("model-456", "Provider", "runtime-model");
+        model.base_url = "https://models.example/v1".to_string();
+        model.favorite = false;
+        let baseline = model_runtime_binding_fingerprint(&model);
+
+        // Toggling favorite must not change the runtime binding fingerprint.
+        model.favorite = true;
+        assert_eq!(model_runtime_binding_fingerprint(&model), baseline);
+
+        model.favorite = false;
+        assert_eq!(model_runtime_binding_fingerprint(&model), baseline);
     }
 
     #[test]

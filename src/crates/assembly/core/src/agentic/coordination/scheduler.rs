@@ -29,6 +29,10 @@ use crate::agentic::round_preempt::{DialogRoundInjectionSource, SessionRoundInje
 use crate::agentic::session::session_store_port::CoreSessionStorePort;
 use crate::agentic::session::SessionManager;
 use crate::util::errors::{BitFunError, BitFunResult};
+use bitfun_observability::domains::{
+    record_image_attachments, ImageAttachmentFacts, ImageAttachmentOutcome,
+};
+use bitfun_observability::Telemetry;
 use bitfun_runtime_ports::{ThreadGoal, MAX_THREAD_GOAL_AUTO_CONTINUATIONS};
 use log::{debug, info, warn};
 use std::collections::HashSet;
@@ -317,6 +321,7 @@ impl DialogRoundInjectionSource for SchedulerRoundInjectionSource {
 pub struct DialogScheduler {
     coordinator: Arc<ConversationCoordinator>,
     session_manager: Arc<SessionManager>,
+    telemetry: Telemetry,
     /// Per-session priority message queues.
     queues: Arc<DialogTurnQueue<QueuedTurn>>,
     /// Serializes submit, dispatch, and targeted cancellation for one session.
@@ -407,9 +412,11 @@ impl DialogScheduler {
             buffer: round_injection_buffer.clone(),
         });
 
+        let telemetry = coordinator.telemetry();
         let scheduler = Arc::new(Self {
             coordinator,
             session_manager,
+            telemetry,
             queues: Arc::new(DialogTurnQueue::default()),
             session_operation_locks: KeyedAsyncLock::default(),
             active_turns: Arc::new(ActiveDialogTurnStore::default()),
@@ -460,10 +467,16 @@ impl DialogScheduler {
         turn_id: String,
         content: String,
         display_content: Option<String>,
+        attachments: Vec<AgentInputAttachment>,
+        metadata: serde_json::Map<String, serde_json::Value>,
     ) -> Result<DialogSteerOutcome, String> {
-        if content.trim().is_empty() {
+        if content.trim().is_empty() && attachments.is_empty() {
             return Err("Steering content cannot be empty".to_string());
         }
+        // Reject a malformed attachment here rather than at the round boundary:
+        // the caller is still holding the user's message and can surface the
+        // failure, whereas the injection consumer would have to drop it.
+        agent_dialog_turn_image_contexts(&attachments).map_err(|error| error.to_string())?;
         let _operation_guard = self.lock_session_operation(&session_id).await;
         let active_turn_id = match self
             .session_manager
@@ -488,6 +501,8 @@ impl DialogScheduler {
             &turn_id,
             content,
             display_content,
+            attachments,
+            metadata,
             steering_id,
             SystemTime::now(),
         ) {
@@ -641,10 +656,24 @@ impl DialogScheduler {
         user_message_metadata: Option<serde_json::Value>,
     ) -> Result<(), String> {
         let _operation_guard = self.lock_session_operation(&session_id).await;
+        let session_agent_type = self
+            .resolve_session_agent_type(
+                &session_id,
+                workspace_path.as_deref(),
+                remote_connection_id.as_deref(),
+                remote_ssh_host.as_deref(),
+            )
+            .await?;
+        if session_agent_type != agent_type {
+            debug!(
+                "Background result delivery replaced execution agent key with Session logical route: session_id={}, execution_agent_type={}, session_agent_type={}",
+                session_id, agent_type, session_agent_type
+            );
+        }
         let display = display_content.unwrap_or_else(|| content.clone());
         let delivery = BackgroundResultDelivery {
             session_id: session_id.clone(),
-            agent_type,
+            agent_type: session_agent_type,
             workspace_path,
             remote_connection_id,
             remote_ssh_host,
@@ -1013,9 +1042,24 @@ impl DialogScheduler {
         queued_turn: QueuedTurn,
         reject_if_busy: bool,
     ) -> Result<DialogSubmitOutcome, SchedulerSubmitError> {
+        let attachment_facts = queued_turn
+            .image_contexts
+            .as_deref()
+            .filter(|images| !images.is_empty())
+            .map(image_attachment_facts);
         let _operation_guard = self.lock_session_operation(&session_id).await;
-        self.submit_queued_turn_locked(session_id, resolved_turn_id, queued_turn, reject_if_busy)
-            .await
+        let result = self
+            .submit_queued_turn_locked(session_id, resolved_turn_id, queued_turn, reject_if_busy)
+            .await;
+        if let Some(mut facts) = attachment_facts {
+            facts.outcome = if result.is_ok() {
+                ImageAttachmentOutcome::Accepted
+            } else {
+                ImageAttachmentOutcome::Rejected
+            };
+            record_image_attachments(&self.telemetry, facts);
+        }
+        result
     }
 
     async fn submit_queued_turn_locked(
@@ -2184,6 +2228,81 @@ fn metadata_string(
         .map(ToOwned::to_owned)
 }
 
+fn image_metadata_u64(metadata: Option<&serde_json::Value>, keys: &[&str]) -> Option<u64> {
+    let object = metadata?.as_object()?;
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(serde_json::Value::as_u64))
+}
+
+fn image_attachment_facts(images: &[ImageContextData]) -> ImageAttachmentFacts {
+    let mut size_known_count = 0u64;
+    let mut dimensions_known_count = 0u64;
+    let mut total_size_bytes = 0u64;
+    let mut max_size_bytes = None;
+    let mut max_width = None;
+    let mut max_height = None;
+    let mut has_png = false;
+    let mut has_jpeg = false;
+    let mut has_webp = false;
+    let mut has_gif = false;
+    let mut has_other = false;
+
+    for image in images {
+        let size = image_metadata_u64(
+            image.metadata.as_ref(),
+            &["file_size", "fileSize", "size_bytes", "sizeBytes"],
+        );
+        if let Some(size) = size {
+            size_known_count = size_known_count.saturating_add(1);
+            total_size_bytes = total_size_bytes.saturating_add(size);
+            max_size_bytes = Some(max_size_bytes.map_or(size, |current: u64| current.max(size)));
+        }
+        let width = image_metadata_u64(image.metadata.as_ref(), &["width"]);
+        let height = image_metadata_u64(image.metadata.as_ref(), &["height"]);
+        if width.is_some() && height.is_some() {
+            dimensions_known_count = dimensions_known_count.saturating_add(1);
+        }
+        if let Some(width) = width {
+            max_width = Some(max_width.map_or(width, |current: u64| current.max(width)));
+        }
+        if let Some(height) = height {
+            max_height = Some(max_height.map_or(height, |current: u64| current.max(height)));
+        }
+
+        match image
+            .mime_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "image/png" => has_png = true,
+            "image/jpeg" | "image/jpg" => has_jpeg = true,
+            "image/webp" => has_webp = true,
+            "image/gif" => has_gif = true,
+            _ => has_other = true,
+        }
+    }
+
+    ImageAttachmentFacts {
+        outcome: ImageAttachmentOutcome::Accepted,
+        count: images.len().min(u64::MAX as usize) as u64,
+        size_known_count,
+        dimensions_known_count,
+        total_size_bytes: (size_known_count > 0).then_some(total_size_bytes),
+        max_size_bytes,
+        max_width,
+        max_height,
+        has_png,
+        has_jpeg,
+        has_webp,
+        has_gif,
+        has_other,
+    }
+}
+
 fn mime_type_from_data_url(data_url: &str) -> Option<String> {
     data_url
         .split_once(',')
@@ -2219,7 +2338,7 @@ fn image_context_metadata(attachment: &AgentInputAttachment) -> Option<serde_jso
     }
 }
 
-fn agent_dialog_turn_image_contexts(
+pub(crate) fn agent_dialog_turn_image_contexts(
     attachments: &[AgentInputAttachment],
 ) -> PortResult<Option<Vec<ImageContextData>>> {
     if attachments.is_empty() {
@@ -2399,18 +2518,24 @@ impl AgentDialogTurnPort for DialogScheduler {
         &self,
         request: AgentDialogSteerRequest,
     ) -> PortResult<DialogSteerOutcome> {
-        let empty_content = request.content.trim().is_empty();
+        // An empty-but-attachment-free message and a malformed attachment are
+        // both bad requests; only a live-turn mismatch means "session in use".
+        let invalid_request =
+            request.content.trim().is_empty() && request.attachments.is_empty()
+                || agent_dialog_turn_image_contexts(&request.attachments).is_err();
         DialogScheduler::buffer_steering(
             self,
             request.session_id,
             request.turn_id,
             request.content,
             request.display_content,
+            request.attachments,
+            request.metadata,
         )
         .await
         .map_err(|error| {
             PortError::new(
-                if empty_content {
+                if invalid_request {
                     PortErrorKind::InvalidRequest
                 } else {
                     PortErrorKind::SessionInUse
@@ -2818,6 +2943,40 @@ mod tests {
             .take_pending(session_id, turn_id);
         assert_eq!(pending.len(), 1);
         assert_eq!(scheduler.queue_depth(session_id), 0);
+    }
+
+    #[tokio::test]
+    async fn idle_background_result_uses_the_session_logical_agent_route() {
+        let (scheduler, session_manager, _, root) = test_scheduler();
+        let session_id = "external-parent-session";
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        session_manager
+            .create_session_with_id(
+                Some(session_id.to_string()),
+                "External parent".to_string(),
+                "agentic".to_string(),
+                SessionConfig {
+                    workspace_path: Some(workspace.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create parent session");
+
+        scheduler
+            .deliver_background_result(
+                session_id.to_string(),
+                "external::opencode::agentic::generation-v1".to_string(),
+                None,
+                None,
+                None,
+                "Background Bash command completed".to_string(),
+                None,
+                None,
+            )
+            .await
+            .expect("lifecycle delivery must follow the persisted logical session route");
     }
 
     fn standard_queued_turn(turn_id: &str) -> QueuedTurn {
@@ -3549,6 +3708,8 @@ mod tests {
                 turn_id.to_string(),
                 "check tests".to_string(),
                 None,
+                Vec::new(),
+                serde_json::Map::new(),
             )
             .await
             .expect_err("stale processing state must not accept steering");
@@ -3571,6 +3732,8 @@ mod tests {
                 turn_id: "turn-1".to_string(),
                 content: "  ".to_string(),
                 display_content: None,
+                attachments: Vec::new(),
+                metadata: serde_json::Map::new(),
             },
         )
         .await
@@ -3598,6 +3761,8 @@ mod tests {
                     turn_id.to_string(),
                     "check tests".to_string(),
                     None,
+                    Vec::new(),
+                    serde_json::Map::new(),
                 )
                 .await
         });
@@ -3877,6 +4042,48 @@ mod tests {
                 .and_then(|value| value.get("name")),
             Some(&serde_json::json!("clip.jpg"))
         );
+    }
+
+    #[test]
+    fn image_attachment_facts_aggregate_only_bounded_metadata() {
+        let images = vec![
+            ImageContextData {
+                id: "image-1".to_string(),
+                image_path: Some("/sensitive/one.png".to_string()),
+                data_url: None,
+                mime_type: "image/png".to_string(),
+                metadata: Some(serde_json::json!({
+                    "fileSize": 10,
+                    "width": 320,
+                    "height": 200,
+                    "name": "one.png"
+                })),
+            },
+            ImageContextData {
+                id: "image-2".to_string(),
+                image_path: None,
+                data_url: Some("data:image/webp;base64,secret".to_string()),
+                mime_type: "image/webp; charset=binary".to_string(),
+                metadata: Some(serde_json::json!({
+                    "size_bytes": 25,
+                    "width": 640
+                })),
+            },
+        ];
+
+        let facts = image_attachment_facts(&images);
+
+        assert_eq!(facts.outcome, ImageAttachmentOutcome::Accepted);
+        assert_eq!(facts.count, 2);
+        assert_eq!(facts.size_known_count, 2);
+        assert_eq!(facts.dimensions_known_count, 1);
+        assert_eq!(facts.total_size_bytes, Some(35));
+        assert_eq!(facts.max_size_bytes, Some(25));
+        assert_eq!(facts.max_width, Some(640));
+        assert_eq!(facts.max_height, Some(200));
+        assert!(facts.has_png);
+        assert!(facts.has_webp);
+        assert!(!facts.has_other);
     }
 
     #[test]

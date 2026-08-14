@@ -5,6 +5,7 @@ import { createTauriCommandError } from '../errors/TauriCommandError';
 import type {
   DialogTurnData,
   ModelRoundAttemptDiagnostic,
+  SessionContextUsage,
   SessionRelationship,
   SessionTurnCatalog,
 } from '@/shared/types/session-history';
@@ -36,9 +37,16 @@ export interface SessionModelAutoMigratedEvent {
   reason: string;
 }
 
+export interface SessionReasoningPresetAutoClearedEvent {
+  sessionId: string;
+  previousPresetId: string;
+  reason: string;
+}
+
  
 export interface SessionConfig {
   modelName?: string;
+  reasoningPreset?: string;
   maxContextTokens?: number;
   autoCompact?: boolean;
   enableTools?: boolean;
@@ -73,6 +81,7 @@ export interface CreateSessionResponse {
   sessionId: string;
   sessionName: string;
   agentType: string;
+  modelId?: string;
   workspacePath?: string;
   workspaceId?: string;
   projectWorkspacePath?: string;
@@ -166,6 +175,7 @@ export interface SessionInfo {
   agentType: string;
   /** Current/default model selection for the next dialog turn. */
   modelName?: string;
+  reasoningPreset?: string | null;
   /** Mode of the last surviving user dialog turn in session history. */
   lastUserDialogAgentType?: string;
   /** Mode of the most recent user submission accepted by the runtime. */
@@ -232,6 +242,7 @@ export interface SessionViewRestoreTiming {
 export interface RestoreSessionViewResponse {
   session: SessionInfo;
   turns: DialogTurnData[];
+  currentContextUsage?: SessionContextUsage | null;
   turnCatalog?: SessionTurnCatalog;
   contextRestoreState: 'ready' | 'pending';
   isPartial?: boolean;
@@ -304,6 +315,33 @@ export interface EnsureAssistantBootstrapResponse {
 export interface UpdateSessionModelRequest {
   sessionId: string;
   modelName: string;
+  reasoningPreset?: string | null;
+  workspacePath?: string;
+  remoteConnectionId?: string;
+  remoteSshHost?: string;
+  includeInternal?: boolean;
+}
+
+/** `ask` | `auto_approve` | `deny` | `full_access`; `null` clears the session override. */
+export type SessionPermissionMode = 'ask' | 'auto_approve' | 'deny' | 'full_access';
+
+export interface SessionPermissionModeRequest {
+  sessionId: string;
+  /** Omit or pass null to clear the override and follow the global default. */
+  mode?: SessionPermissionMode | null;
+  workspacePath?: string;
+  remoteConnectionId?: string;
+  remoteSshHost?: string;
+  includeInternal?: boolean;
+}
+
+export interface SessionPermissionModeResponse {
+  mode: SessionPermissionMode | null;
+}
+
+export interface UpdateSessionModeRequest {
+  sessionId: string;
+  modeId: string;
   workspacePath?: string;
   remoteConnectionId?: string;
   remoteSshHost?: string;
@@ -765,12 +803,18 @@ export class AgentAPI {
    * Mirrors Codex CLI's Esc-to-steer behavior: the message is queued on the
    * Rust side and consumed by the execution engine at the next round boundary
    * without ending the current turn.
+   *
+   * Carries the same payload a turn submission does — attachments and message
+   * metadata included — so a message keeps its content whether it is sent at a
+   * turn boundary or injected into a running turn.
    */
   async steerDialogTurn(request: {
     sessionId: string;
     dialogTurnId: string;
     content: string;
     displayContent?: string;
+    imageContexts?: unknown[];
+    userMessageMetadata?: Record<string, unknown>;
   }): Promise<{ success: boolean; steeringId: string }> {
     try {
       return await api.invoke<{ success: boolean; steeringId: string }>(
@@ -951,6 +995,46 @@ export class AgentAPI {
     }
   }
 
+  /**
+   * Sets the tool permission mode for one session. Other open sessions keep
+   * their own selection; passing no mode returns this session to the
+   * user-level default.
+   */
+  async updateSessionPermissionMode(
+    request: SessionPermissionModeRequest,
+  ): Promise<SessionPermissionModeResponse> {
+    try {
+      return await api.invoke<SessionPermissionModeResponse>(
+        'update_session_permission_mode',
+        { request },
+      );
+    } catch (error) {
+      throw createTauriCommandError('update_session_permission_mode', error, request);
+    }
+  }
+
+  /** Reads a session's own permission mode; `null` means it follows the default. */
+  async getSessionPermissionMode(
+    request: SessionPermissionModeRequest,
+  ): Promise<SessionPermissionModeResponse> {
+    try {
+      return await api.invoke<SessionPermissionModeResponse>(
+        'get_session_permission_mode',
+        { request },
+      );
+    } catch (error) {
+      throw createTauriCommandError('get_session_permission_mode', error, request);
+    }
+  }
+
+  async updateSessionMode(request: UpdateSessionModeRequest): Promise<void> {
+    try {
+      await api.invoke<void>('update_session_mode', { request });
+    } catch (error) {
+      throw createTauriCommandError('update_session_mode', error, request);
+    }
+  }
+
   async reloadSessionContext(
     request: AgentContextReloadRequest,
   ): Promise<void> {
@@ -1058,6 +1142,15 @@ export class AgentAPI {
   ): () => void {
     return api.listen<SessionModelAutoMigratedEvent>(
       'agentic://session-model-auto-migrated',
+      callback
+    );
+  }
+
+  onSessionReasoningPresetAutoCleared(
+    callback: (event: SessionReasoningPresetAutoClearedEvent) => void
+  ): () => void {
+    return api.listen<SessionReasoningPresetAutoClearedEvent>(
+      'agentic://session-reasoning-preset-auto-cleared',
       callback
     );
   }
@@ -1338,9 +1431,15 @@ export class AgentAPI {
   
 
    
-  async getAvailableModes(): Promise<ModeInfo[]> {
+  async getAvailableModes(request: {
+    workspacePath?: string;
+    remoteConnectionId?: string;
+    remoteSshHost?: string;
+  } = {}): Promise<ModeInfo[]> {
     try {
-      return await api.invoke<ModeInfo[]>('get_available_modes');
+      return await api.invoke<ModeInfo[]>('get_available_modes', {
+        request,
+      });
     } catch (error) {
       throw createTauriCommandError('get_available_modes', error);
     }

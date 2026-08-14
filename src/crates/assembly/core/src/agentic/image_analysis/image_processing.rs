@@ -14,6 +14,7 @@ use image::DynamicImage;
 use image::ImageEncoder;
 use image::ImageFormat;
 use serde_json::json;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
@@ -21,8 +22,41 @@ use tokio::fs;
 pub struct ProcessedImage {
     pub data: Vec<u8>,
     pub mime_type: String,
+    /// Width of the image **as sent to the model** — not of the source file.
+    /// Downscaling to fit the provider's limits can shrink this a long way
+    /// (repeated 0.75× passes, floor 64px).
     pub width: u32,
+    /// Height as sent to the model. See [`Self::width`].
     pub height: u32,
+    /// Width of the source image, before any resizing.
+    ///
+    /// Reported separately because callers surface these numbers to a model,
+    /// and a resized dimension presented as the file's dimension is silently
+    /// wrong: anything the vision model says about position or size is in the
+    /// resized frame, and the caller has no way to map it back without knowing
+    /// the original.
+    pub original_width: u32,
+    /// Height of the source image, before any resizing.
+    pub original_height: u32,
+}
+
+impl ProcessedImage {
+    /// Linear factor from source pixels to sent pixels (1.0 when untouched).
+    ///
+    /// Aspect ratio is preserved by every resize path here, so one factor
+    /// describes both axes; it is derived from width to avoid disagreeing with
+    /// itself on rounding.
+    pub fn scale(&self) -> f64 {
+        if self.original_width == 0 {
+            return 1.0;
+        }
+        f64::from(self.width) / f64::from(self.original_width)
+    }
+
+    /// Whether the image was downscaled on the way to the model.
+    pub fn was_resized(&self) -> bool {
+        self.width != self.original_width || self.height != self.original_height
+    }
 }
 
 pub fn resolve_vision_model_from_ai_config(
@@ -164,8 +198,23 @@ pub fn optimize_image_with_size_limit(
         None => limits.max_size,
     };
 
-    let guessed_format = image::guess_format(&image_data).ok();
-    let dynamic = image::load_from_memory(&image_data)
+    let mut reader = image::ImageReader::new(Cursor::new(image_data.as_slice()))
+        .with_guessed_format()
+        .map_err(|e| BitFunError::validation(format!("Failed to read image header: {}", e)))?;
+    let guessed_format = reader.format();
+
+    // Limit decoded memory to protect against decompression bombs from
+    // arbitrary remote URLs. The image crate's `Limits::max_alloc` checks
+    // `decoder.total_bytes()` — computed from header metadata (width ×
+    // height × bytes_per_pixel) — *before* any pixel data is allocated,
+    // so oversized images are rejected without decoding.
+    const MAX_DECODE_MEMORY_BYTES: u64 = 20 * 1024 * 1024;
+    let mut decode_limits = image::Limits::default();
+    decode_limits.max_alloc = Some(MAX_DECODE_MEMORY_BYTES);
+    reader.limits(decode_limits);
+
+    let dynamic = reader
+        .decode()
         .map_err(|e| BitFunError::validation(format!("Failed to decode image data: {}", e)))?;
 
     let (orig_width, orig_height) = (dynamic.width(), dynamic.height());
@@ -178,6 +227,8 @@ pub fn optimize_image_with_size_limit(
             mime_type,
             width: orig_width,
             height: orig_height,
+            original_width: orig_width,
+            original_height: orig_height,
         });
     }
 
@@ -231,6 +282,8 @@ pub fn optimize_image_with_size_limit(
         mime_type: encoded.1,
         width: working.width(),
         height: working.height(),
+        original_width: orig_width,
+        original_height: orig_height,
     })
 }
 
@@ -483,4 +536,162 @@ fn encode_dynamic_image(
         .to_string();
 
     Ok((buffer, mime))
+}
+
+#[cfg(test)]
+mod decode_memory_limit_tests {
+    use super::*;
+    use image::{GrayImage, ImageFormat, Luma};
+    use std::io::Cursor;
+
+    fn encode_gray_png(width: u32, height: u32) -> Vec<u8> {
+        let image = GrayImage::from_pixel(width, height, Luma([0u8]));
+        let mut encoded = Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, ImageFormat::Png)
+            .expect("encode png");
+        encoded.into_inner()
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut table = [0u32; 256];
+        for (i, slot) in table.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    0xedb88320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+            *slot = c;
+        }
+        let mut crc = 0xffff_ffff;
+        for &b in data {
+            crc = table[((crc ^ b as u32) & 0xff) as usize] ^ (crc >> 8);
+        }
+        crc ^ 0xffff_ffff
+    }
+
+    /// Build a PNG whose IHDR header claims `width × height` but whose IDAT
+    /// only contains pixel data for a 1×1 image. The IHDR dimensions and CRC
+    /// are rewritten so `ImageReader::dimensions()` / `color_type()` return
+    /// the claimed values, while the file itself stays tiny.
+    fn png_with_oversized_header(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = encode_gray_png(1, 1);
+        // PNG layout: [0..8] signature, [8..12] IHDR length, [12..16] "IHDR",
+        // [16..20] width, [20..24] height, [24] bit-depth, [25] color-type,
+        // [26..29] compression/filter/interlace, [29..33] CRC (over 12..29).
+        bytes[16..20].copy_from_slice(&width.to_be_bytes());
+        bytes[20..24].copy_from_slice(&height.to_be_bytes());
+        let crc = crc32(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn rejects_image_exceeding_decode_memory_limit() {
+        // 100000 × 100000 grayscale (1 byte/pixel) = ~9.3 GiB decoded.
+        // The IHDR header claims these dimensions but the IDAT only has a
+        // 1×1 pixel; the limit check reads the header and rejects before
+        // any pixel data is decoded.
+        let png = png_with_oversized_header(100_000, 100_000);
+        let result = optimize_image_for_provider(png, "openai", Some("image/png"));
+        assert!(
+            result.is_err(),
+            "oversized image should be rejected, got: {:?}",
+            result.ok()
+        );
+        let err = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            err.contains("memory") || err.contains("limit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_image_within_decode_memory_limit() {
+        let png = encode_gray_png(100, 100);
+        let result = optimize_image_for_provider(png, "openai", Some("image/png"));
+        assert!(
+            result.is_ok(),
+            "normal image should be accepted: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod resize_reporting_tests {
+    use super::*;
+
+    fn png_of(width: u32, height: u32) -> Vec<u8> {
+        let img =
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
+                // Non-uniform content so the encoder cannot collapse it to nothing,
+                // which would let the size-based resize passes be skipped.
+                image::Rgb([(x % 251) as u8, (y % 253) as u8, ((x ^ y) % 247) as u8])
+            }));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, ImageFormat::Png)
+            .expect("encode test png");
+        out.into_inner()
+    }
+
+    /// A Retina screenshot is wider than every provider's limit, so it always
+    /// takes the resize path. The source dimensions were being computed and
+    /// then dropped, so callers reported the *resized* size as the file's —
+    /// silently wrong data, and the reason a caller mapping a reported position
+    /// back to the screen would land in the wrong place.
+    #[test]
+    fn a_resized_screenshot_still_reports_its_source_dimensions() {
+        let processed = optimize_image_with_size_limit(
+            png_of(3024, 1964),
+            "anthropic",
+            Some("image/png"),
+            Some(1024 * 1024),
+        )
+        .expect("optimize");
+
+        assert_eq!(processed.original_width, 3024);
+        assert_eq!(processed.original_height, 1964);
+        assert!(
+            processed.was_resized(),
+            "3024px exceeds every provider limit"
+        );
+        assert!(
+            processed.width < processed.original_width,
+            "sent {}px for a {}px source",
+            processed.width,
+            processed.original_width
+        );
+
+        // The factor has to actually describe the transform, or mapping back
+        // through it is worse than not having it.
+        let mapped = f64::from(processed.original_width) * processed.scale();
+        assert!(
+            (mapped - f64::from(processed.width)).abs() <= 1.0,
+            "scale {} maps {} to {}, expected ~{}",
+            processed.scale(),
+            processed.original_width,
+            mapped,
+            processed.width
+        );
+    }
+
+    /// An image already within limits must pass through untouched, and say so.
+    #[test]
+    fn a_small_image_is_not_reported_as_resized() {
+        let processed =
+            optimize_image_with_size_limit(png_of(80, 60), "anthropic", Some("image/png"), None)
+                .expect("optimize");
+
+        assert_eq!((processed.width, processed.height), (80, 60));
+        assert_eq!(
+            (processed.original_width, processed.original_height),
+            (80, 60)
+        );
+        assert!(!processed.was_resized());
+        assert!((processed.scale() - 1.0).abs() < f64::EPSILON);
+    }
 }

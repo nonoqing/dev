@@ -2,11 +2,34 @@
 
 export const forbiddenContentRules = [
   {
+    path: 'src/apps/cli/src/tui_backend.rs',
+    reason:
+      'The CLI-local TUI backend may consume App Server client and wire contracts but must not depend on backend implementations, Runtime, services, or private IPC',
+    patterns: [
+      {
+        regex:
+          /\b(?:bitfun_core|bitfun_agent_runtime|bitfun_agent_runtime_ipc|bitfun_services_core|bitfun_services_integrations|bitfun_runtime_services|bitfun_product_capabilities|bitfun_external_sources|bitfun_app_server)::/,
+        message:
+          'CLI-local TuiBackend must stay on the App Server client/protocol boundary',
+      },
+    ],
+  },
+  {
+    path: 'src/crates/interfaces/app-server/Cargo.toml',
+    reason: 'App Server must select explicit bitfun-core owner features',
+    patterns: [
+      {
+        regex: /features\s*=\s*\[[^\]]*"product-full"/,
+        message: 'app-server must not select the broad bitfun-core/product-full union',
+      },
+    ],
+  },
+  {
     path: 'src/crates/adapters/agent-runtime-ipc/src/operation.rs',
     reason: 'agent-runtime-ipc operation scope is frozen to the reviewed Shared TUI slice',
     patterns: [
       {
-        regex: /^\s+(?!(?:Health|ListSessions|CreateSession|RestoreSession|DeleteSession|ForkSession|RenameSession|UpdateSessionMode|UpdateSessionModel|ReloadSessionContext|CompactSession|UndoSession|RedoSession|SearchWorkspaceReferences|WorkspaceReferencesForMessage|GetSessionLineage|InspectLineageSession|CancelLineageSession|WorkspaceDiff|SubmitTurn|SteerTurn|RunUserShellCommand|CancelTurn|PendingPermissions|RespondPermission|SubmitUserAnswers|Unit|Sessions|SessionCreated|SessionRestored|SessionForked|SessionReverted|SessionLineage|LineageSessionInspection|WorkspaceReferenceSearch|WorkspaceReferences|TurnAccepted|TurnSteered|TurnCancelled|None|CurrentController|AttachExisting|UncontrolledTarget|Self|RuntimeIpcSessionRequirement|RuntimeIpcOperationRules|RuntimeSessionForkRequest|AgentContextReloadRequest|AgentDialogSteerRequest|AgentDialogTurnRequest|AgentMessageWorkspaceReferencesRequest|AgentSessionCompactionRequest|AgentSessionCreateRequest|AgentSessionCreateResult|AgentSessionLineageCancellationRequest|AgentSessionLineageInspection|AgentSessionLineageRequest|AgentSessionLineageSnapshot|AgentSessionLineageTranscriptRequest|AgentSessionListRequest|AgentSessionModeUpdateRequest|AgentSessionModelUpdateRequest|AgentSessionRevertRequest|AgentSessionRevertResult|AgentSessionSummary|AgentTurnCancellationRequest|AgentTurnCancellationResult|AgentUserShellCommandRequest|AgentWorkspaceReference|AgentWorkspaceReferenceSearchRequest|AgentWorkspaceReferenceSearchResult|SessionTranscript|WorkspaceDiffSnapshot)\b)[A-Z][A-Za-z0-9_]*\b/,
+        regex: /^\s+(?!(?:Health|ListAgentModes|ListSessions|CreateSession|RestoreSession|DeleteSession|ForkSession|RenameSession|UpdateSessionMode|UpdateSessionModel|ReloadSessionContext|CompactSession|UndoSession|RedoSession|SessionUsage|WaitForSettlement|RecordLocalCommandTurn|SearchWorkspaceReferences|WorkspaceReferencesForMessage|GetSessionLineage|InspectLineageSession|CancelLineageSession|WorkspaceDiff|SubmitTurn|SteerTurn|RunUserShellCommand|CancelTurn|PendingPermissions|RespondPermission|SubmitUserAnswers|Unit|AgentModes|Sessions|SessionCreated|SessionRestored|SessionForked|SessionReverted|SessionLineage|LineageSessionInspection|WorkspaceReferenceSearch|WorkspaceReferences|TurnAccepted|TurnSteered|TurnCancelled|LocalCommandTurnRecorded|Idle|Processing|Error|Starting|Compacting|Thinking|Streaming|ToolCalling|ToolConfirming|None|CurrentController|AttachExisting|UncontrolledTarget|Self|RuntimeIpcSessionRequirement|RuntimeIpcOperationRules|RuntimeSessionForkRequest|RuntimeSessionState|RuntimeSessionProcessingPhase|AgentContextReloadRequest|AgentDialogSteerRequest|AgentDialogTurnRequest|AgentLocalCommandTurnRecordRequest|AgentLocalCommandTurnRecordResult|AgentMessageWorkspaceReferencesRequest|AgentSessionCompactionRequest|AgentSessionCreateRequest|AgentSessionCreateResult|AgentSessionLineageCancellationRequest|AgentSessionLineageInspection|AgentSessionLineageRequest|AgentSessionLineageSnapshot|AgentSessionLineageTranscriptRequest|AgentSessionListRequest|AgentSessionModeUpdateRequest|AgentSessionModelUpdateRequest|AgentSessionRevertRequest|AgentSessionRevertResult|AgentSessionSummary|AgentSessionUsageRequest|AgentTurnCancellationRequest|AgentTurnCancellationResult|AgentTurnSettlementRequest|AgentUserShellCommandRequest|AgentWorkspaceReference|AgentWorkspaceReferenceSearchRequest|AgentWorkspaceReferenceSearchResult|SessionTranscript|SessionUsageReport|WorkspaceDiffSnapshot)\b)[A-Z][A-Za-z0-9_]*\b/,
         message:
           'agent-runtime-ipc may not add archive, replay, observer, general controller-transfer, or other operations beyond the reviewed Shared TUI slice',
       },
@@ -193,7 +216,7 @@ export const forbiddenContentRules = [
     ],
   },
   {
-    path: 'src/crates/assembly/product-capabilities/tests/product_sdk_assembly.rs',
+    path: 'src/crates/assembly/product-capabilities/tests/product_capability_contracts/product_sdk_assembly.rs',
     patterns: [
       {
         regex: /\bbitfun_core\b/,
@@ -1459,11 +1482,6 @@ export const forbiddenContentRules = [
   {
     path: 'src/crates/assembly/core/src/service/search/mod.rs',
     patterns: [
-      {
-        regex: /#\[cfg\(not\(feature = "ssh-remote"\)\)\]\s*mod remote_disabled\b/s,
-        message:
-          'core workspace search facade must not own disabled remote search stubs; re-export services-integrations remote_ssh workspace_search disabled surface',
-      },
       {
         regex: /\bbitfun_services_integrations::workspace_search::flashgrep\b/,
         message:
@@ -4117,13 +4135,13 @@ export const forbiddenContentUnderRules = [
           /\b(?:use\s+bitfun_opencode_adapter\b|extern\s+crate\s+bitfun_opencode_adapter\b|bitfun_opencode_adapter::)/,
         allowPaths: [
           'src/crates/adapters/opencode-adapter/tests/opencode_source_adapter.rs',
-          'src/crates/adapters/opencode-adapter/tests/opencode_command_adapter.rs',
-          'src/crates/adapters/opencode-adapter/tests/opencode_skill_roots.rs',
-          'src/crates/adapters/opencode-adapter/tests/opencode_workspace_references.rs',
+          'src/crates/adapters/opencode-adapter/tests/opencode_static_source_contracts/opencode_command_adapter.rs',
+          'src/crates/adapters/opencode-adapter/tests/opencode_static_source_contracts/opencode_skill_roots.rs',
+          'src/crates/adapters/opencode-adapter/tests/opencode_static_source_contracts/opencode_workspace_references.rs',
           'src/crates/adapters/opencode-adapter/tests/tool_source_contracts.rs',
-          'src/crates/adapters/opencode-adapter/tests/opencode_subagent_adapter.rs',
+          'src/crates/adapters/opencode-adapter/tests/opencode_static_source_contracts/opencode_subagent_adapter.rs',
           'src/crates/adapters/opencode-adapter/tests/opencode_mcp_adapter.rs',
-          'src/crates/adapters/opencode-adapter/tests/hook_source.rs',
+          'src/crates/adapters/opencode-adapter/tests/opencode_static_source_contracts/hook_source.rs',
           'src/crates/assembly/core/src/plugin_runtime.rs',
           'src/crates/assembly/core/src/external_sources.rs',
           'src/crates/assembly/core/src/external_hooks.rs',
@@ -4153,10 +4171,10 @@ export const forbiddenContentUnderRules = [
     patterns: [{
       regex: /\b(?:use\s+bitfun_claude_code_adapter\b|extern\s+crate\s+bitfun_claude_code_adapter\b|bitfun_claude_code_adapter::)/,
       allowPaths: [
-        'src/crates/adapters/claude-code-adapter/tests/hook_source.rs',
-        'src/crates/adapters/claude-code-adapter/tests/command_source.rs',
-        'src/crates/adapters/claude-code-adapter/tests/subagent_source.rs',
-        'src/crates/adapters/claude-code-adapter/tests/mcp_source.rs',
+        'src/crates/adapters/claude-code-adapter/tests/claude_code_source_contracts/hook_source.rs',
+        'src/crates/adapters/claude-code-adapter/tests/claude_code_source_contracts/command_source.rs',
+        'src/crates/adapters/claude-code-adapter/tests/claude_code_source_contracts/subagent_source.rs',
+        'src/crates/adapters/claude-code-adapter/tests/claude_code_source_contracts/mcp_source.rs',
         'src/crates/assembly/core/src/external_sources.rs',
         'src/crates/assembly/core/src/external_hooks.rs',
         'src/crates/assembly/core/src/instruction_sources.rs',
@@ -4170,9 +4188,9 @@ export const forbiddenContentUnderRules = [
     patterns: [{
       regex: /\b(?:use\s+bitfun_codex_adapter\b|extern\s+crate\s+bitfun_codex_adapter\b|bitfun_codex_adapter::)/,
       allowPaths: [
-        'src/crates/adapters/codex-adapter/tests/hook_source.rs',
-        'src/crates/adapters/codex-adapter/tests/subagent_source.rs',
-        'src/crates/adapters/codex-adapter/tests/mcp_source.rs',
+        'src/crates/adapters/codex-adapter/tests/codex_source_contracts/hook_source.rs',
+        'src/crates/adapters/codex-adapter/tests/codex_source_contracts/subagent_source.rs',
+        'src/crates/adapters/codex-adapter/tests/codex_source_contracts/mcp_source.rs',
         'src/crates/assembly/core/src/external_sources.rs',
         'src/crates/assembly/core/src/external_hooks.rs',
         'src/crates/assembly/core/src/instruction_sources.rs',
@@ -4189,6 +4207,7 @@ export const forbiddenContentUnderRules = [
         'src/crates/adapters/static-hook-support/tests/parser.rs',
         'src/crates/adapters/opencode-adapter/src/hook_source.rs',
         'src/crates/adapters/opencode-adapter/src/command_source.rs',
+        'src/crates/adapters/opencode-adapter/src/agent_source.rs',
         'src/crates/adapters/opencode-adapter/src/mcp_source.rs',
         'src/crates/adapters/claude-code-adapter/src/hook_source.rs',
         'src/crates/adapters/claude-code-adapter/src/command_source.rs',

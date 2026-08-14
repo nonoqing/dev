@@ -26,7 +26,10 @@ impl SdkHostRuntime {
             .context("Failed to select SDK Host delivery profile")
     }
 
-    pub(crate) async fn build(workspace_root: impl AsRef<Path>) -> Result<Self> {
+    pub(crate) async fn build(
+        workspace_root: impl AsRef<Path>,
+        telemetry: bitfun_observability::Telemetry,
+    ) -> Result<Self> {
         let (workspace_root, services) =
             build_local_runtime_services(workspace_root, RUNTIME_EVENT_BUFFER)?;
         let path_manager = bitfun_core::infrastructure::try_get_path_manager_arc()
@@ -45,12 +48,14 @@ impl SdkHostRuntime {
         let parts = ProductAssembler::new()
             .assemble(ProductAssemblyInput::new(DELIVERY_PROFILE, services))
             .context("Failed to assemble SDK Host product runtime")?;
-        let agentic_system = system::init_agentic_system_for_profile_with_runtime_ownership(
-            parts.plan().profile(),
-            Arc::new(runtime_ownership),
-        )
-        .await
-        .context("Failed to initialize agentic system")?;
+        let agentic_system =
+            system::init_agentic_system_for_profile_with_runtime_ownership_and_telemetry(
+                parts.plan().profile(),
+                Arc::new(runtime_ownership),
+                telemetry,
+            )
+            .await
+            .context("Failed to initialize agentic system")?;
         bind_core_execution_ports(&agentic_system);
         let scheduler = ensure_product_dialog_scheduler(&agentic_system);
         let (services, harness_registry, _disabled_plugin_runtime) = parts.into_runtime_parts();
@@ -87,9 +92,6 @@ fn bind_core_execution_ports(agentic_system: &AgenticSystem) {
     agentic_system
         .coordinator
         .set_terminal_port(CoreRuntimeServicesProvider::terminal_port());
-    agentic_system
-        .coordinator
-        .set_remote_exec_port(CoreRuntimeServicesProvider::remote_exec_port());
 }
 
 pub(crate) async fn initialize_terminal_service() {

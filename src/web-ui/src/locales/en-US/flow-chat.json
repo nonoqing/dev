@@ -93,6 +93,7 @@
     "failedDescription": "Retry loading the saved conversation. If it was imported from another device, check your account and connection first.",
     "preparingOlderHistory": "Preparing older history...",
     "olderHistoryNotReady": "Older history is not ready yet.",
+    "newerHistoryNotReady": "Newer history is not ready yet.",
     "remoteSessionMissing": "The backend session data was not found. If you just reconnected an SSH remote workspace, close and reopen the remote project, or create a new session and try again.",
     "retry": "Retry"
   },
@@ -174,7 +175,6 @@
       "tokens": "{{value}} tokens"
     },
     "loading": {
-      "markdown": "Generating usage report...",
       "title": "Generating usage report",
       "description": "Reading local session records and preparing a privacy-safe summary.",
       "steps": {
@@ -315,7 +315,9 @@
     },
     "slowestLabels": {
       "modelCall": "Turn {{turn}} model call",
-      "modelCallUnknown": "Model call"
+      "modelCallUnknown": "Model call",
+      "turn": "Turn {{turn}}",
+      "turnUnknown": "Turn"
     },
     "slowest": {
       "details": {
@@ -413,6 +415,7 @@
       "interrupted": "Interrupted"
     },
     "menu": {
+      "switchPet": "Switch pet",
       "closePet": "Close pet",
       "closeBubble": "Close this bubble"
     },
@@ -484,11 +487,6 @@
     "rollbackDialogIntro": "This will:",
     "rollbackDialogBulletFiles": "Undo all file modifications from that turn onwards",
     "rollbackDialogBulletHistory": "Delete that turn and all following dialog records (irreversible)",
-    "rollbackPanelDialogTitle": "Roll back to before turn {{index}}?",
-    "rollbackPanelDialogIntro": "This will:",
-    "rollbackPanelBulletRestore": "Restore files to the state before turn {{index}}",
-    "rollbackPanelBulletUndo": "Undo all file changes from that turn onward",
-    "rollbackPanelBulletHistory": "Keep the session history (you can roll forward again anytime)",
     "rollbackSuccess": "Rolled back and deleted subsequent dialog records",
     "rollbackFailed": "Rollback failed",
     "saveEdit": "Save and rerun",
@@ -664,6 +662,9 @@
       "cliInstallFailed": "Could not prepare the remote environment. Check the SSH connection and try again.",
       "cliInstallInProgress": "Preparing the remote environment…",
       "cliInstallUnknownVersion": "required version",
+      "modelSyncStarted": "Copying this device’s model configuration to the remote device…",
+      "modelSyncSucceeded": "Model configuration copied; the remote device can run the selected model.",
+      "modelSyncFailed": "Could not copy the model configuration to the remote device.",
       "errors": {
         "attachmentUnavailable": "This image cannot be sent to the remote device. Add it again and retry.",
         "deviceAttachmentTooLarge": "Images sent to an account device can total at most 192 KB. Compress them or use an SSH target.",
@@ -674,12 +675,12 @@
         "sessionUnavailable": "Remote task information is incomplete. Reopen the task or create a new one.",
         "compactWhileRunning": "Wait for the current remote task to finish before compacting the context.",
         "compactRejected": "The target could not start compaction. Try again shortly.",
-        "imagesWhileRunning": "Images will be sent with the next turn. Wait for the current remote task to finish and try again.",
         "sessionNotReady": "The remote task is still being prepared. Try sending again shortly.",
         "submissionUnconfirmed": "BitFun cannot yet confirm whether the target received this task. Check the task status shortly."
       }
     },
     "addBoostTooltip": "Agent modes, image, or skills",
+    "modeChangeFailed": "Failed to change the agent mode. Try again.",
     "permissionMode": {
       "menuLabel": "Permission mode",
       "globalScope": "Global",
@@ -708,9 +709,19 @@
         "tooltip": "Permissions for this session are controlled by the ACP client."
       },
       "fullAccessWarningTitle": "Enable full access?",
-      "fullAccessWarningMessage": "Full access allows tools by default without asking each time.",
+      "fullAccessWarningMessage": "Full access allows tools by default without asking each time. This applies to the current session only; project and enforced rules still apply.",
       "fullAccessConfirm": "Enable full access",
-      "cancel": "Cancel"
+      "cancel": "Cancel",
+      "sessionScope": "This session",
+      "currentSessionOverride": "Permissions: {{mode}} (this session only)",
+      "resetToDefault": "Follow the default mode",
+      "noSession": "Open or start a session before changing its permission mode.",
+      "turnScope": "Next message only",
+      "currentTurnOverride": "Permissions: {{mode}} (next message only)",
+      "nextTurnOnly": "Use {{mode}} for the next message only",
+      "nextTurnOnlyShort": "Once",
+      "fullAccessWarningMessageNextTurn": "Full access allows tools by default without asking each time. This applies to the next message only; project and enforced rules still apply.",
+      "openDefaultSettings": "Open permission settings"
     },
     "addModeTooltip": "Add Plan or Debug",
     "boostSectionAgent": "Agent",
@@ -801,6 +812,10 @@
     "nativeCommandReconfirmationRequired": "The external command you previously chose is no longer available. Choose the BitFun command from the slash menu to run it.",
     "selectHint": "↑↓ Select · Enter Confirm · Esc Cancel",
     "current": "Current",
+    "commandStatus": {
+      "restricted": "Restricted",
+      "chooseSource": "Choose source"
+    },
     "computerUseDisabled": "Computer Use is disabled in Settings → Session permissions",
     "professionalMode": "Expert Mode",
     "designMode": "Design Mode",
@@ -1306,9 +1321,6 @@
       "pruned": "Pruned",
       "failed": "Command failed"
     }
-  },
-  "stickyTaskIndicator": {
-    "tooltip": "Jump to current task"
   },
   "sessionFilesBadge": {
     "files": "files",
@@ -2389,6 +2401,24 @@
     "xhigh": "Extra High",
     "xhighDesc": "Maximum reasoning depth (slower)"
   },
+  "reasoningSelector": {
+    "title": "Reasoning",
+    "auto": "Auto",
+    "modelDefault": "model default",
+    "current": "Reasoning: {{preset}}",
+    "currentAuto": "Reasoning: Auto ({{preset}})",
+    "updateFailed": "Failed to update reasoning preset",
+    "source": {
+      "models_dev": "models.dev",
+      "adapter_fallback": "Built in",
+      "model_config": "Custom"
+    },
+    "sourceTooltip": {
+      "models_dev": "Generated automatically from models.dev model metadata",
+      "adapter_fallback": "Built into BitFun for this model adapter",
+      "model_config": "Defined in this model's custom configuration"
+    }
+  },
   "coworkScope": {
     "title": "Choose a Cowork workspace",
     "description": "Cowork mode needs a workspace folder to read/write files. Use the current project, or choose another folder.",
@@ -2458,9 +2488,9 @@
         "prompt": "Help me write an email reply.\n\nOriginal email (paste here):\nMy goal (confirm / decline / push forward / clarify):\nTone (formal / friendly / firm but polite):\nKey points to include:\n\nOutput:\n1) Subject line suggestions\n2) Body (2 versions: more formal / more concise)\n3) Questions for the recipient to confirm (if any)"
       },
       "make_docx": {
-        "title": "Draft a DOCX",
-        "description": "Write a structured document and export as DOCX.",
-        "prompt": "Help me write a document and export it as a .docx file.\n\nDocument type (PRD / proposal / meeting summary / report / SOP):\nAudience:\nTone (formal / friendly / concise):\nMust-include points:\nLength target:\n\nDeliverable:\n1) Suggested outline\n2) Full content\n3) Export as a .docx file (save it under artifacts/)"
+        "title": "Draft a document",
+        "description": "Turn source material into a structured, reusable document.",
+        "prompt": "Help me write a structured document.\n\nDocument type (PRD / proposal / meeting summary / report / SOP):\nAudience:\nTone (formal / friendly / concise):\nMust-include points:\nLength target:\n\nDeliverable:\n1) Suggested outline\n2) Full content\n3) Save the Markdown document under artifacts/"
       },
       "make_spreadsheet": {
         "title": "Design a spreadsheet",
@@ -2497,7 +2527,6 @@
     },
     "errors": {
       "emptyContent": "Message content cannot be empty",
-      "richContentUnsupported": "Messages with attachments or structured metadata can only be sent after the active turn finishes",
       "sendNowFailed": "Send now failed; please try again"
     }
   },

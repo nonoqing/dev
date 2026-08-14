@@ -22,7 +22,7 @@
 | JS/TS 工具、软件包插件、稳定 Hook、`client`、`serverUrl`、`$` | [服务插件运行时适配](opencode-plugin-runtime-adapter-design.md) |
 | TUI target、Route、Command、Keymap、Dialog、Slot、Theme、State、KV | [终端界面插件适配](opencode-tui-plugin-adapter-design.md) |
 | SDK、Server、ACP、IDE、Web、GitHub、GitLab、Slack | [外部集成适配](opencode-external-integration-adapter-design.md) |
-| 进程、调用、超时、恢复、状态与 BitFun 归属模块边界 | [插件运行时主机](plugin-runtime-host-design.md) |
+| 进程、调用、超时、恢复、状态与 BitFun 归属模块边界 | [插件运行时与 Plugin Host](plugin-runtime-design.md) |
 | BitFun 能力输出到外部宿主、Provider Slot、通用状态/事件/并发/冲突边界 | [能力装配与宿主集成](capability-runtime-integration-design.md) |
 | 交付顺序和阶段退出条件 | [粗粒度计划](../../specs/plans/opencode-extension-compatibility-plan.md) |
 
@@ -116,7 +116,7 @@ OpenCode，和 OpenCode 配置/插件进入 BitFun 是两个独立验收方向�
 | JSON、JSONC、环境变量、文件引用 | 转换参数 + 明确降级 | 主要本地来源已实现 | 可主要适配 | OC-R1 | 已支持全局/项目 JSON/JSONC、`XDG_CONFIG_HOME`、`OPENCODE_CONFIG`、`OPENCODE_CONFIG_DIR`、`OPENCODE_CONFIG_CONTENT` 与项目配置禁用；inline 内容有界且使用脱敏虚拟来源标识。完整配置 schema、配置变量替换、remote/managed 来源仍未实现 | [解析与鲁棒性](opencode-config-assets-adapter-design.md#4-解析与鲁棒性) |
 | 独立 `tui.json/jsonc` | 融合现有能力 + 转换参数 | 未实现 | 可完整适配 | OC-R1 | 按 global、`OPENCODE_TUI_CONFIG`、project、`.opencode` 独立顺序加载，不能复用主配置优先级 | [TUI 来源](opencode-config-assets-adapter-design.md#32-tui-独立来源顺序) |
 | Rules / Instructions | 转换参数 | 部分实现：完整本地配置顺序下的文件与 glob | 可完整适配 | OC-R1 | OpenCode adapter 已读取用户全局 `AGENTS.md`/Claude fallback，并按 OpenCode 的全局文件覆盖、后续本地来源去重追加规则合并 `instructions`；相对路径从 opened directory 向 project boundary 查找，禁用项目配置时回到用户配置根。Product Assembly 在 Codex/Claude 用户来源与项目来源之前合成并去重。远程 URL 与 managed/organization policy 仍未实现 | [声明式资产](opencode-config-assets-adapter-design.md#5-声明式资产映射) |
-| Agents / Modes | 融合现有能力 + 转换参数 | 部分实现：Subagent 安全子集、模型/profile 绑定与 Agent-local 权限约束 | 可主要适配 | OC-R1 | 已支持当前生产 V1 `agent/prompt/disable/permission` 与 Core V2 `agents/system/disabled/permissions` 的已验证安全子集、全局/项目 Markdown 和 JSON/JSONC、subagent/all、description、`Default`/不透明模型引用、不透明 `variant` 意图和工具映射，并接入唯一精确匹配、显式 BitFun 模型绑定、Web/TUI 可见性、审批、冲突、更新、撤下和 fresh single-run Task；仅显式声明 `model` 的 Agent 才保留 `variant`，未声明模型时与 OpenCode 一样不生效。保留的 `variant` 不推断为 reasoning effort，也不生成请求级 override，需显式绑定现有配置。不维护厂商别名、质量推断或自动 fallback。V1 `disable` 保持 deep-merge，V2 `disabled` 保持 remove/re-add，不能混用生命周期语义。有序 V2 permission rules 与 V1 扁平精确 action map 会成为只可收紧的独立约束。primary/mode、root ambient permission、V1 action pattern/嵌套 resource map、跨路径与命令资源域的歧义 pattern、options、采样与续接明确阻断或降级 | [Agents 与 Skills](opencode-config-assets-adapter-design.md#52-agentsmodes-与-skills) |
+| Agents / Modes | 融合现有能力 + 转换参数 | 部分实现：静态 Agent 安全子集、role 投影、模型/profile 绑定与 Agent-local 权限约束 | 可主要适配 | OC-R1 | 已支持当前生产 V1 与 Core V2 的已验证安全子集、全局/项目 Markdown 和 JSON/JSONC、`primary/subagent/all`、description、模型/variant 意图和工具映射；同一 workspace route/generation registry 向 Web/TUI 主选择器和 fresh Task 投影，复用审批、冲突、更新、撤下与调用租约。未声明模型继承当前/父 Session，显式模型作为新主 Session 默认值且之后可修改；不维护厂商别名、质量推断或自动 fallback。V1/V2 生命周期与有序权限规则保持原语义，主 Agent 的外部 ask/deny 约束也进入子委派 ceiling。legacy mode、root ambient permission、V1 歧义 pattern、OpenCode task target 过滤、options、采样与续接仍明确阻断或降级 | [Agents 与 Skills](opencode-config-assets-adapter-design.md#52-agentsmodes-与-skills) |
 | Skills | 转换参数 | 部分实现：标准根、本地配置根与标准用户根变化失效 | 可完整适配 | OC-R2 | 现有 Registry 除标准用户/项目根外，也通过 `bitfun-core/external_sources` 组合边界按 OpenCode 配置来源顺序累加 V1 `skills.paths` 与当前迁移后的本地字符串数组；仅接受项目根/用户目录内的本地目录并做有界递归发现。与 workspace 无关的标准用户根复用版本化快照，文件变化使其失效并在下一次发现时重建；OpenCode 配置根因作用域依赖当前 workspace 而保持按请求统一发现，标准项目根与 Remote 项目来源也仍按请求读取。同 scope 配置根覆盖标准 OpenCode 根，但不重排更早的 BitFun/Claude/Codex/Cursor 来源。URL、下载/缓存、完整 allow/deny/ask 顺序及外部来源策略仍未实现 | [Agents 与 Skills](opencode-config-assets-adapter-design.md#52-agentsmodes-与-skills) |
 | References | 融合现有能力 + 转换参数 | 部分实现：本地目录与既有 Workspace 消费点 | 可主要适配 | OC-R2 | 已按统一的 OpenCode 本地配置来源顺序解析 `references`/旧 `reference` 的本地 path、description/hidden，相同 alias 后者覆盖；通过独立生命周期协调器与 BitFun 原生关联目录合成 native-first 有效快照，接入关联目录弹窗和既有 `@` 目录选择器。外部声明不自动进入 Prompt、不授予文件权限；Git、Remote、下载/缓存明确不支持且不做临时实现 | [References](opencode-config-assets-adapter-design.md#521-references) |
 | Commands | 补扩展接口 + 转换参数 | 部分实现：prompt、本地文本文件、经审阅的 shell 上下文与显式 Subagent 委派 | 可完整适配 | OC-R2 | 已支持全局/项目 JSON、JSONC、Markdown 命令、参数展开、动态目录、刷新和显式冲突选择；模板中的静态 workspace 相对 `@file` 可在调用时有界读取，`!shell` 经精确计划审阅后仅把 stdout 加入 Prompt，静态计划可记住、参数相关计划仅可单次运行。仅 `agent` 加缺省/`true` 的 `subtask` 可委派给同 workspace、同 OpenCode 生态、已审批且仍有效的精确 Subagent，并复用现有 fresh Task 生命周期；shell 与委派的组合、`model`、`variant`、`subtask: false`、隐式默认 Agent、Remote 与附件上下文保持受限，不回退到当前 Agent 或本机执行 | [Commands](opencode-config-assets-adapter-design.md#53-commands) |
@@ -145,12 +145,12 @@ OpenCode，和 OpenCode 配置/插件进入 BitFun 是两个独立验收方向�
 | 全局插件加载 | 补基础能力 | 未实现 | 可完整适配 | OC-R2 | 自动发现全局配置和 ConfigPaths 全局目录，并按完整来源顺序生成 `plugin_origins`；首次可执行启用按来源、插件身份和执行域确认，决定只提示一次且可按项目覆盖 | [服务插件](opencode-plugin-runtime-adapter-design.md#52-服务插件) |
 | `package.json`、入口与依赖 | 补基础能力 | 未实现 | 可主要适配 | OC-R2 | 复现 server 入口、入口回退、`engines.opencode`、npm 配置和锁文件；原生模块失败只影响对应插件 | [来源与执行版本](opencode-plugin-runtime-adapter-design.md#4-来源与执行版本) |
 | 内置/MCP/外部同名工具；后续 pure/重复插件顺序 | 融合现有能力 | standalone Tool 显式选择已实现 | 可完整适配 | OC-R2 | 当前按候选身份与内容版本记忆选择且不静默覆盖；package plugin 阶段再复现 internal-first、pure、来源顺序和去重 | [注册与覆盖](opencode-plugin-runtime-adapter-design.md#53-注册与覆盖) |
-| `project` / `directory` / `worktree` | 直接桥接 | standalone Tool 已传 `directory/worktree/sessionID`；完整 `project` 未实现 | 可完整适配 | OC-R2 | 当前 `directory` 为打开的 workspace、`worktree` 为 Git 根并传递真实 session；完整插件 `project` 和 Remote 在 OC-R5 前保持 `unsupported` | [兼容门面](opencode-plugin-runtime-adapter-design.md#7-opencode-兼容门面) |
-| `client` | 补扩展接口 | 未实现 | 可主要适配 | OC-R2 | 提供版本化插件客户端门面，按方法转发到现有 BitFun 归属模块 | [兼容门面](opencode-plugin-runtime-adapter-design.md#7-opencode-兼容门面) |
-| `serverUrl` | 补扩展接口 | 未实现 | 可主要适配 | OC-R2 | 在 worker 执行域提供真实回环服务，只实现插件所需的版本化路由 | [兼容门面](opencode-plugin-runtime-adapter-design.md#7-opencode-兼容门面) |
+| `project` / `directory` / `worktree` | 直接桥接 | standalone Tool 已传 `directory/worktree/sessionID`；完整 `project` 未实现 | 可完整适配 | OC-R2 | 当前 `directory` 为打开的 workspace、`worktree` 为 Git 根并传递真实 session；完整插件 `project` 和 Remote 在 OC-R5 前保持 `unsupported` | [兼容接口](opencode-plugin-runtime-adapter-design.md#7-opencode-插件兼容接口) |
+| `client` | 补扩展接口 | 未实现 | 可主要适配 | OC-R2 | 提供版本化插件客户端门面，按方法转发到现有 BitFun 归属模块 | [兼容接口](opencode-plugin-runtime-adapter-design.md#7-opencode-插件兼容接口) |
+| `serverUrl` | 补扩展接口 | 未实现 | 可主要适配 | OC-R2 | 在 worker 执行域提供真实回环服务，只实现插件所需的版本化路由 | [兼容接口](opencode-plugin-runtime-adapter-design.md#7-opencode-插件兼容接口) |
 | `$` 与脚本环境 | 补基础能力 | 未实现 | 可完整适配 | OC-R2 | 只有需要 OpenCode/Bun `$` 的冻结样例才启用 Bun-compatible adapter；Node 路径不能伪造等价语义。受限模式依赖真实 OS/容器边界，无法落实时停用 target | [默认策略](opencode-plugin-runtime-adapter-design.md#3-默认策略与可调权限) |
-| 加载、停用、更新与崩溃恢复 | 补基础能力 | standalone Tool fail-closed 已实现 | 可主要适配 | OC-R2 | 已有来源限定 target、后台重载、删除撤下与 worker 终止；精确物化旧版本、健康旧进程保留和退避恢复仍待完整 Host | [生命周期](opencode-plugin-runtime-adapter-design.md#9-生命周期与能力暴露) |
-| 跨插件进程全局共享 | 明确降级 | 未实现 | 明确降级 | OC-R2 | 每 target 使用独立可终止进程；不承诺 `globalThis`、进程环境或模块单例的未文档化共享 | [故障域](opencode-plugin-runtime-adapter-design.md#81-故障域) |
+| 加载、停用、更新与崩溃恢复 | 补基础能力 | standalone Tool fail-closed 已实现 | 可主要适配 | OC-R2 | 已有来源限定 target、后台重载、删除撤下与 worker 终止；精确物化旧版本、健康旧进程保留和退避恢复仍待完整 Host | [生命周期](opencode-plugin-runtime-adapter-design.md#9-生命周期) |
+| 跨插件进程全局共享 | 明确降级 | 未实现 | 明确降级 | OC-R2 | standalone Tool 每 target 使用独立 worker；完整 package plugin 按执行与安全事实复用 Host，但不承诺 `globalThis`、进程环境或模块单例的未文档化共享 | [故障域](opencode-plugin-runtime-adapter-design.md#81-故障域) |
 
 本类整体风险是第三方代码副作用、依赖安装失败、Hook 顺序漂移和 worker 失控。默认权限可以开放，但执行隔离、超时、取消、队列上限、结果大小和故障恢复必须始终启用。
 
@@ -335,7 +335,7 @@ worker。授权在准备前、准备后 import 前、load 后注册前和每次 
 | `api.app.version` 无法表达 renderer 降级 | 协议限制 | 插件只能读取兼容版本，没有能力协商字段，可能在懒路径选择 BitFun 不支持的组件能力 | 初始化依赖 renderer 时拒绝整个 target；懒路径返回 `unsupported(renderer-required)`，不能宣称仅凭版本检查即可兼容。 |
 | 完整 OpenCode HTTP Server 协议 | 不作为插件兼容前置目标 | 会形成第二套产品协议、会话和错误模型 | 为插件实现所需 Client/回环路由；外部协议按独立产品需求扩展。 |
 | 原始 IDE/Web/attach/GitHub/GitLab 客户端或流程直接连接 BitFun | 不承诺直接替换 | 这些入口依赖 OpenCode CLI、Server、会话和产品流程，不是插件接口 | 提供 BitFun 原生集成；IDE `/tui` 子集和外部协议按真实需求单独兼容。 |
-| 插件间 `globalThis`、进程环境和模块单例共享 | 明确不兼容 | 每 target 独立进程才能可靠终止死循环和内存失控 | 保留官方 PluginInput、Hook 顺序和显式接口，不支持未文档化进程全局副作用。 |
+| 插件间 `globalThis`、进程环境和模块单例共享 | 明确不兼容 | standalone Tool 以 target worker 隔离；完整 package plugin 可共享 Host，但 Host 内进程级状态不是兼容契约 | 保留官方 PluginInput、Hook 顺序和显式接口，不支持未文档化进程全局副作用。 |
 | `server` / `autoupdate` 在普通 BitFun 启动中的行为 | 明确降级 | 两者分别属于 OpenCode 服务进程和 OpenCode 自身更新 | 显式兼容服务可映射 `server`；`autoupdate` 只保留来源并说明不适用。 |
 | 未文档化内部接口 | 不承诺 | 没有稳定版本和契约 | 返回稳定不支持并进入版本前瞻报告。 |
 | `experimental_workspace.register` | 暂不承诺 | 接口未稳定且会改变工作区与远程连接归属 | 继续使用 BitFun Workspace/Remote 归属模块，稳定后重评。 |

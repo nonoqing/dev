@@ -30,7 +30,7 @@ const NONCE_LEN: usize = 12;
 /// so the client can rebuild the identical KDF on login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KdfParams {
-    /// Memory cost in KiB (e.g. 65536 = 64 MB).
+    /// Memory cost in KiB (e.g. 16384 = 16 MiB).
     pub m: u32,
     /// Time cost (iterations).
     pub t: u32,
@@ -40,9 +40,9 @@ pub struct KdfParams {
 
 impl Default for KdfParams {
     fn default() -> Self {
-        // OWASP-recommended Argon2id baseline: 64 MB, 3 iterations, 4 lanes.
+        // Resource-aware Argon2id baseline: 16 MiB, 3 iterations, 4 lanes.
         Self {
-            m: 65536,
+            m: 16 * 1024,
             t: 3,
             p: 4,
         }
@@ -151,6 +151,16 @@ pub fn mark_relay_session_history_import_complete(metadata: &mut SessionMetadata
 pub struct DelegateToken {
     pub token: String,
     pub user_id: String,
+}
+
+/// Full device credential minted for a distinct SSH host. Unlike
+/// [`DelegateToken`], this token may authenticate a device WebSocket and is
+/// therefore only issued by the narrow authenticated provisioning endpoint.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProvisionedDeviceToken {
+    pub token: String,
+    pub user_id: String,
+    pub device_id: String,
 }
 
 /// A delegated account identity: token + master_key, for paired clients
@@ -468,6 +478,7 @@ impl AccountClient {
             "password_hash": password_hash,
             "device_id": device.device_id,
             "device_name": device.device_name,
+            "device_kind": "desktop",
             "request_id": uuid::Uuid::new_v4().to_string(),
         });
         let request = self
@@ -852,6 +863,49 @@ impl AccountClient {
             token: auth.token,
             user_id: auth.user_id,
         })
+    }
+
+    /// Register a new account device and mint its full routing token.
+    ///
+    /// `device_kind` is what keeps the minted row out of the wrong lists: this
+    /// route serves both an SSH host being bootstrapped (`"desktop"`) and a
+    /// keyboard-less peer that cannot type a password (`"watch"`), and only the
+    /// caller knows which one it is holding.
+    /// `request_id` makes an ambiguous HTTP response safe to replay.
+    pub async fn provision_device_token(
+        &self,
+        relay_url: &str,
+        session: &AccountSession,
+        device_id: &str,
+        device_name: &str,
+        device_kind: &str,
+        request_id: uuid::Uuid,
+    ) -> Result<ProvisionedDeviceToken> {
+        let body = serde_json::json!({
+            "device_id": device_id,
+            "device_name": device_name,
+            "device_kind": device_kind,
+            "request_id": request_id.to_string(),
+        });
+        let resp = send_with_retry(
+            "provision account device",
+            self.http
+                .post(Self::endpoint(relay_url, "/api/auth/provision-device")?)
+                .header("Authorization", Self::auth_header(session))
+                .json(&body),
+            RelayHttpRetry::IdempotentWrite,
+        )
+        .await?;
+        if !resp.status().is_success() {
+            return Err(Self::into_buffered_error(resp));
+        }
+        let provisioned: ProvisionedDeviceToken = resp.json().await?;
+        if provisioned.user_id != session.user_id || provisioned.device_id != device_id {
+            return Err(anyhow!(
+                "relay returned a mismatched provisioned device identity"
+            ));
+        }
+        Ok(provisioned)
     }
 
     /// Revoke the account token on the relay (server-side logout).

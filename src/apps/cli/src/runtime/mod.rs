@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use bitfun_agent_runtime::sdk::AgentRuntime;
+use bitfun_agent_runtime::sdk::{AgentEventSource, AgentRuntime};
 use bitfun_core::agentic::system::AgenticSystem;
 use bitfun_core::product_assembly::{ProductAssemblyPlan, ProductServiceCapabilityAvailability};
 use bitfun_core::product_runtime::{
@@ -10,9 +10,11 @@ use bitfun_core::product_runtime::{
     CoreLocalWorkspaceSnapshot, CoreProductAgentRuntime, CoreProductEventQueueOwner,
 };
 use bitfun_core::runtime_ports::PluginRuntimeAvailability;
+use bitfun_core::service::remote_connect::account_runtime::AccountRuntime;
 use bitfun_runtime_ports::LocalWorkspaceSnapshotPort;
 use bitfun_runtime_services::RuntimeServices;
 
+use crate::account::{build_account_runtime, CliAccountRoutingHost};
 use crate::product_assembly::{assemble_acp_runtime_parts, assemble_cli_runtime_parts};
 
 pub(crate) mod approval;
@@ -53,6 +55,8 @@ pub(crate) struct CliRuntimeContext {
     agent_runtime: AgentRuntime,
     local_workspace_snapshot: Arc<dyn LocalWorkspaceSnapshotPort>,
     compatibility: CoreAgentRuntimeCompatibility,
+    account_runtime: Arc<AccountRuntime>,
+    account_routing: Arc<CliAccountRoutingHost>,
     _agent_event_queue_owner: CoreProductEventQueueOwner,
     services: RuntimeServices,
     product: CliProductRuntimeState,
@@ -97,6 +101,7 @@ impl CliRuntimeContext {
         .context("Failed to build CLI Agent Runtime SDK")?;
         let compatibility =
             CoreAgentRuntimeCompatibility::build(agentic_system.coordinator.clone(), scheduler);
+        let account = build_account_runtime(compatibility.clone());
         let local_workspace_snapshot = CoreLocalWorkspaceSnapshot::build();
 
         debug_assert_eq!(
@@ -114,6 +119,8 @@ impl CliRuntimeContext {
             agent_runtime,
             local_workspace_snapshot,
             compatibility,
+            account_runtime: account.runtime,
+            account_routing: account.routing,
             services,
             product,
             approval_policy,
@@ -128,8 +135,20 @@ impl CliRuntimeContext {
         &self.agent_runtime
     }
 
+    pub(crate) fn agent_event_source(&self) -> AgentEventSource {
+        self._agent_event_queue_owner.runtime_source()
+    }
+
     pub(crate) fn compatibility(&self) -> &CoreAgentRuntimeCompatibility {
         &self.compatibility
+    }
+
+    pub(crate) fn account_runtime(&self) -> &Arc<AccountRuntime> {
+        &self.account_runtime
+    }
+
+    pub(crate) fn account_routing(&self) -> &Arc<CliAccountRoutingHost> {
+        &self.account_routing
     }
 
     pub(crate) fn local_workspace_snapshot(&self) -> &Arc<dyn LocalWorkspaceSnapshotPort> {

@@ -4,9 +4,11 @@ use std::process::Command;
 use std::sync::LazyLock;
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
+#[cfg(unix)]
+use std::time::Duration;
+use tokio::process::Child;
 use tokio::process::Command as TokioCommand;
 
-#[cfg(windows)]
 use log::warn;
 
 #[cfg(windows)]
@@ -119,6 +121,24 @@ pub fn create_tokio_command<S: AsRef<std::ffi::OsStr>>(program: S) -> TokioComma
     cmd
 }
 
+/// Create a Tokio Command that runs a command string through the
+/// platform shell, with CREATE_NO_WINDOW and macOS PATH applied.
+pub fn create_shell_command(command: &str) -> TokioCommand {
+    #[cfg(windows)]
+    {
+        let mut cmd = create_tokio_command("cmd");
+        cmd.arg("/C").arg(command);
+        cmd
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut cmd = create_tokio_command("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn apply_cached_macos_path(cmd: &mut TokioCommand) {
     if let Some(path) = cached_macos_path_env() {
@@ -176,4 +196,116 @@ pub fn contain_current_process_tree() -> std::io::Result<()> {
         return Err(std::io::Error::other("Windows process Job is unavailable"));
     }
     Ok(())
+}
+
+/// Configure a tokio command to run in its own process group (Unix only).
+///
+/// On Unix, this sets the process group so that the entire process tree can be
+/// terminated via process-group signaling. On non-Unix platforms this is a
+/// no-op.
+pub fn configure_process_group(command: &mut TokioCommand) {
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+    }
+}
+
+/// Terminate a child process and its entire process tree.
+///
+/// On Unix, sends SIGTERM to the process group, waits briefly, then escalates
+/// to SIGKILL if needed. On Windows, uses `taskkill /PID /T /F`. Falls back to
+/// `child.start_kill()` if platform-specific signaling fails or is unavailable.
+///
+/// `label` is a caller-supplied identifier included in log messages for
+/// diagnostics (e.g. a connection ID or process name).
+pub async fn terminate_child_process_tree(label: &str, mut child: Child) {
+    let pid = child.id();
+
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        let process_group = format!("-{}", pid);
+        match create_tokio_command("kill")
+            .arg("-TERM")
+            .arg(&process_group)
+            .status()
+            .await
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                warn!(
+                    "Process group terminate exited unsuccessfully: label={} pid={} status={}",
+                    label, pid, status
+                );
+            }
+            Err(error) => {
+                warn!(
+                    "Failed to terminate process group: label={} pid={} error={}",
+                    label, pid, error
+                );
+            }
+        }
+
+        match tokio::time::timeout(Duration::from_millis(750), child.wait()).await {
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) => {
+                warn!(
+                    "Failed to wait for process after terminate: label={} pid={} error={}",
+                    label, pid, error
+                );
+            }
+            Err(_) => {}
+        }
+
+        if let Err(error) = create_tokio_command("kill")
+            .arg("-KILL")
+            .arg(&process_group)
+            .status()
+            .await
+        {
+            warn!(
+                "Failed to kill process group: label={} pid={} error={}",
+                label, pid, error
+            );
+        }
+        let _ = child.wait().await;
+        return;
+    }
+
+    #[cfg(windows)]
+    if let Some(pid) = pid {
+        match create_tokio_command("taskkill")
+            .arg("/PID")
+            .arg(pid.to_string())
+            .arg("/T")
+            .arg("/F")
+            .status()
+            .await
+        {
+            Ok(status) if status.success() => {
+                let _ = child.wait().await;
+                return;
+            }
+            Ok(status) => {
+                warn!(
+                    "Process tree kill exited unsuccessfully: label={} pid={} status={}",
+                    label, pid, status
+                );
+            }
+            Err(error) => {
+                warn!(
+                    "Failed to kill process tree: label={} pid={} error={}",
+                    label, pid, error
+                );
+            }
+        }
+    }
+
+    if let Err(error) = child.start_kill() {
+        warn!("Failed to kill process: label={} error={}", label, error);
+    }
+    let _ = child.wait().await;
 }

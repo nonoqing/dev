@@ -1,4 +1,4 @@
-mod external_editor;
+pub(crate) mod external_editor;
 mod prompt_stash;
 /// Chat mode implementation
 ///
@@ -20,12 +20,16 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::error::TryRecvError;
 
-use bitfun_agent_runtime::sdk::{
-    AgentLocalCommandTurnRecordRequest, AgentSessionComposerUpdate, AgentSessionLineageEntry,
-    AgentSessionLineageInspection, AgentSessionLineageSnapshot, AgentSessionUsageRequest,
-    AgentTurnCancellationResult, SessionTranscript, SessionUsageReport,
-};
+use bitfun_app_server_protocol::model::{AddModelRequest, UpdateModelRequest};
+use bitfun_app_server_protocol::skill::SkillSummary;
+use bitfun_app_server_protocol::subagent::SubagentSummary;
 use bitfun_events::{AgenticEvent, ToolEventData, ToolEventIdentity};
+use bitfun_runtime_ports::{
+    AgentSessionComposerUpdate, AgentSessionLineageEntry,
+    AgentSessionLineageInspection, AgentSessionLineageSnapshot, AgentSessionUsageRequest,
+    AgentTurnCancellationResult, AgentWorkspaceReferenceSearchResult, SessionTranscript,
+    WorkspaceDiffSnapshot,
+};
 use resize::ResizeRedrawState;
 
 use crate::actions::{
@@ -34,8 +38,7 @@ use crate::actions::{
     ActionState, ResolvedKeymap, IMAGE_ATTACHMENTS_REQUIRE_MESSAGE, SHARED_TUI_EMBEDDED_HANDOFF,
     SHARED_TUI_HELP_NOTE,
 };
-use crate::agent::context_reload_client::CliContextReloadClient;
-use crate::agent::runtime_client::{CliAgentRuntimeClient, SessionOperationError};
+use crate::agent::tui_client::{SessionOperationError, TuiAgentClient, TuiAgentMode};
 use crate::chat_state::{ChatState, ModelTokenUsageSnapshot};
 use crate::config::CliConfig;
 use crate::ui::agent_selector::{AgentItem, AgentSelectorAction};
@@ -64,53 +67,37 @@ use crate::ui::theme::{
 };
 use crate::ui::theme_selector::ThemeItem;
 use crate::ui::{init_terminal, restore_terminal, TerminalGuard};
-use bitfun_core::agentic::agents::{
-    get_agent_registry, AgentInfo, SubAgentSource, SubagentListScope, SubagentQueryContext,
+use bitfun_app_server_protocol::external_source::ExternalSourceReviewAction;
+use bitfun_app_server_protocol::hook::{
+    NativeHookOverview, NativeHookRuleSummary as NativeHookRuleView,
 };
-use bitfun_core::agentic::tools::implementations::skills::{
-    mode_overrides::{
-        load_project_mode_skills_document_local, save_project_mode_skills_document_local,
-        set_mode_skill_disabled_in_document, set_user_mode_skill_state,
-    },
-    registry::SkillRegistry,
-    ModeSkillInfo, SkillInfo,
-};
-use bitfun_core::external_hooks::{
+use bitfun_core::service::session_usage::render_usage_report_markdown;
+use bitfun_product_domains::external_hook_catalog::{
     ExternalHookCatalogSnapshotV1, ExternalHookMatcherSummary, ExternalHookNativeActivation,
     ExternalHookProjectionStatus,
 };
-use bitfun_core::external_sources::{
-    apply_external_source_control_action, choose_external_subagent_conflict,
-    expand_external_prompt_command, external_source_conflict_choices, external_source_snapshot,
-    get_external_source_control_snapshot, native_prompt_command_conflict_key,
-    sanitize_external_source_operation_error, set_external_prompt_command_conflict_choice,
-    set_external_subagent_activation, set_external_subagent_model_binding,
-    set_external_tool_conflict_choice, set_external_tool_target_decision,
-    set_native_prompt_command_conflict_choice, subscribe_external_source_updates,
-    ExternalSourceAssetKind, ExternalSourceCatalogSnapshot, ExternalSourceControlActionV1,
-    ExternalSourceControlRequestV1, ExternalSourceDiagnosticSeverity,
-    ExternalSourceHostCapabilities, ExternalSourceOperationError, ExternalSourceOperationErrorCode,
-    ExternalSubagentActivationState, ExternalSubagentCompatibilityState,
-    ExternalSubagentModelBindingMethod, ExternalSubagentModelBindingTarget,
-    ExternalSubagentModelProfileRequest, ExternalSubagentModelRequest, ExternalToolActivationState,
-    ExternalToolCapability, ExternalToolCatalogEntry, ExternalToolRuntimeKind,
-    NativePromptCommandDescriptor, PromptCommandAvailability, PromptCommandExecutionTarget,
-    PromptCommandInvocationOutcome, PromptCommandShellReviewDecision, PromptCommandShellReviewMode,
-    PromptCommandShellReviewPlan, EXTERNAL_SOURCE_CONTROL_SCHEMA_V1,
-};
-use bitfun_core::native_hooks::{
-    overview as native_hook_overview, NativeHookOverview, NativeHookRuleView,
-};
-use bitfun_core::product_runtime::CoreAgentRuntimeCompatibility;
-use bitfun_core::service::config::GlobalConfigManager;
-use bitfun_core::service::session_usage::render_usage_report_markdown;
 use bitfun_product_domains::external_hook_import::{
     ExternalHookImportApplyOutcomeV1, ExternalHookImportApplyRequestV1,
-    ExternalHookImportMutationV1, ExternalHookImportPlanV1, ExternalHookImportSnapshotV1,
-    EXTERNAL_HOOK_IMPORT_SCHEMA_V1,
+    ExternalHookImportMutationRequestV1, ExternalHookImportMutationV1, ExternalHookImportPlanV1,
+    ExternalHookImportSnapshotV1, EXTERNAL_HOOK_IMPORT_SCHEMA_V1,
+};
+use bitfun_product_domains::external_source_control::{
+    ExternalSourceControlActionV1, ExternalSourceControlRequestV1,
+    EXTERNAL_SOURCE_CONTROL_SCHEMA_V1,
 };
 use bitfun_product_domains::external_sources::{
-    ExternalSourceHealth, ExternalSourceScope, SourceKey,
+    native_prompt_command_conflict_key, ExternalSourceAssetKind, ExternalSourceDiagnosticSeverity,
+    ExternalSourceHealth, ExternalSourceOperationError, ExternalSourceOperationErrorCode,
+    ExternalSourcePublicSnapshot as ExternalSourceCatalogSnapshot, ExternalSourceScope,
+    ExternalToolActivationState, ExternalToolCapability, ExternalToolCatalogEntry,
+    ExternalToolRuntimeKind, NativePromptCommandDescriptor, PromptCommandAvailability,
+    PromptCommandExecutionTarget, PromptCommandInvocationOutcome, PromptCommandShellReviewDecision,
+    PromptCommandShellReviewMode, PromptCommandShellReviewPlan, SourceKey,
+};
+use bitfun_product_domains::external_subagents::{
+    ExternalSubagentActivationState, ExternalSubagentCompatibilityState,
+    ExternalSubagentModelBindingMethod, ExternalSubagentModelBindingTarget,
+    ExternalSubagentModelProfileRequest, ExternalSubagentModelRequest,
 };
 
 /// Spinner/UI redraw interval while a turn is processing.
@@ -291,20 +278,20 @@ enum PendingMcpOp {
 enum PendingMcpTask {
     Toggle {
         server_id: String,
-        handle: tokio::task::JoinHandle<bitfun_core::util::errors::BitFunResult<()>>,
+        handle: tokio::task::JoinHandle<std::result::Result<(), String>>,
     },
     Add {
         name: String,
-        handle: tokio::task::JoinHandle<bitfun_core::util::errors::BitFunResult<()>>,
+        handle: tokio::task::JoinHandle<std::result::Result<(), String>>,
     },
     Delete {
         server_id: String,
-        handle: tokio::task::JoinHandle<bitfun_core::util::errors::BitFunResult<()>>,
+        handle: tokio::task::JoinHandle<std::result::Result<(), String>>,
     },
     External {
         item_id: String,
         item_name: String,
-        handle: tokio::task::JoinHandle<std::result::Result<ExternalSourceCatalogSnapshot, String>>,
+        handle: tokio::task::JoinHandle<std::result::Result<(), String>>,
     },
 }
 
@@ -356,15 +343,12 @@ struct PendingSessionOperation {
 struct PendingWorkspaceReferenceSearch {
     generation: u64,
     query: String,
-    handle: tokio::task::JoinHandle<
-        std::result::Result<bitfun_agent_runtime::sdk::AgentWorkspaceReferenceSearchResult, String>,
-    >,
+    handle:
+        tokio::task::JoinHandle<std::result::Result<AgentWorkspaceReferenceSearchResult, String>>,
 }
 
 struct PendingWorkspaceDiff {
-    handle: tokio::task::JoinHandle<
-        std::result::Result<bitfun_agent_runtime::sdk::WorkspaceDiffSnapshot, String>,
-    >,
+    handle: tokio::task::JoinHandle<std::result::Result<WorkspaceDiffSnapshot, String>>,
 }
 
 enum LineageInspectionTaskError {
@@ -455,12 +439,18 @@ enum PendingLocalEffect {
     },
 }
 
+impl crate::tui_backend::TuiEffect for PendingLocalEffect {
+    fn route(&self) -> crate::tui_backend::TuiEffectRoute {
+        crate::tui_backend::TuiEffectRoute::Local
+    }
+}
+
 fn terminal_event_allowed_while_local_effect_pending(event: &Event) -> bool {
     matches!(event, Event::Resize(_, _))
 }
 
 const SESSION_OPERATION_SLOW_NOTICE: Duration = Duration::from_secs(15);
-const SHARED_TUI_CHAT_STATUS: &str = "Shared TUI preview: this view controls sessions, including deleting an idle Session, turns, the current Session name, current Session Agent mode, current Session model, and declarative context via /reload [skills|instructions]; model management remains Embedded, along with local extension, MCP, account-sync, and Agent/Subagent management.";
+const SHARED_TUI_CHAT_STATUS: &str = "Shared TUI preview: this view controls sessions, including deleting an idle Session, turns, the current Session name, current Session Agent mode, and declarative context via /reload [skills|instructions]. Model, Skill, Subagent, and MCP management use this CLI process's local compatibility owner; MCP process state and tool registration are local to this CLI process and do not reconfigure an already-running Shared Runtime Host. Local extension, account-sync, usage, and other management remain Embedded.";
 
 #[derive(Default)]
 struct NonKeyEventOutcome {
@@ -508,9 +498,7 @@ pub(crate) struct ChatMode {
     agent_type: String,
     workspace: Option<String>,
     local_cwd: std::path::PathBuf,
-    agent: Arc<CliAgentRuntimeClient>,
-    context_reload: CliContextReloadClient,
-    compatibility: Option<CoreAgentRuntimeCompatibility>,
+    agent: Arc<TuiAgentClient>,
     /// User-level default resolved from shared config for this TUI run.
     auto_approve_ask_default: bool,
     /// Temporary override for the current session only.
@@ -519,6 +507,8 @@ pub(crate) struct ChatMode {
     restore_session_id: Option<String>,
     /// If set, send this prompt automatically when the session starts
     initial_prompt: Option<crate::ui::composer::ComposerDraft>,
+    /// If set, override the session model after create/restore
+    model_id: Option<String>,
     /// Pending MCP operation — set in key handler, executed after one render frame
     pending_mcp_op: Option<PendingMcpOp>,
     /// Running MCP tasks (non-blocking, polled in main loop)
@@ -566,20 +556,19 @@ pub(crate) struct ChatMode {
     external_tool_notice_key: Option<String>,
     external_tool_review_snapshot: Option<ExternalSourceCatalogSnapshot>,
     external_tool_mutation_rx: Option<Receiver<ExternalToolMutationResult>>,
+    external_control_snapshot:
+        Option<bitfun_product_domains::external_source_control::ExternalSourceControlSnapshotV1>,
     external_control_mutation_rx: Option<Receiver<ExternalControlMutationResult>>,
     external_agent_notice_key: Option<String>,
     external_agent_review_snapshot: Option<ExternalSourceCatalogSnapshot>,
     external_agent_mutation_rx: Option<Receiver<ExternalAgentMutationResult>>,
-    hook_management_rx: Option<
-        Receiver<
-            std::result::Result<
-                HookManagementResult,
-                bitfun_core::external_sources::ExternalSourceOperationError,
-            >,
-        >,
-    >,
+    hook_management_rx:
+        Option<Receiver<std::result::Result<HookManagementResult, ExternalSourceOperationError>>>,
     hook_management_snapshot: Option<HookManagementSnapshot>,
     pending_hook_plan: Option<ExternalHookImportPlanV1>,
+    /// Cached prompt-stash non-empty flag for palette visibility checks.
+    /// Refreshed when the command palette opens and after stash mutations.
+    stash_non_empty: bool,
 }
 
 /// Map agent_type to a display name for status messages
@@ -595,9 +584,7 @@ impl ChatMode {
         config: CliConfig,
         agent_type: String,
         workspace: Option<String>,
-        agent: Arc<CliAgentRuntimeClient>,
-        context_reload: CliContextReloadClient,
-        compatibility: Option<CoreAgentRuntimeCompatibility>,
+        agent: Arc<TuiAgentClient>,
     ) -> Self {
         let keymap = ResolvedKeymap::new(&config.shortcuts);
         Self {
@@ -607,12 +594,11 @@ impl ChatMode {
             workspace,
             local_cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             agent,
-            context_reload,
-            compatibility,
             auto_approve_ask_default: false,
             auto_approve_ask_override: None,
             restore_session_id: None,
             initial_prompt: None,
+            model_id: None,
             pending_mcp_op: None,
             pending_mcp_tasks: Vec::new(),
             pending_session_operation: None,
@@ -640,6 +626,7 @@ impl ChatMode {
             external_tool_notice_key: None,
             external_tool_review_snapshot: None,
             external_tool_mutation_rx: None,
+            external_control_snapshot: None,
             external_control_mutation_rx: None,
             external_agent_notice_key: None,
             external_agent_review_snapshot: None,
@@ -647,6 +634,7 @@ impl ChatMode {
             hook_management_rx: None,
             hook_management_snapshot: None,
             pending_hook_plan: None,
+            stash_non_empty: false,
         }
     }
 
@@ -665,10 +653,18 @@ impl ChatMode {
         self
     }
 
-    fn action_state(&self, is_processing: bool, popup_open: bool) -> ActionState {
+    /// Set a model ID to override the session model after create/restore
+    pub(crate) fn with_model(mut self, model_id: String) -> Self {
+        self.model_id = Some(model_id);
+        self
+    }
+
+    fn action_state(&self, is_processing: bool, popup_open: bool, has_input: bool) -> ActionState {
         ActionState::chat(is_processing, popup_open)
             .with_shared_tui(self.agent.is_shared())
             .with_lineage_inspection(self.lineage_inspection.is_some())
+            .with_has_input(has_input)
+            .with_stash_non_empty(self.stash_non_empty)
     }
 }
 

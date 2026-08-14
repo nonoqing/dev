@@ -22,6 +22,7 @@ import React, {
 import type { i18n as I18nApi } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { Search, Badge } from '@/component-library';
+import { getInteractionMotion } from '@/shared/utils/motionPreference';
 import { useSettingsStore } from './settingsStore';
 import { SETTINGS_CATEGORIES } from './settingsConfig';
 import type { ConfigTab } from './settingsConfig';
@@ -143,6 +144,7 @@ function useSettingsNav() {
   const setActiveTab = useSettingsStore((s) => s.setActiveTab);
   const searchQuery = useSettingsStore((s) => s.searchQuery);
   const setSearchQuery = useSettingsStore((s) => s.setSearchQuery);
+  const unseenTabs = useSettingsStore((s) => s.unseenTabs);
 
   const [draftQuery, setDraftQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -182,7 +184,7 @@ function useSettingsNav() {
   }, [setSearchQuery]);
 
   const activateTab = useCallback(
-    (tab: ConfigTab) => {
+    (tab: ConfigTab, motion = getInteractionMotion()) => {
       const requestId = ++activationRequestRef.current;
       const commit = () => {
         if (activationRequestRef.current !== requestId) return;
@@ -190,7 +192,7 @@ function useSettingsNav() {
         // first mount; inside a transition React keeps the painted panel until
         // the new one is ready instead of committing the skeleton fallback.
         startTransition(() => {
-          setActiveTab(tab);
+          setActiveTab(tab, motion);
           clearSearch();
         });
       };
@@ -201,11 +203,12 @@ function useSettingsNav() {
 
   const handleTabClick = useCallback(
     (tab: ConfigTab) => {
+      const motion = getInteractionMotion();
       const requestId = ++activationRequestRef.current;
       const commit = () => {
         if (activationRequestRef.current !== requestId) return;
         startTransition(() => {
-          setActiveTab(tab);
+          setActiveTab(tab, motion);
         });
       };
       void preloadSettingsTabContent(tab).then(commit, commit);
@@ -232,7 +235,7 @@ function useSettingsNav() {
       }
       if (e.key === 'Enter' && results.length === 1) {
         e.preventDefault();
-        activateTab(results[0].tabId);
+        activateTab(results[0].tabId, 'instant');
       }
     },
     [clearSearch, results, activateTab, resultsRef]
@@ -265,7 +268,7 @@ function useSettingsNav() {
       }
       if (e.key === 'Enter' && highlightedIndex >= 0 && highlightedIndex < results.length) {
         e.preventDefault();
-        activateTab(results[highlightedIndex].tabId);
+        activateTab(results[highlightedIndex].tabId, 'instant');
       }
     },
     [isSearchMode, results, highlightedIndex, activateTab, clearSearch]
@@ -276,6 +279,7 @@ function useSettingsNav() {
   return {
     t,
     activeTab,
+    unseenTabs,
     handleTabClick,
     preloadTab,
     draftQuery,
@@ -298,6 +302,7 @@ const SettingsNav: React.FC = () => {
   const {
     t,
     activeTab,
+    unseenTabs,
     handleTabClick,
     preloadTab,
     draftQuery,
@@ -436,6 +441,17 @@ const SettingsNav: React.FC = () => {
                     <span className="bitfun-settings-nav__item-label">
                       {t(tabDef.labelKey, { defaultValue: tabDef.id })}
                     </span>
+                    {unseenTabs.includes(tabDef.id) ? (
+                      <span
+                        data-bf-component="settings-nav"
+                        data-bf-part="itemUnseen"
+                        className="bitfun-settings-nav__item-unseen"
+                        // The label carries the meaning; the dot alone would be
+                        // invisible to assistive technology and colour-only.
+                        aria-label={t('configCenter.unseenItems')}
+                        role="status"
+                      />
+                    ) : null}
                     {tabDef.beta ? (
                       <Badge variant="warning" className="bitfun-settings-nav__item-beta">
                         {t('configCenter.beta')}

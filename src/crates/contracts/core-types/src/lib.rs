@@ -14,13 +14,21 @@ pub mod tool_image_attachment;
 pub mod worktree;
 
 pub use ai::{
-    AIConfig, ConnectionTestMessageCode, ConnectionTestResult, Message, ProxyConfig, ReasoningMode,
-    RemoteModelInfo, ToolCall, ToolCallConfirmationDetails, ToolCallRequestInfo,
-    ToolCallResponseInfo, ToolDefinition,
+    AIConfig, ConnectionTestMessageCode, ConnectionTestResult, Message, ModelsDevCatalogSource,
+    ModelsDevCatalogStatus, ModelsDevReasoningCatalog, ModelsDevReasoningModel,
+    ModelsDevReasoningProvider, ModelsDevRefreshResult, ModelsDevRefreshStatus, ProviderCatalog,
+    ProviderCatalogEndpoint, ProviderCatalogModel, ProviderCatalogModelCapabilities,
+    ProviderCatalogModelLimits, ProviderCatalogModelPricing, ProviderCatalogModelSource,
+    ProviderCatalogProvider, ProviderCatalogSource, ProviderCatalogUpstreamProvider, ProxyConfig,
+    ReasoningCapabilityStatus, ReasoningCatalogBinding, ReasoningCatalogProjection,
+    ReasoningCatalogProjectionRequest, ReasoningConfig, ReasoningPreset, ReasoningPresetAction,
+    ReasoningPresetDescriptor, ReasoningPresetSource, RemoteModelInfo, ToolCall,
+    ToolCallConfirmationDetails, ToolCallRequestInfo, ToolCallResponseInfo, ToolDefinition,
 };
 pub use errors::{AiErrorDetail, ErrorCategory};
 pub use session::{
-    validate_session_id, SessionContinuationPolicy, SessionKind, SessionModelBindingPolicy,
+    validate_session_id, SessionAgentRouteOwner, SessionContinuationPolicy, SessionKind,
+    SessionModelBindingPolicy,
 };
 pub use session_usage::*;
 pub use speech::*;
@@ -31,6 +39,6 @@ pub use surface::{
 pub use tool_image_attachment::ToolImageAttachment;
 pub use worktree::{
     SessionExecutionTarget, SessionExecutionTargetKind, SessionExecutionTargetRequest,
-    WorktreeError, WorktreeErrorCode, WorktreeLifecycle,
-    WorktreeSessionSummary, WorktreeSettings, WorktreeSummary,
+    WorktreeError, WorktreeErrorCode, WorktreeLifecycle, WorktreeSessionSummary, WorktreeSettings,
+    WorktreeSummary,
 };

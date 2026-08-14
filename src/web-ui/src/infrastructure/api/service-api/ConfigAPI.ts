@@ -8,12 +8,21 @@ import type {
   GlobalSkillSettings,
   ModeSkillInfo,
   RuntimeLoggingInfo,
+  ConfigValidationResult,
+  TelemetryLevel,
+  TelemetryState,
   SkillInfo,
   SkillLevel,
   SkillMarketDownloadResult,
   SkillMarketItem,
   SkillValidationResult,
 } from '../../config/types';
+import type {
+  SaveCloudSpeechConfigRequest,
+  SaveCloudSpeechConfigResult,
+} from '@/generated/api';
+
+export type { SaveCloudSpeechConfigRequest, SaveCloudSpeechConfigResult } from '@/generated/api';
 
 export interface GetSkillConfigsParams {
   forceRefresh?: boolean;
@@ -68,6 +77,29 @@ export interface DownloadSkillMarketParams {
 
 
 export class ConfigAPI {
+  async getTelemetryState(): Promise<TelemetryState> {
+    try {
+      return await api.invoke<TelemetryState>('telemetry_state', {
+        request: {},
+      });
+    } catch (error) {
+      throw createTauriCommandError('telemetry_state', error);
+    }
+  }
+
+  async setTelemetryLevel(
+    level: TelemetryLevel,
+    sensitiveContentConsent = false,
+  ): Promise<TelemetryState> {
+    try {
+      return await api.invoke<TelemetryState>('set_telemetry_level', {
+        request: { level, sensitiveContentConsent },
+      });
+    } catch (error) {
+      throw createTauriCommandError('set_telemetry_level', error, { level });
+    }
+  }
+
    
   async getConfig(path?: string, options?: { skipRetryOnNotFound?: boolean }): Promise<any> {
     try {
@@ -133,6 +165,27 @@ export class ConfigAPI {
       });
     } catch (error) {
       throw createTauriCommandError('set_config', error, { path, value });
+    }
+  }
+
+  async saveCloudSpeechConfig(
+    request: SaveCloudSpeechConfigRequest
+  ): Promise<SaveCloudSpeechConfigResult> {
+    try {
+      return await api.invoke('save_cloud_speech_config', { request });
+    } catch (error) {
+      throw createTauriCommandError('save_cloud_speech_config', error, {
+        ...request,
+        apiKey: request.apiKey ? '[redacted]' : '',
+      });
+    }
+  }
+
+  async validateConfig(): Promise<ConfigValidationResult> {
+    try {
+      return await api.invoke('validate_config');
+    } catch (error) {
+      throw createTauriCommandError('validate_config', error);
     }
   }
 

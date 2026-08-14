@@ -9,6 +9,7 @@ export const crateLayoutRules = [
 
   { crateName: 'agent-runtime', layer: 'execution', path: 'src/crates/execution/agent-runtime' },
   { crateName: 'agent-stream', layer: 'execution', path: 'src/crates/execution/agent-stream' },
+  { crateName: 'observability', layer: 'execution', path: 'src/crates/execution/observability' },
   { crateName: 'tool-call-jsonrepair', layer: 'execution', path: 'src/crates/execution/tool-call-jsonrepair' },
   { crateName: 'agent-tools', layer: 'execution', path: 'src/crates/execution/tool-contracts' },
   { crateName: 'harness', layer: 'execution', path: 'src/crates/execution/harness' },
@@ -25,11 +26,15 @@ export const crateLayoutRules = [
   { crateName: 'services-integrations', layer: 'services', path: 'src/crates/services/services-integrations' },
   { crateName: 'miniapp-market-service', layer: 'services', path: 'src/crates/services/miniapp-market-service' },
   { crateName: 'skin-market-service', layer: 'services', path: 'src/crates/services/skin-market-service' },
+  { crateName: 'observability-otel', layer: 'services', path: 'src/crates/services/observability-otel' },
   { crateName: 'relay-service', layer: 'services', path: 'src/crates/services/relay-service' },
   { crateName: 'page-function-runtime', layer: 'services', path: 'src/crates/services/page-function-runtime' },
   { crateName: 'terminal', layer: 'services', path: 'src/crates/services/terminal' },
 
   { crateName: 'acp', layer: 'interfaces', path: 'src/crates/interfaces/acp' },
+  { crateName: 'app-server', layer: 'interfaces', path: 'src/crates/interfaces/app-server' },
+  { crateName: 'app-server-client', layer: 'interfaces', path: 'src/crates/interfaces/app-server-client' },
+  { crateName: 'app-server-protocol', layer: 'interfaces', path: 'src/crates/interfaces/app-server-protocol' },
   { crateName: 'sdk-host', layer: 'interfaces', path: 'src/crates/interfaces/sdk-host' },
   { crateName: 'agent-runtime-ipc', layer: 'adapters', path: 'src/crates/adapters/agent-runtime-ipc' },
   { crateName: 'ai-adapters', layer: 'adapters', path: 'src/crates/adapters/ai-adapters' },

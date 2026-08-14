@@ -16,11 +16,12 @@ const NOISE_MARKERS: &[&str] = &[
 
 pub fn normalize_requested_format(format: Option<&str>) -> Result<RequestedWebFetchFormat, String> {
     match format.unwrap_or("markdown") {
-        "raw" => Ok(RequestedWebFetchFormat::Raw),
-        "markdown" | "text" => Ok(RequestedWebFetchFormat::Markdown),
+        "raw" | "html" => Ok(RequestedWebFetchFormat::Raw),
+        "markdown" => Ok(RequestedWebFetchFormat::Markdown),
+        "text" => Ok(RequestedWebFetchFormat::Text),
         "json" => Ok(RequestedWebFetchFormat::Json),
         other => Err(format!(
-            "Unsupported format '{}'. Expected raw, markdown, or json.",
+            "Unsupported format '{}'. Expected raw, html, text, markdown, or json.",
             other
         )),
     }
@@ -30,6 +31,7 @@ pub fn normalize_requested_format(format: Option<&str>) -> Result<RequestedWebFe
 pub enum RequestedWebFetchFormat {
     Raw,
     Markdown,
+    Text,
     Json,
 }
 
@@ -75,7 +77,10 @@ pub fn extract_markdown_with_text_fallback(
     // article, documentation, wiki, and forum pages showed `legible` gives the
     // best current quality/latency balance, with readability-js as fallback.
     #[cfg(not(target_env = "ohos"))]
-    let extractors: &[ExtractorFn] = &[attempt_legible as ExtractorFn, attempt_readability_js as ExtractorFn];
+    let extractors: &[ExtractorFn] = &[
+        attempt_legible as ExtractorFn,
+        attempt_readability_js as ExtractorFn,
+    ];
     #[cfg(target_env = "ohos")]
     let extractors: &[ExtractorFn] = &[attempt_legible as ExtractorFn];
 
@@ -360,10 +365,10 @@ mod tests {
     };
 
     #[test]
-    fn webfetch_text_alias_normalizes_to_markdown() {
+    fn webfetch_text_selects_plain_text_output() {
         assert!(matches!(
             normalize_requested_format(Some("text")).expect("format alias should work"),
-            RequestedWebFetchFormat::Markdown
+            RequestedWebFetchFormat::Text
         ));
     }
 

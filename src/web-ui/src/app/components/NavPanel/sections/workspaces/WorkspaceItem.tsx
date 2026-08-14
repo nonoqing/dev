@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { Folder, FolderOpen, MoreHorizontal, FolderSearch, Plus, ChevronDown, Trash2, RotateCcw, Copy, FileText, Bot, Link2, ListChecks, Loader2, Clock3, ShieldCheck, Pencil, Server } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { DotMatrixArrowRightIcon } from './DotMatrixArrowRightIcon';
-import { Button, ConfirmDialog, InputDialog, Modal, Tooltip } from '@/component-library';
+import { Button, ConfirmDialog, InputDialog, Modal, PresenceBoundary, Tooltip } from '@/component-library';
 import { useI18n } from '@/infrastructure/i18n';
 import { getAppearanceOverlayHost } from '@/infrastructure/appearance/runtime/AppearanceOverlayHost';
 import { aiExperienceConfigService } from '@/infrastructure/config/services/AIExperienceConfigService';
@@ -87,6 +87,7 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
     setActiveWorkspace,
     closeWorkspaceById,
     deleteAssistantWorkspace,
+    primaryAssistantWorkspaceId,
     resetAssistantWorkspace,
     renameWorkspace,
   } = useWorkspaceContext();
@@ -124,12 +125,13 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
   const menuPopoverRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
-  const isNamedAssistantWorkspace =
-    workspace.workspaceKind === WorkspaceKind.Assistant &&
-    Boolean(workspace.assistantId);
   const isDefaultAssistantWorkspace =
     workspace.workspaceKind === WorkspaceKind.Assistant &&
-    !workspace.assistantId;
+    (workspace.id === primaryAssistantWorkspaceId ||
+      (!primaryAssistantWorkspaceId && !workspace.assistantId));
+  const isDeletableAssistantWorkspace =
+    workspace.workspaceKind === WorkspaceKind.Assistant &&
+    !isDefaultAssistantWorkspace;
   const workspaceDisplayName =
     workspace.workspaceKind === WorkspaceKind.Assistant
       ? workspace.identity?.name?.trim() || workspace.name
@@ -553,7 +555,7 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
   }, []);
 
   const handleConfirmDeleteAssistant = useCallback(async () => {
-    if (!isNamedAssistantWorkspace || isDeletingAssistant) {
+    if (!isDeletableAssistantWorkspace || isDeletingAssistant) {
       return;
     }
 
@@ -569,7 +571,7 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
     } finally {
       setIsDeletingAssistant(false);
     }
-  }, [deleteAssistantWorkspace, isDeletingAssistant, isNamedAssistantWorkspace, t, workspace.id]);
+  }, [deleteAssistantWorkspace, isDeletableAssistantWorkspace, isDeletingAssistant, t, workspace.id]);
 
   const handleConfirmResetWorkspace = useCallback(async () => {
     if (!isDefaultAssistantWorkspace || isResettingWorkspace) {
@@ -937,7 +939,7 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
                   <FolderSearch size={13} />
                   <span className="bitfun-nav-panel__workspace-item-menu-label">{t('nav.workspaces.actions.reveal')}</span>
                 </button>
-                {(isDefaultAssistantWorkspace || isNamedAssistantWorkspace) ? (
+                {(isDefaultAssistantWorkspace || isDeletableAssistantWorkspace) ? (
                   <>
                     <div className="bitfun-nav-panel__workspace-item-menu-divider" data-bf-component="workspace-item" data-bf-part="menuDivider" />
                     {isDefaultAssistantWorkspace ? (
@@ -954,7 +956,7 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
                         <span className="bitfun-nav-panel__workspace-item-menu-label">{t('nav.workspaces.actions.resetWorkspace')}</span>
                       </button>
                     ) : null}
-                    {isNamedAssistantWorkspace ? (
+                    {isDeletableAssistantWorkspace ? (
                       <button
                         type="button"
                         data-bf-component="workspace-item"
@@ -1015,7 +1017,7 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
           confirmDanger
           preview={`${t('nav.workspaces.resetWorkspaceDialog.pathLabel')}\n${workspace.rootPath}`}
         />
-        {scheduledJobsModalOpen && (
+        <PresenceBoundary active={scheduledJobsModalOpen}>
           <Suspense fallback={null}>
             <ScheduledJobsModal
               isOpen={scheduledJobsModalOpen}
@@ -1031,8 +1033,8 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
               targetDescription={workspace.rootPath}
             />
           </Suspense>
-        )}
-        {projectPermissionsDialogOpen && (
+        </PresenceBoundary>
+        <PresenceBoundary active={projectPermissionsDialogOpen}>
           <Suspense fallback={null}>
             <WorkspaceProjectPermissionsDialog
               workspace={workspace}
@@ -1040,7 +1042,7 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
               onClose={() => setProjectPermissionsDialogOpen(false)}
             />
           </Suspense>
-        )}
+        </PresenceBoundary>
       </div>
     );
   }
@@ -1525,7 +1527,7 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
         validator={validateWorkspaceName}
         required={false}
       />
-      {relatedPathsDialogOpen && (
+      <PresenceBoundary active={relatedPathsDialogOpen}>
         <Suspense fallback={null}>
           <WorkspaceRelatedPathsDialog
             workspace={workspace}
@@ -1533,8 +1535,8 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
             onClose={() => setRelatedPathsDialogOpen(false)}
           />
         </Suspense>
-      )}
-      {projectPermissionsDialogOpen && (
+      </PresenceBoundary>
+      <PresenceBoundary active={projectPermissionsDialogOpen}>
         <Suspense fallback={null}>
           <WorkspaceProjectPermissionsDialog
             workspace={workspace}
@@ -1542,8 +1544,8 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
             onClose={() => setProjectPermissionsDialogOpen(false)}
           />
         </Suspense>
-      )}
-      {sessionBatchModalOpen && (
+      </PresenceBoundary>
+      <PresenceBoundary active={sessionBatchModalOpen}>
         <Suspense fallback={null}>
           <WorkspaceSessionBatchModal
             isOpen={sessionBatchModalOpen}
@@ -1554,8 +1556,8 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
             remoteSshHost={isRemoteWorkspace(workspace) ? workspace.sshHost : null}
           />
         </Suspense>
-      )}
-      {scheduledJobsModalOpen && (
+      </PresenceBoundary>
+      <PresenceBoundary active={scheduledJobsModalOpen}>
         <Suspense fallback={null}>
           <ScheduledJobsModal
             isOpen={scheduledJobsModalOpen}
@@ -1571,7 +1573,7 @@ const WorkspaceItem: React.FC<WorkspaceItemProps> = ({
             targetDescription={workspace.rootPath}
           />
         </Suspense>
-      )}
+      </PresenceBoundary>
     </div>
   );
 };

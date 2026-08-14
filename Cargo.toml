@@ -8,6 +8,9 @@ members = [
     "src/apps/miniapp-market-server",
     "src/apps/skin-market-server",
     "src/crates/interfaces/acp",
+    "src/crates/interfaces/app-server",
+    "src/crates/interfaces/app-server-client",
+    "src/crates/interfaces/app-server-protocol",
     "src/crates/interfaces/sdk-host",
     "src/crates/adapters/agent-runtime-ipc",
     "src/crates/assembly/agent-content",
@@ -24,12 +27,14 @@ members = [
     "src/crates/services/services-integrations",
     "src/crates/services/miniapp-market-service",
     "src/crates/services/skin-market-service",
+    "src/crates/services/observability-otel",
     "src/crates/services/relay-service",
     "src/crates/services/page-function-runtime",
     "src/crates/services/terminal",
     "src/crates/assembly/product-capabilities",
     "src/crates/contracts/product-domains",
     "src/crates/execution/agent-runtime",
+    "src/crates/execution/observability",
     "src/crates/execution/agent-stream",
     "src/crates/execution/tool-call-jsonrepair",
     "src/crates/execution/tool-contracts",
@@ -51,7 +56,7 @@ resolver = "2"
 
 # Shared package metadata — single source of truth for version
 [workspace.package]
-version = "0.2.15" # x-release-please-version
+version = "0.2.17" # x-release-please-version
 authors = ["BitFun Team"]
 edition = "2021"
 
@@ -76,10 +81,10 @@ undocumented_unsafe_blocks = "warn"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.52", default-features = false }
-tokio-stream = "0.1.18"
+tokio-stream = { version = "0.1.18", default-features = false }
 tokio-util = "0.7.18"
 async-trait = "0.1.89"
-futures = "0.3.31"
+futures = { version = "0.3.31", default-features = false, features = ["std"] }
 futures-util = "0.3.31"
 
 # Serialization
@@ -87,18 +92,30 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 
+# Document conversion
+anydoc = "=0.1.6"
+
+# TypeScript binding generation (schema-first; gated by per-crate `ts` features)
+ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
+
 # Error handling
 anyhow = "1.0"
 thiserror = "2"
 
 # Logging
 log = "0.4"
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+opentelemetry = { version = "0.32.0", default-features = false }
+opentelemetry_sdk = { version = "0.32.1", default-features = false }
+opentelemetry-otlp = { version = "0.32.0", default-features = false }
+opentelemetry-http = { version = "0.32.0", default-features = false }
+opentelemetry-proto = { version = "0.32.0", default-features = false }
+prost = "0.14"
 
 # Utilities
 uuid = { version = "1.0", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde", "clock"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
 chrono-tz = "0.10.4"
 cron = "0.15.0"
 # Tauri 2.9.2 utilities conflict with time 0.3.48 on current stable Rust.
@@ -124,7 +141,7 @@ encoding_rs = "0.8.35"
 url = "2"
 
 # HTTP client
-reqwest = { version = "0.13.4", default-features = false, features = ["http2", "json", "stream", "multipart", "query", "form"] }
+reqwest = { version = "0.13.4", default-features = false }
 semver = "1.0"
 
 # Debug Log HTTP Server
@@ -159,12 +176,11 @@ git2 = { version = "0.21", default-features = false, features = ["https", "vendo
 portable-pty = "0.8"
 vte = "0.15.0"
 clap = { version = "4.6.1", features = ["derive"] }
-crossterm = "0.28"
+crossterm = {version = "0.28", features = ["use-dev-tty"] }
 ratatui = "0.29"
 unicode-width = "0.2"
-pulldown-cmark = "0.11"
-syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
-syntect-tui = "3.0"
+pulldown-cmark = { version = "0.11", default-features = false }
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
 once_cell = "1"
 libc = "0.2"
 arboard = "3"
@@ -186,7 +202,7 @@ similar = "2.5"
 urlencoding = "2.1"
 oxc = { version = "0.138.0", default-features = false, features = ["ast_visit", "codegen", "semantic", "transformer"] }
 oxc-parse = { package = "oxc", version = "0.138.0", default-features = false }
-rquickjs = { version = "0.9", default-features = false, features = ["classes", "properties", "macro"] }
+sqlx = { version = "0.8", default-features = false }
 
 # Tauri (desktop only)
 tauri = { version = "2.11", features = ["unstable", "macos-private-api", "tray-icon"] }
@@ -197,7 +213,6 @@ tauri-plugin-log = "2.8"
 tauri-plugin-autostart = "2.5"
 tauri-plugin-notification = "2.3"
 tauri-plugin-updater = "2.10"
-tauri-plugin-global-shortcut = "2.3"
 tauri-plugin-single-instance = "2.4"
 tauri-plugin-window-state = "2.4"
 tauri-build = { version = "2.6", features = [] }
@@ -215,10 +230,10 @@ foreign-types = "0.5"
 dispatch = "0.2"
 block2 = "0.6"
 objc2 = "0.6"
-objc2-foundation = "0.3"
-objc2-app-kit = "0.3"
-objc2-vision = { version = "0.3.2", features = ["VNRecognizeTextRequest", "VNRequest", "VNObservation", "VNRequestHandler", "VNUtils", "VNTypes", "objc2-core-foundation"] }
-objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "WKPDFConfiguration", "block2", "objc2-app-kit"] }
+objc2-foundation = { version = "0.3", default-features = false }
+objc2-app-kit = { version = "0.3", default-features = false }
+objc2-vision = { version = "0.3.2", default-features = false }
+objc2-web-kit = { version = "0.3", default-features = false }
 tempfile = "3"
 webview2-com = "0.38"
 windows = "0.61"
@@ -248,7 +263,7 @@ local-ip-address = "0.6"
 hostname = "0.4"
 
 # QR code generation
-qrcode = "0.14"
+qrcode = { version = "0.14", default-features = false }
 
 # WebSocket client
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }

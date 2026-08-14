@@ -13,12 +13,13 @@ use crate::agentic::agents::{
     UserContextPolicy, UserContextSection,
 };
 use crate::agentic::context_profile::{ContextProfilePolicy, ModelCapabilityProfile};
+use crate::agentic::coordination::scheduler::agent_dialog_turn_image_contexts;
 use crate::agentic::core::{
     render_system_reminder, InternalReminderKind, Message, MessageContent, MessageHelper,
     MessageRole, MessageSemanticKind, RequestReasoningTokenPolicy, Session,
 };
 use crate::agentic::events::{AgenticEvent, EventPriority, EventQueue};
-#[cfg(feature = "product-full")]
+#[cfg(feature = "agent-runtime")]
 use crate::agentic::execution::conditional_instructions::{
     build_conditional_instruction_reminder, successful_workspace_read_paths,
 };
@@ -27,6 +28,7 @@ use crate::agentic::image_analysis::{
     build_multimodal_message_with_images, process_image_contexts_for_provider, ImageContextData,
     ImageLimits,
 };
+use crate::agentic::observability::{completion_from_error, finish_reason_class, turn_trigger};
 use crate::agentic::round_preempt::RoundInjectionKind;
 use crate::agentic::session::{
     ContextCompressor, SessionManager, TokenAnchor, TokenAnchorInput, UserContextCacheIdentity,
@@ -44,7 +46,8 @@ use crate::infrastructure::ai::get_global_ai_client_factory;
 use crate::native_hooks::{self, NativeHookSessionFacts};
 use crate::service::config::get_global_config_service;
 use crate::service::config::types::{
-    automatic_max_output_tokens, model_runtime_binding_fingerprint, ModelCapability, ModelCategory,
+    automatic_max_output_tokens, model_runtime_binding_fingerprint, AuthConfig, ModelCapability,
+    ModelCategory,
 };
 use crate::service::instruction_context::{
     build_local_workspace_instruction_files_context_with_fs_detailed,
@@ -58,8 +61,20 @@ use crate::util::types::ToolDefinition;
 use crate::util::{elapsed_ms_u64, truncate_at_char_boundary};
 use bitfun_agent_runtime::output_surface::TOOL_CONTEXT_INLINE_MARKDOWN_IMAGE_DISPLAY_KEY;
 use bitfun_agent_runtime::remote_file_delivery::TOOL_CONTEXT_REMOTE_FILE_DELIVERY_KEY;
+use bitfun_agent_runtime::thread_goal_tools::ensure_thread_goal_tools;
 use bitfun_ai_adapters::ModelExchangeTraceConfig;
 use bitfun_core_types::SessionModelBindingPolicy;
+use bitfun_observability::domains::{
+    attempt_bucket, index_bucket, start_compression, start_round,
+    start_turn_with_relation_and_content_facts, CompletionFacts, CompressionFinishFacts,
+    CompressionSource, CompressionStartFacts, CompressionTrigger, FinishReasonClass,
+    InferenceAuthClass, RoundFinishFacts, RoundObservation, RoundStartFacts, SafeErrorType,
+    TurnFinishFacts, TurnStartFacts,
+};
+use bitfun_observability::{
+    DebugContentField, DebugCorrelation, DebugTelemetryRecord, DebugTurnRecord, ObservationContext,
+    Telemetry,
+};
 use log::{debug, error, info, trace, warn};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -68,6 +83,30 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tool_runtime::context::PrimaryModelFacts;
+
+fn compression_trigger_class(trigger: &str) -> CompressionTrigger {
+    match trigger {
+        "auto" | "threshold" => CompressionTrigger::Threshold,
+        "context_overflow" | "context_overflow_recovery" => CompressionTrigger::ContextOverflow,
+        "manual" | "compact" => CompressionTrigger::Manual,
+        "recovery" => CompressionTrigger::Recovery,
+        _ => CompressionTrigger::Other,
+    }
+}
+
+fn compression_source_class(source: &str) -> CompressionSource {
+    match source {
+        "model" => CompressionSource::Model,
+        "local_fallback" => CompressionSource::LocalFallback,
+        _ => CompressionSource::None,
+    }
+}
+
+fn ensure_primary_session_goal_tools(allowed_tools: &mut Vec<String>, is_subagent: bool) {
+    if !is_subagent {
+        ensure_thread_goal_tools(allowed_tools);
+    }
+}
 
 /// Execution engine configuration
 #[derive(Debug, Clone)]
@@ -97,6 +136,15 @@ pub struct ContextCompactionOutcome {
     pub has_summary: bool,
     pub summary_source: String,
     pub applied: bool,
+    pub model_usage: Option<crate::util::types::ai::GeminiUsage>,
+}
+
+struct AutomaticCompressionOutcome {
+    tokens_after_estimate: usize,
+    messages: Vec<Message>,
+    source: CompressionSource,
+    has_summary: bool,
+    model_usage: Option<crate::util::types::ai::GeminiUsage>,
 }
 
 const MANUAL_COMPACTION_PLANNING: u8 = 0;
@@ -152,7 +200,7 @@ fn manual_compaction_terminal_error(error: BitFunError) -> BitFunError {
     }
 }
 
-#[cfg(feature = "product-full")]
+#[cfg(feature = "agent-runtime")]
 async fn activate_conditional_instructions_after_round(
     session_manager: &SessionManager,
     context: &ExecutionContext,
@@ -411,6 +459,12 @@ struct CompressionTriggerBudget {
     safety_reserve_tokens: usize,
 }
 
+struct ResolvedPrimaryModelContext {
+    facts: PrimaryModelFacts,
+    telemetry_model_class: bitfun_observability::domains::ModelClass,
+    telemetry_auth_class: Option<InferenceAuthClass>,
+}
+
 // Fields are declared in reverse parameter order so dropping an unconsumed
 // input preserves the previous function-parameter drop order. Call sites keep
 // struct literal fields in the original evaluation order.
@@ -432,10 +486,14 @@ struct FinalizeRoundInput<'a> {
     messages: &'a [Message],
     prepended_reminders: &'a [&'a str],
     primary_model_facts: &'a PrimaryModelFacts,
+    telemetry_model_class: bitfun_observability::domains::ModelClass,
+    telemetry_auth_class: Option<InferenceAuthClass>,
     execution_context_vars: &'a HashMap<String, String>,
     round_group_id: Option<String>,
     round_number: usize,
     agent_type: String,
+    observation_context: Option<ObservationContext>,
+    turn_started_at: std::time::Instant,
     context: &'a ExecutionContext,
     ai_client: Arc<crate::infrastructure::ai::AIClient>,
 }
@@ -451,6 +509,11 @@ struct CompressionModelSummaryInput<'a> {
     ai_client: Arc<crate::infrastructure::ai::AIClient>,
 }
 
+struct CompressionModelSummary {
+    text: String,
+    usage: Option<crate::util::types::ai::GeminiUsage>,
+}
+
 /// Execution engine
 pub struct ExecutionEngine {
     round_executor: Arc<RoundExecutor>,
@@ -458,6 +521,7 @@ pub struct ExecutionEngine {
     session_manager: Arc<SessionManager>,
     context_compressor: Arc<ContextCompressor>,
     config: ExecutionEngineConfig,
+    telemetry: Telemetry,
 }
 
 impl ExecutionEngine {
@@ -484,7 +548,13 @@ impl ExecutionEngine {
             session_manager,
             context_compressor,
             config,
+            telemetry: Telemetry::noop(),
         }
+    }
+
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     fn estimate_request_tokens_internal(
@@ -1013,7 +1083,7 @@ impl ExecutionEngine {
         ai_client_model: &str,
         ai_client_api_format: &str,
         unavailable_log_message: &str,
-    ) -> PrimaryModelFacts {
+    ) -> ResolvedPrimaryModelContext {
         let config_service = get_global_config_service().await.ok();
         if let Some(service) = config_service {
             let ai_config: crate::service::config::types::AIConfig =
@@ -1038,10 +1108,35 @@ impl ExecutionEngine {
                     || matches!(m.category, ModelCategory::Multimodal)
             });
 
-            PrimaryModelFacts::new(resolved_id, ai_client_model, ai_client_api_format, supports)
+            let telemetry_model_class = crate::agentic::observability::model_class_from_category(
+                model_cfg.map(|model| &model.category),
+            );
+            let telemetry_auth_class = model_cfg.map(|model| match &model.auth {
+                AuthConfig::ApiKey => InferenceAuthClass::ApiKey,
+                AuthConfig::Subscription { .. } => InferenceAuthClass::Subscription,
+            });
+            ResolvedPrimaryModelContext {
+                facts: PrimaryModelFacts::new(
+                    resolved_id,
+                    ai_client_model,
+                    ai_client_api_format,
+                    supports,
+                ),
+                telemetry_model_class,
+                telemetry_auth_class,
+            }
         } else {
             warn!("{}", unavailable_log_message);
-            PrimaryModelFacts::new(model_id, ai_client_model, ai_client_api_format, false)
+            ResolvedPrimaryModelContext {
+                facts: PrimaryModelFacts::new(
+                    model_id,
+                    ai_client_model,
+                    ai_client_api_format,
+                    false,
+                ),
+                telemetry_model_class: bitfun_observability::domains::ModelClass::Other,
+                telemetry_auth_class: None,
+            }
         }
     }
 
@@ -1635,7 +1730,9 @@ impl ExecutionEngine {
             dialog_turn_id: input.context.dialog_turn_id.clone(),
             turn_index: input.context.turn_index,
             round_number: input.round_number,
+            turn_started_at: input.turn_started_at,
             round_group_id: input.round_group_id,
+            observation_context: input.observation_context,
             workspace: input.context.workspace.clone(),
             model_exchange_trace_dir,
             available_tools: finalize_tool_names,
@@ -1644,6 +1741,8 @@ impl ExecutionEngine {
             model_config_id: input.primary_model_facts.model_id.clone(),
             effective_model_name: input.ai_client.config.model.clone(),
             primary_model_facts: input.primary_model_facts.clone(),
+            telemetry_model_class: input.telemetry_model_class,
+            telemetry_auth_class: input.telemetry_auth_class,
             agent_type: input.agent_type,
             context_vars: input.execution_context_vars.clone(),
             permission_constraints: input.permission_constraints,
@@ -1909,7 +2008,7 @@ impl ExecutionEngine {
         tool_definitions: Option<Vec<ToolDefinition>>,
         trace_config: Option<ModelExchangeTraceConfig>,
         max_tries: usize,
-    ) -> BitFunResult<String> {
+    ) -> BitFunResult<CompressionModelSummary> {
         let mut last_error = None;
         let base_wait_time_ms = 500;
 
@@ -1937,7 +2036,10 @@ impl ExecutionEngine {
                             max_tries
                         );
                     }
-                    return Ok(response.text);
+                    return Ok(CompressionModelSummary {
+                        text: response.text,
+                        usage: response.usage,
+                    });
                 }
                 Err(err) => {
                     let provider_error = err
@@ -1993,7 +2095,7 @@ impl ExecutionEngine {
     async fn generate_compression_model_summary(
         &self,
         input: CompressionModelSummaryInput<'_>,
-    ) -> BitFunResult<Option<String>> {
+    ) -> BitFunResult<Option<CompressionModelSummary>> {
         let request_messages = self
             .build_compression_request_messages(
                 input.runtime_messages,
@@ -2014,13 +2116,16 @@ impl ExecutionEngine {
                 2,
             )
             .await?;
-        let summary =
-            ContextCompressor::normalize_model_summary_output(&raw_summary).ok_or_else(|| {
+        let summary = ContextCompressor::normalize_model_summary_output(&raw_summary.text)
+            .ok_or_else(|| {
                 BitFunError::AIClient(
                     "Model-based compression returned an empty summary".to_string(),
                 )
             })?;
-        Ok(Some(summary))
+        Ok(Some(CompressionModelSummary {
+            text: summary,
+            usage: raw_summary.usage,
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2043,6 +2148,7 @@ impl ExecutionEngine {
             ContextCompressor::DEFAULT_RECENT_CONTEXT_TOKENS.min(max_initial_recent);
         let mut selected_plan = None;
         let mut model_summary = None;
+        let mut model_usage = None;
 
         for attempt in 0..Self::MAX_COMPRESSION_OVERFLOW_ATTEMPTS {
             let Some(plan) = self.context_compressor.plan_compression(
@@ -2086,7 +2192,10 @@ impl ExecutionEngine {
             match summary_result {
                 Ok(summary) => {
                     selected_plan = Some(plan);
-                    model_summary = summary;
+                    if let Some(summary) = summary {
+                        model_usage = summary.usage;
+                        model_summary = Some(summary.text);
+                    }
                     break;
                 }
                 Err(err) if err.is_recoverable_context_overflow() => {
@@ -2127,15 +2236,15 @@ impl ExecutionEngine {
         let Some(selected_plan) = selected_plan else {
             return Ok(None);
         };
-        self.context_compressor
-            .compress_plan_with_contract(
-                session_id,
-                context_window,
-                selected_plan,
-                compression_contract,
-                model_summary,
-            )
-            .map(Some)
+        let mut result = self.context_compressor.compress_plan_with_contract(
+            session_id,
+            context_window,
+            selected_plan,
+            compression_contract,
+            model_summary,
+        )?;
+        result.model_usage = model_usage;
+        Ok(Some(result))
     }
 
     async fn resolve_compression_runtime_scaffold(
@@ -2183,22 +2292,39 @@ impl ExecutionEngine {
         let ai_client_factory = get_global_ai_client_factory().await.map_err(|e| {
             BitFunError::AIClient(format!("Failed to get AI client factory: {}", e))
         })?;
+        let reasoning_preset = match self
+            .session_manager
+            .reconcile_session_reasoning_preset_for_turn(&session.session_id, "turn_resolution")
+            .await
+        {
+            Ok(reasoning_preset) => reasoning_preset,
+            Err(error) => {
+                warn!(
+                    "Failed to persist reasoning preset fallback; using Auto for this turn: session_id={}, error={}",
+                    session.session_id, error
+                );
+                None
+            }
+        };
         let ai_client_result = if matches!(
             session.config.model_binding_policy,
             SessionModelBindingPolicy::ApprovedImmutable
         ) {
             ai_client_factory
-                .get_client_by_approved_binding(
+                .get_client_by_approved_binding_with_reasoning_preset(
                     &model_id,
                     session
                         .config
                         .model_binding_fingerprint
                         .as_deref()
                         .unwrap_or_default(),
+                    reasoning_preset.as_deref(),
                 )
                 .await
         } else {
-            ai_client_factory.get_client_resolved(&model_id).await
+            ai_client_factory
+                .get_client_resolved_with_reasoning_preset(&model_id, reasoning_preset.as_deref())
+                .await
         };
         let ai_client = ai_client_result.map_err(|e| {
             BitFunError::AIClient(format!(
@@ -2215,6 +2341,7 @@ impl ExecutionEngine {
             "Config service unavailable, assuming compression model is text-only for image input gating",
         )
         .await;
+        let primary_model_facts = primary_model_facts.facts;
         let resolved_primary_model_id = primary_model_facts.model_id.clone();
         let primary_supports_image_understanding = primary_model_facts.supports_image_inputs;
 
@@ -2240,7 +2367,11 @@ impl ExecutionEngine {
                     .map(|workspace| workspace.root_path()),
             )
             .await;
-        let allowed_tools = tool_policy.allowed_tools.clone();
+        let mut allowed_tools = tool_policy.allowed_tools.clone();
+        ensure_primary_session_goal_tools(
+            &mut allowed_tools,
+            context.subagent_parent_info.is_some(),
+        );
         let enable_tools = context
             .context
             .get("enable_tools")
@@ -2353,7 +2484,117 @@ impl ExecutionEngine {
         primary_supports_image_understanding: bool,
         compression_contract_limit: usize,
         workspace: Option<&WorkspaceBinding>,
-    ) -> BitFunResult<Option<(usize, Vec<Message>)>> {
+        observation_context: Option<ObservationContext>,
+    ) -> BitFunResult<Option<AutomaticCompressionOutcome>> {
+        let turns_since_last_compression = self
+            .session_manager
+            .get_session(session_id)
+            .and_then(|session| session.compression_state.last_compression_turn_index)
+            .map(|last_turn_index| {
+                self.session_manager
+                    .get_turn_count(session_id)
+                    .saturating_sub(1)
+                    .saturating_sub(last_turn_index) as u64
+            });
+        let start_facts = CompressionStartFacts {
+            trigger: compression_trigger_class(trigger),
+            threshold_tokens: Some(before_pressure.input_limit as u64),
+            turns_since_last_compression,
+        };
+        let observation = start_compression(&self.telemetry, start_facts, observation_context);
+        let result = self
+            .compress_messages_impl(
+                session_id,
+                dialog_turn_id,
+                trigger,
+                runtime_messages,
+                before_pressure,
+                context_window,
+                ai_client,
+                tool_definitions,
+                system_prompt_message,
+                prepended_prompt_reminders,
+                primary_supports_image_understanding,
+                compression_contract_limit,
+                workspace,
+            )
+            .await;
+        let finish_facts = match &result {
+            Ok(Some(outcome)) => CompressionFinishFacts {
+                completion: CompletionFacts::completed(),
+                source: Some(outcome.source),
+                has_summary: Some(outcome.has_summary),
+                tokens_before: Some(before_pressure.total_tokens as u64),
+                tokens_after_estimate: Some(outcome.tokens_after_estimate as u64),
+                input_tokens: outcome
+                    .model_usage
+                    .as_ref()
+                    .map(|usage| usage.prompt_token_count as u64),
+                output_tokens: outcome
+                    .model_usage
+                    .as_ref()
+                    .map(|usage| usage.candidates_token_count as u64),
+                total_tokens: outcome
+                    .model_usage
+                    .as_ref()
+                    .map(|usage| usage.total_token_count as u64),
+                cache_read_tokens: outcome
+                    .model_usage
+                    .as_ref()
+                    .and_then(|usage| usage.cached_content_token_count)
+                    .map(u64::from),
+                cache_creation_tokens: outcome
+                    .model_usage
+                    .as_ref()
+                    .and_then(|usage| usage.cache_creation_token_count)
+                    .map(u64::from),
+            },
+            Ok(None) => CompressionFinishFacts {
+                completion: CompletionFacts::completed(),
+                source: Some(CompressionSource::None),
+                has_summary: Some(false),
+                tokens_before: Some(before_pressure.total_tokens as u64),
+                tokens_after_estimate: Some(before_pressure.total_tokens as u64),
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            },
+            Err(error) => CompressionFinishFacts {
+                completion: completion_from_error(error),
+                source: None,
+                has_summary: None,
+                tokens_before: Some(before_pressure.total_tokens as u64),
+                tokens_after_estimate: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            },
+        };
+        observation.finish(finish_facts);
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn compress_messages_impl(
+        &self,
+        session_id: &str,
+        dialog_turn_id: &str,
+        trigger: &str,
+        runtime_messages: Vec<Message>,
+        before_pressure: TokenPressureSnapshot,
+        context_window: usize,
+        ai_client: Arc<crate::infrastructure::ai::AIClient>,
+        tool_definitions: &Option<Vec<ToolDefinition>>,
+        system_prompt_message: Message,
+        prepended_prompt_reminders: &PrependedPromptReminders,
+        primary_supports_image_understanding: bool,
+        compression_contract_limit: usize,
+        workspace: Option<&WorkspaceBinding>,
+    ) -> BitFunResult<Option<AutomaticCompressionOutcome>> {
         let mut session = self
             .session_manager
             .get_session(session_id)
@@ -2413,6 +2654,8 @@ impl ExecutionEngine {
                 trigger: Some(trigger),
             },
             ai_client.as_ref(),
+            &self.telemetry,
+            None,
         )
         .await;
         let planned_result = self
@@ -2482,7 +2725,9 @@ impl ExecutionEngine {
                 let mut new_messages = vec![system_prompt_message];
                 new_messages.extend(compression_result.messages);
                 // Update session compression state
-                session.compression_state.increment_compression_count();
+                session
+                    .compression_state
+                    .increment_compression_count_at(boundary_turn_index);
 
                 // Update session state
                 let _ = self
@@ -2513,6 +2758,11 @@ impl ExecutionEngine {
                     "model"
                 } else {
                     "local_fallback"
+                };
+                let telemetry_source = if compression_result.has_model_summary {
+                    CompressionSource::Model
+                } else {
+                    CompressionSource::LocalFallback
                 };
 
                 info!(
@@ -2548,6 +2798,7 @@ impl ExecutionEngine {
                         session_id: session_id.to_string(),
                         turn_id: dialog_turn_id.to_string(),
                         compression_id: compression_id.clone(),
+                        trigger: trigger.to_string(),
                         compression_count: session.compression_state.compression_count,
                         tokens_before: before_pressure.total_tokens,
                         tokens_after: compressed_tokens,
@@ -2576,7 +2827,13 @@ impl ExecutionEngine {
                 )
                 .await;
 
-                Ok(Some((compressed_tokens, new_messages)))
+                Ok(Some(AutomaticCompressionOutcome {
+                    tokens_after_estimate: compressed_tokens,
+                    messages: new_messages,
+                    source: telemetry_source,
+                    has_summary: compression_result.has_model_summary,
+                    model_usage: compression_result.model_usage,
+                }))
             }
             Ok(None) => Ok(None),
             Err(e) => {
@@ -2586,6 +2843,9 @@ impl ExecutionEngine {
                         session_id: session_id.to_string(),
                         turn_id: dialog_turn_id.to_string(),
                         compression_id: compression_id.clone(),
+                        trigger: trigger.to_string(),
+                        duration_ms: elapsed_ms_u64(start_time),
+                        tokens_before: Some(before_pressure.total_tokens),
                         error: e.to_string(),
                     },
                     EventPriority::High,
@@ -2601,6 +2861,93 @@ impl ExecutionEngine {
     /// Always emits compression started/completed/failed events for the provided turn.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn compact_session_context(
+        &self,
+        session_id: String,
+        dialog_turn_id: String,
+        compression_id: String,
+        context: ExecutionContext,
+        messages: Vec<Message>,
+        trigger: &str,
+        cancellation_token: CancellationToken,
+        commit_gate: Arc<ManualCompactionCommitGate>,
+    ) -> BitFunResult<ContextCompactionOutcome> {
+        let turns_since_last_compression = self
+            .session_manager
+            .get_session(&session_id)
+            .and_then(|session| session.compression_state.last_compression_turn_index)
+            .map(|last_turn_index| {
+                self.session_manager
+                    .get_turn_count(&session_id)
+                    .saturating_sub(1)
+                    .saturating_sub(last_turn_index) as u64
+            });
+        let start_facts = CompressionStartFacts {
+            trigger: compression_trigger_class(trigger),
+            threshold_tokens: None,
+            turns_since_last_compression,
+        };
+        let observation = start_compression(&self.telemetry, start_facts, None);
+        let result = self
+            .compact_session_context_impl(
+                session_id,
+                dialog_turn_id,
+                compression_id,
+                context,
+                messages,
+                trigger,
+                cancellation_token,
+                commit_gate,
+            )
+            .await;
+        let finish_facts = match &result {
+            Ok(outcome) => CompressionFinishFacts {
+                completion: CompletionFacts::completed(),
+                source: Some(compression_source_class(&outcome.summary_source)),
+                has_summary: Some(outcome.has_summary),
+                tokens_before: Some(outcome.tokens_before as u64),
+                tokens_after_estimate: Some(outcome.tokens_after as u64),
+                input_tokens: outcome
+                    .model_usage
+                    .as_ref()
+                    .map(|usage| usage.prompt_token_count as u64),
+                output_tokens: outcome
+                    .model_usage
+                    .as_ref()
+                    .map(|usage| usage.candidates_token_count as u64),
+                total_tokens: outcome
+                    .model_usage
+                    .as_ref()
+                    .map(|usage| usage.total_token_count as u64),
+                cache_read_tokens: outcome
+                    .model_usage
+                    .as_ref()
+                    .and_then(|usage| usage.cached_content_token_count)
+                    .map(u64::from),
+                cache_creation_tokens: outcome
+                    .model_usage
+                    .as_ref()
+                    .and_then(|usage| usage.cache_creation_token_count)
+                    .map(u64::from),
+            },
+            Err(error) => CompressionFinishFacts {
+                completion: completion_from_error(error),
+                source: None,
+                has_summary: None,
+                tokens_before: None,
+                tokens_after_estimate: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            },
+        };
+        observation.finish(finish_facts);
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn compact_session_context_impl(
         &self,
         session_id: String,
         dialog_turn_id: String,
@@ -2677,6 +3024,8 @@ impl ExecutionEngine {
                 trigger: Some(trigger),
             },
             scaffold.ai_client.as_ref(),
+            &self.telemetry,
+            None,
         )
         .await;
         let planned_result = tokio::select! {
@@ -2734,6 +3083,7 @@ impl ExecutionEngine {
                         session_id, dialog_turn_id, error
                     ),
                 }
+                let model_usage = compression_result.model_usage.clone();
                 let compressed_messages = compression_result.messages;
                 self.session_manager
                     .replace_context_messages(&session_id, compressed_messages.clone())
@@ -2756,7 +3106,9 @@ impl ExecutionEngine {
                     )
                     .await;
 
-                session.compression_state.increment_compression_count();
+                session
+                    .compression_state
+                    .increment_compression_count_at(boundary_turn_index);
                 let compression_count = session.compression_state.compression_count;
                 let _ = self
                     .session_manager
@@ -2813,6 +3165,7 @@ impl ExecutionEngine {
                         session_id: session_id.to_string(),
                         turn_id: dialog_turn_id.to_string(),
                         compression_id: compression_id.clone(),
+                        trigger: trigger.to_string(),
                         compression_count,
                         tokens_before: before_pressure.total_tokens,
                         tokens_after,
@@ -2855,6 +3208,7 @@ impl ExecutionEngine {
                         "local_fallback".to_string()
                     },
                     applied: true,
+                    model_usage,
                 })
             }
             Ok(None) => {
@@ -2874,6 +3228,7 @@ impl ExecutionEngine {
                         session_id: session_id.to_string(),
                         turn_id: dialog_turn_id.to_string(),
                         compression_id: compression_id.clone(),
+                        trigger: trigger.to_string(),
                         compression_count: session.compression_state.compression_count,
                         tokens_before: before_pressure.total_tokens,
                         tokens_after,
@@ -2896,6 +3251,7 @@ impl ExecutionEngine {
                     has_summary: false,
                     summary_source: "none".to_string(),
                     applied: false,
+                    model_usage: None,
                 })
             }
             Err(err) => {
@@ -2904,6 +3260,9 @@ impl ExecutionEngine {
                         session_id: session_id.to_string(),
                         turn_id: dialog_turn_id.to_string(),
                         compression_id: compression_id.clone(),
+                        trigger: trigger.to_string(),
+                        duration_ms: elapsed_ms_u64(start_time),
+                        tokens_before: Some(before_pressure.total_tokens),
                         error: err.to_string(),
                     },
                     EventPriority::High,
@@ -2927,6 +3286,99 @@ impl ExecutionEngine {
         let initial_count = initial_messages.len();
 
         let dialog_turn_id = context.dialog_turn_id.clone();
+        let is_subagent = context.subagent_parent_info.is_some();
+        let is_remote = context
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.is_remote());
+        let agent_registry = get_agent_registry();
+        agent_registry
+            .load_custom_agents(
+                context
+                    .workspace
+                    .as_ref()
+                    .map(|workspace| workspace.root_path()),
+            )
+            .await;
+        let mode_class = agent_registry.observability_mode_class(
+            &agent_type,
+            context
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.root_path()),
+        );
+        let user_content = initial_messages
+            .iter()
+            .filter(|message| message.is_actual_user_message())
+            .filter_map(|message| match &message.content {
+                MessageContent::Text(text) | MessageContent::Multimodal { text, .. } => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .last();
+        let turn_sequence = context.turn_index as u64;
+        let turn_observation = start_turn_with_relation_and_content_facts(
+            &self.telemetry,
+            TurnStartFacts {
+                mode_class,
+                trigger: turn_trigger(is_subagent, is_remote),
+                remote: is_remote,
+                subagent: is_subagent,
+            },
+            context.observation_relation.clone(),
+            Some(turn_sequence),
+            user_content.as_ref().map(|content| content.len() as u64),
+        );
+        let turn_context = turn_observation.context();
+        let turn_correlation = DebugCorrelation {
+            session_id: Some(context.session_id.clone()),
+            turn_id: Some(dialog_turn_id.clone()),
+            parent_session_id: context
+                .subagent_parent_info
+                .as_ref()
+                .map(|parent| parent.session_id.clone()),
+            parent_turn_id: context
+                .subagent_parent_info
+                .as_ref()
+                .map(|parent| parent.dialog_turn_id.clone()),
+            parent_tool_call_id: context
+                .subagent_parent_info
+                .as_ref()
+                .map(|parent| parent.tool_call_id.clone()),
+            ..Default::default()
+        };
+        let workspace_path = context
+            .workspace
+            .as_ref()
+            .map(WorkspaceBinding::root_path_string);
+        let repository = context
+            .workspace
+            .as_ref()
+            .map(WorkspaceBinding::project_root_path_string);
+        let branch = context
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.execution_target.as_ref())
+            .and_then(|target| target.branch.clone());
+        let base_commit = context
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.execution_target.as_ref())
+            .and_then(|target| target.base_commit.clone());
+        self.telemetry.record_debug(
+            DebugTelemetryRecord::TurnInput(DebugTurnRecord {
+                correlation: turn_correlation.clone(),
+                content: user_content.clone().map(DebugContentField::text),
+                modified_file_paths: None,
+                modified_file_paths_original_count: None,
+                workspace_path: workspace_path.clone(),
+                repository: repository.clone(),
+                branch: branch.clone(),
+                base_commit: base_commit.clone(),
+            }),
+            turn_context.clone(),
+        );
 
         info!("Starting dialog turn: dialog_turn_id={}", dialog_turn_id);
 
@@ -2938,6 +3390,7 @@ impl ExecutionEngine {
                 context,
                 start_time,
                 initial_count,
+                turn_context.clone(),
             )
             .await;
 
@@ -2948,6 +3401,81 @@ impl ExecutionEngine {
         debug!(
             "Cleaned up cancel token (final cleanup): dialog_turn_id={}",
             dialog_turn_id
+        );
+
+        let finish_facts = match &result {
+            Ok(result) => TurnFinishFacts {
+                completion: if result.success {
+                    CompletionFacts::completed()
+                } else {
+                    CompletionFacts::failed(SafeErrorType::Other)
+                },
+                finish_reason: Some(finish_reason_class(result.finish_reason.as_str())),
+                round_count: Some(result.total_rounds as u64),
+                tool_count: Some(result.total_tools as u64),
+                first_result_ms: result.first_result_ms,
+                modified_file_count: result.modified_file_count,
+                added_lines: result.added_lines,
+                deleted_lines: result.deleted_lines,
+            },
+            Err(error) => TurnFinishFacts {
+                completion: completion_from_error(error),
+                finish_reason: Some(FinishReasonClass::Error),
+                round_count: None,
+                tool_count: None,
+                first_result_ms: None,
+                modified_file_count: None,
+                added_lines: None,
+                deleted_lines: None,
+            },
+        };
+        let result_content =
+            result
+                .as_ref()
+                .ok()
+                .map(|result| match &result.final_message.content {
+                    MessageContent::Text(text) | MessageContent::Multimodal { text, .. } => {
+                        text.clone()
+                    }
+                    MessageContent::Mixed { text, .. } => text.clone(),
+                    MessageContent::ToolResult { result, .. } => result.to_string(),
+                });
+        turn_observation.finish_with_output_length(
+            finish_facts,
+            result_content.as_ref().map(|content| content.len() as u64),
+        );
+        let modified_file_paths_original_count = result
+            .as_ref()
+            .ok()
+            .and_then(|result| result.modified_file_paths.as_ref())
+            .map(|paths| paths.len().min(u64::MAX as usize) as u64);
+        let modified_file_paths = result
+            .as_ref()
+            .ok()
+            .and_then(|result| result.modified_file_paths.clone())
+            .map(|paths| {
+                const MAX_DEBUG_MODIFIED_PATHS: usize = 2048;
+                let mut field = DebugContentField::value(serde_json::json!(paths));
+                if let serde_json::Value::Array(paths) = &mut field.value {
+                    if paths.len() > MAX_DEBUG_MODIFIED_PATHS {
+                        paths.truncate(MAX_DEBUG_MODIFIED_PATHS);
+                        field.truncated = true;
+                    }
+                }
+                field
+            });
+        self.telemetry.record_debug(
+            DebugTelemetryRecord::TurnResult(DebugTurnRecord {
+                correlation: turn_correlation,
+                content: result_content.clone().map(DebugContentField::text),
+                modified_file_paths,
+                modified_file_paths_original_count,
+                workspace_path,
+                repository,
+                branch,
+                base_commit,
+            }),
+            turn_context,
         );
 
         result
@@ -2961,6 +3489,7 @@ impl ExecutionEngine {
         context: ExecutionContext,
         start_time: std::time::Instant,
         initial_count: usize,
+        turn_context: Option<ObservationContext>,
     ) -> BitFunResult<ExecutionResult> {
         let dialog_turn_id = context.dialog_turn_id.clone();
 
@@ -2972,14 +3501,6 @@ impl ExecutionEngine {
         // Things that remain constant in a dialog turn: 1.agent, 2.system prompt, 3.tools, 4.ai client
         // 1. Get current agent
         let agent_registry = get_agent_registry();
-        agent_registry
-            .load_custom_agents(
-                context
-                    .workspace
-                    .as_ref()
-                    .map(|workspace| workspace.root_path()),
-            )
-            .await;
         let current_agent = agent_registry
             .get_agent(
                 &agent_type,
@@ -3068,22 +3589,39 @@ impl ExecutionEngine {
         })?;
 
         // Get AI client by model ID
+        let reasoning_preset = match self
+            .session_manager
+            .reconcile_session_reasoning_preset_for_turn(&session.session_id, "turn_resolution")
+            .await
+        {
+            Ok(reasoning_preset) => reasoning_preset,
+            Err(error) => {
+                warn!(
+                    "Failed to persist reasoning preset fallback; using Auto for this turn: session_id={}, error={}",
+                    session.session_id, error
+                );
+                None
+            }
+        };
         let ai_client_result = if matches!(
             session.config.model_binding_policy,
             SessionModelBindingPolicy::ApprovedImmutable
         ) {
             ai_client_factory
-                .get_client_by_approved_binding(
+                .get_client_by_approved_binding_with_reasoning_preset(
                     &model_id,
                     session
                         .config
                         .model_binding_fingerprint
                         .as_deref()
                         .unwrap_or_default(),
+                    reasoning_preset.as_deref(),
                 )
                 .await
         } else {
-            ai_client_factory.get_client_resolved(&model_id).await
+            ai_client_factory
+                .get_client_resolved_with_reasoning_preset(&model_id, reasoning_preset.as_deref())
+                .await
         };
         let ai_client = ai_client_result.map_err(|e| {
             BitFunError::AIClient(format!(
@@ -3101,6 +3639,9 @@ impl ExecutionEngine {
             "Config service unavailable, assuming primary model is text-only for image input gating",
         )
         .await;
+        let telemetry_model_class = primary_model_facts.telemetry_model_class;
+        let telemetry_auth_class = primary_model_facts.telemetry_auth_class;
+        let primary_model_facts = primary_model_facts.facts;
         let resolved_primary_model_id = primary_model_facts.model_id.clone();
         let primary_supports_image_understanding = primary_model_facts.supports_image_inputs;
 
@@ -3148,7 +3689,11 @@ impl ExecutionEngine {
                     .map(|workspace| workspace.root_path()),
             )
             .await;
-        let allowed_tools = tool_policy.allowed_tools.clone();
+        let mut allowed_tools = tool_policy.allowed_tools.clone();
+        ensure_primary_session_goal_tools(
+            &mut allowed_tools,
+            context.subagent_parent_info.is_some(),
+        );
         let enable_tools = context
             .context
             .get("enable_tools")
@@ -3263,12 +3808,14 @@ impl ExecutionEngine {
         let mut round_index = 0;
         let mut completed_rounds = 0usize;
         let mut total_tools = 0;
+        let mut first_result_ms = None;
         let mut last_partial_recovery_reason: Option<String> = None;
         let mut finalization_reason: Option<&'static str> = None;
         let mut consecutive_compression_failures: u32 = 0;
         const MAX_CONSECUTIVE_COMPRESSION_FAILURES: u32 = 3;
         let mut main_context_overflow_recoveries = 0usize;
         let mut active_round_lifecycle: Option<ModelRoundLifecycle> = None;
+        let mut active_round_observation: Option<RoundObservation> = None;
 
         // Track tool-call patterns for context health, but only use rounds with
         // actual failed tool results for no-progress recovery decisions.
@@ -3501,20 +4048,21 @@ impl ExecutionEngine {
                         primary_supports_image_understanding,
                         context_profile_policy.compression_contract_limit,
                         context.workspace.as_ref(),
+                        turn_context.clone(),
                     )
                     .await
                 {
-                    Ok(Some((compressed_tokens, compressed_messages))) => {
+                    Ok(Some(compression_outcome)) => {
                         info!(
                             "Round {} compression completed: messages {} -> {}, tokens {} -> {}",
                             round_index,
                             messages.len(),
-                            compressed_messages.len(),
+                            compression_outcome.messages.len(),
                             token_pressure.total_tokens,
-                            compressed_tokens,
+                            compression_outcome.tokens_after_estimate,
                         );
 
-                        messages = compressed_messages;
+                        messages = compression_outcome.messages;
                         turn_prompt_scaffold = self
                             .resolve_turn_prompt_scaffold(TurnPromptScaffoldInput {
                                 context: &context,
@@ -3623,6 +4171,16 @@ impl ExecutionEngine {
                 .session_manager
                 .persistent_model_exchange_trace_dir(&context.session_id)
                 .await;
+            if active_round_observation.is_none() {
+                active_round_observation = Some(start_round(
+                    &self.telemetry,
+                    RoundStartFacts {
+                        index_bucket: index_bucket(round_index),
+                        subagent: context.subagent_parent_info.is_some(),
+                    },
+                    turn_context.clone(),
+                ));
+            }
             let round_context = RoundContext {
                 session_id: context.session_id.clone(),
                 subagent_parent_info: context.subagent_parent_info.clone(),
@@ -3630,7 +4188,11 @@ impl ExecutionEngine {
                 dialog_turn_id: context.dialog_turn_id.clone(),
                 turn_index: context.turn_index,
                 round_number: round_index,
+                turn_started_at: start_time,
                 round_group_id: None,
+                observation_context: active_round_observation
+                    .as_ref()
+                    .and_then(|observation| observation.context()),
                 workspace: context.workspace.clone(),
                 model_exchange_trace_dir,
                 available_tools: available_tools.clone(),
@@ -3639,6 +4201,8 @@ impl ExecutionEngine {
                 model_config_id: model_id.clone(),
                 effective_model_name: ai_client.config.model.clone(),
                 primary_model_facts: primary_model_facts.clone(),
+                telemetry_model_class,
+                telemetry_auth_class,
                 agent_type: agent_type.clone(),
                 context_vars: round_context_vars,
                 permission_constraints: tool_policy.permission_constraints.clone(),
@@ -3658,7 +4222,6 @@ impl ExecutionEngine {
                 remote_exec_port: context.remote_exec_port.clone(),
                 recover_partial_on_cancel: context.recover_partial_on_cancel,
             };
-
             // Execute single model round
             debug!(
                 "Starting model round: round_index={}, messages={}",
@@ -3725,10 +4288,11 @@ impl ExecutionEngine {
                             primary_supports_image_understanding,
                             context_profile_policy.compression_contract_limit,
                             context.workspace.as_ref(),
+                            turn_context.clone(),
                         )
                         .await
                     {
-                        Ok(Some((compressed_tokens, compressed_messages))) => {
+                        Ok(Some(compression_outcome)) => {
                             info!(
                                 "Context-overflow recovery compression completed: session_id={}, turn_id={}, round_index={}, recovery={}, messages {} -> {}, tokens {} -> {}",
                                 context.session_id,
@@ -3736,11 +4300,11 @@ impl ExecutionEngine {
                                 round_index,
                                 main_context_overflow_recoveries,
                                 messages.len(),
-                                compressed_messages.len(),
+                                compression_outcome.messages.len(),
                                 send_pressure.total_tokens,
-                                compressed_tokens
+                                compression_outcome.tokens_after_estimate
                             );
-                            messages = compressed_messages;
+                            messages = compression_outcome.messages;
                             turn_prompt_scaffold = self
                                 .resolve_turn_prompt_scaffold(TurnPromptScaffoldInput {
                                     context: &context,
@@ -3774,6 +4338,15 @@ impl ExecutionEngine {
                                 "Context-overflow recovery found no compressible context: session_id={}, turn_id={}, round_index={}",
                                 context.session_id, context.dialog_turn_id, round_index
                             );
+                            if let Some(observation) = active_round_observation.take() {
+                                observation.finish(RoundFinishFacts {
+                                    completion: completion_from_error(&err),
+                                    has_tool_calls: false,
+                                    attempt_bucket: attempt_bucket(
+                                        round_lifecycle.attempts_started(),
+                                    ),
+                                });
+                            }
                             return Err(err);
                         }
                         Err(compression_error) => {
@@ -3784,12 +4357,40 @@ impl ExecutionEngine {
                                 round_index,
                                 compression_error
                             );
+                            if let Some(observation) = active_round_observation.take() {
+                                observation.finish(RoundFinishFacts {
+                                    completion: completion_from_error(&err),
+                                    has_tool_calls: false,
+                                    attempt_bucket: attempt_bucket(
+                                        round_lifecycle.attempts_started(),
+                                    ),
+                                });
+                            }
                             return Err(err);
                         }
                     }
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    if let Some(observation) = active_round_observation.take() {
+                        observation.finish(RoundFinishFacts {
+                            completion: completion_from_error(&err),
+                            has_tool_calls: false,
+                            attempt_bucket: attempt_bucket(round_lifecycle.attempts_started()),
+                        });
+                    }
+                    return Err(err);
+                }
             };
+            if first_result_ms.is_none() {
+                first_result_ms = round_result.first_result_ms;
+            }
+            if let Some(observation) = active_round_observation.take() {
+                observation.finish(RoundFinishFacts {
+                    completion: CompletionFacts::completed(),
+                    has_tool_calls: !round_result.tool_calls.is_empty(),
+                    attempt_bucket: attempt_bucket(round_lifecycle.attempts_started()),
+                });
+            }
             active_round_lifecycle = None;
 
             debug!(
@@ -3856,7 +4457,7 @@ impl ExecutionEngine {
                 }
             }
 
-            #[cfg(feature = "product-full")]
+            #[cfg(feature = "agent-runtime")]
             activate_conditional_instructions_after_round(
                 self.session_manager.as_ref(),
                 &context,
@@ -4047,7 +4648,17 @@ impl ExecutionEngine {
                         let wrapped = match injection.kind {
                             RoundInjectionKind::UserSteering => format!(
                                 "<system_reminder>\nThe user sent a new message while this turn was running. You have just finished the previous atomic action; handle this new user message now as the current direction, while preserving the existing conversation and task context. Do not ignore it or wait for a separate future turn.\n\nNew user message:\n{}\n</system_reminder>",
-                                injection.content
+                                // A steering message carries whatever the
+                                // composer carries, so an image-only message is
+                                // legitimate: name the attachment instead of
+                                // injecting empty text.
+                                if injection.content.trim().is_empty()
+                                    && !injection.attachments.is_empty()
+                                {
+                                    "(image attached)"
+                                } else {
+                                    injection.content.as_str()
+                                }
                             ),
                             RoundInjectionKind::BackgroundResult => format!(
                                 "<system_reminder>\nA background task has finished and returned new information while this turn was running. Incorporate it into your current work immediately when relevant. Do not wait for a separate future turn.\n\nBackground result:\n{}\n</system_reminder>",
@@ -4066,8 +4677,27 @@ impl ExecutionEngine {
                                 InternalReminderKind::GoalObjectiveUpdated
                             }
                         };
-                        let user_msg = Message::internal_reminder(reminder_kind, wrapped)
-                            .with_turn_id(context.dialog_turn_id.clone());
+                        // Attachments rebuild into the same multimodal user
+                        // message a turn-boundary submission would have
+                        // produced; a bad payload degrades to text rather than
+                        // dropping the user's steering message entirely.
+                        let images = match agent_dialog_turn_image_contexts(&injection.attachments)
+                        {
+                            Ok(images) => images.unwrap_or_default(),
+                            Err(error) => {
+                                warn!(
+                                    "Dropping unusable steering attachments, injecting text only: session_id={}, steering_id={}, error={}",
+                                    context.session_id, injection_id, error
+                                );
+                                Vec::new()
+                            }
+                        };
+                        let user_msg = if images.is_empty() {
+                            Message::internal_reminder(reminder_kind, wrapped)
+                        } else {
+                            Message::internal_reminder_multimodal(reminder_kind, wrapped, images)
+                        }
+                        .with_turn_id(context.dialog_turn_id.clone());
                         messages.push(user_msg.clone());
                         if let Err(e) = self
                             .session_manager
@@ -4330,10 +4960,14 @@ impl ExecutionEngine {
                         ai_client: ai_client.clone(),
                         context: &context,
                         agent_type: agent_type.clone(),
+                        observation_context: turn_context.clone(),
+                        turn_started_at: start_time,
                         round_number: completed_rounds,
                         round_group_id: finalize_round_group_id.clone(),
                         execution_context_vars: &execution_context_vars,
                         primary_model_facts: &primary_model_facts,
+                        telemetry_model_class,
+                        telemetry_auth_class,
                         prepended_reminders: &finalize_prepended_reminders,
                         messages: &messages,
                         reminder_text: finalize_reminder,
@@ -4341,6 +4975,9 @@ impl ExecutionEngine {
                         context_window,
                     })
                     .await?;
+                if first_result_ms.is_none() {
+                    first_result_ms = final_round_result.first_result_ms;
+                }
 
                 let mut accepted = final_round_result.had_assistant_text
                     && !Self::assistant_has_tool_calls(&final_round_result.assistant_message);
@@ -4361,10 +4998,14 @@ impl ExecutionEngine {
                             ai_client: ai_client.clone(),
                             context: &context,
                             agent_type: agent_type.clone(),
+                            observation_context: turn_context.clone(),
+                            turn_started_at: start_time,
                             round_number: completed_rounds,
                             round_group_id: finalize_round_group_id.clone(),
                             execution_context_vars: &execution_context_vars,
                             primary_model_facts: &primary_model_facts,
+                            telemetry_model_class,
+                            telemetry_auth_class,
                             prepended_reminders: &finalize_prepended_reminders,
                             messages: &messages,
                             reminder_text: finalize_reminder,
@@ -4372,6 +5013,9 @@ impl ExecutionEngine {
                             context_window,
                         })
                         .await?;
+                    if first_result_ms.is_none() {
+                        first_result_ms = retry_result.first_result_ms;
+                    }
                     if !retry_result.had_assistant_text
                         || Self::assistant_has_tool_calls(&retry_result.assistant_message)
                     {
@@ -4434,6 +5078,45 @@ impl ExecutionEngine {
 
         let duration_ms = elapsed_ms_u64(start_time);
 
+        let (turn_diff, modified_file_paths) = if let Some(workspace) = context.workspace.as_ref() {
+            if let Some(manager) =
+                crate::service::snapshot::manager::get_snapshot_manager_for_workspace(
+                    workspace.root_path(),
+                )
+            {
+                let turn_diff = manager
+                    .turn_diff_aggregate(&context.session_id, context.turn_index)
+                    .await
+                    .ok();
+                let modified_file_paths = manager
+                    .get_turn_files(&context.session_id, context.turn_index)
+                    .await
+                    .ok()
+                    .map(|paths| {
+                        let mut paths = paths
+                            .into_iter()
+                            .map(|path| {
+                                path.strip_prefix(workspace.root_path())
+                                    .unwrap_or(&path)
+                                    .to_string_lossy()
+                                    .into_owned()
+                            })
+                            .collect::<Vec<_>>();
+                        paths.sort();
+                        paths.dedup();
+                        paths
+                    });
+                (turn_diff, modified_file_paths)
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+        let modified_file_count = turn_diff.map(|aggregate| aggregate.modified_file_count as u64);
+        let added_lines = turn_diff.map(|aggregate| aggregate.lines_added as u64);
+        let deleted_lines = turn_diff.map(|aggregate| aggregate.lines_removed as u64);
+
         info!(
             "Dialog turn loop completed: turn={}, rounds={}, total_tools={}, reason={}",
             context.dialog_turn_id, completed_rounds, total_tools, effective_finish_reason
@@ -4453,7 +5136,7 @@ impl ExecutionEngine {
         // successfully, renumber `cit_XXX` references in the final report
         // into consecutive `[N]` display IDs. Two gates apply (agent type +
         // dialog success) so other agents and failed turns are unaffected.
-        #[cfg(feature = "product-full")]
+        #[cfg(feature = "deep-research")]
         {
             if bitfun_agent_runtime::deep_research::should_post_process_research_report(
                 &agent_type,
@@ -4485,6 +5168,10 @@ impl ExecutionEngine {
                         success: Some(success),
                         finish_reason: Some(effective_finish_reason.to_string()),
                         has_final_response: Some(has_final_response),
+                        first_result_ms,
+                        modified_file_count,
+                        added_lines,
+                        deleted_lines,
                     },
                     None,
                 )
@@ -4494,7 +5181,7 @@ impl ExecutionEngine {
         }
 
         // Print dialog turn token statistics (from model's last returned usage)
-        if let Some(usage) = last_usage {
+        if let Some(usage) = last_usage.as_ref() {
             info!(
                 "Dialog turn completed - Token stats: turn_id={}, rounds={}, tools={}, duration={}ms, prompt_tokens={}, completion_tokens={}, total_tokens={}",
                 context.dialog_turn_id,
@@ -4530,9 +5217,16 @@ impl ExecutionEngine {
                 .cloned()
                 .unwrap_or_else(|| Message::assistant(String::new())),
             total_rounds: completed_rounds,
+            total_tools,
             success,
             new_messages,
             finish_reason,
+            last_token_usage: last_usage,
+            first_result_ms,
+            modified_file_count,
+            modified_file_paths,
+            added_lines,
+            deleted_lines,
         })
     }
 
@@ -4587,8 +5281,9 @@ impl ExecutionEngine {
 #[cfg(test)]
 mod tests {
     use super::{
-        activate_conditional_instructions_after_round, manual_compaction_terminal_error,
-        ContextHealthSnapshot, ExecutionEngine, RoundResult, TurnPromptScaffold,
+        activate_conditional_instructions_after_round, ensure_primary_session_goal_tools,
+        manual_compaction_terminal_error, ContextHealthSnapshot, ExecutionEngine, RoundResult,
+        TurnPromptScaffold,
     };
     use crate::agentic::agents::{
         PrependedPromptReminders, PromptBuilderContext, UserContextPolicy,
@@ -4602,11 +5297,13 @@ mod tests {
     use crate::agentic::tools::ToolRuntimeRestrictions;
     use crate::agentic::workspace::{local_workspace_services, WorkspaceBinding};
     use crate::infrastructure::PathManager;
+    #[cfg(feature = "external-sources")]
     use crate::instruction_sources::test_support::{lock_environment, EnvironmentGuard};
     use crate::service::config::types::AIConfig;
     use crate::service::config::types::AIModelConfig;
     use crate::service::remote_ssh::workspace_state::workspace_session_identity;
     use crate::util::types::ToolDefinition;
+    use bitfun_agent_runtime::thread_goal_tools::THREAD_GOAL_TOOL_NAMES;
     use bitfun_runtime_ports::{WorkspaceDirEntry, WorkspaceFileSystem, WorkspacePathKind};
     use serde_json::json;
     use sha2::{Digest, Sha256};
@@ -4615,6 +5312,19 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn primary_session_tool_policy_restores_goal_tools_but_subagents_stay_scoped() {
+        let mut primary_tools = vec!["Read".to_string()];
+        ensure_primary_session_goal_tools(&mut primary_tools, false);
+        for tool_name in THREAD_GOAL_TOOL_NAMES {
+            assert!(primary_tools.iter().any(|tool| tool == tool_name));
+        }
+
+        let mut subagent_tools = vec!["Read".to_string()];
+        ensure_primary_session_goal_tools(&mut subagent_tools, true);
+        assert_eq!(subagent_tools, vec!["Read".to_string()]);
+    }
 
     #[test]
     fn manual_compaction_preserves_cancellation_as_a_terminal_cancellation() {
@@ -4819,6 +5529,7 @@ mod tests {
             .contains("Recovered workspace instructions."));
     }
 
+    #[cfg(feature = "external-sources")]
     #[tokio::test]
     async fn local_workspace_services_still_include_local_user_instruction_sources() {
         let _environment = lock_environment();
@@ -4863,6 +5574,7 @@ mod tests {
         assert!(context.contains("Local engine project"));
     }
 
+    #[cfg(feature = "external-sources")]
     #[tokio::test]
     async fn local_workspace_services_remain_the_project_instruction_io_owner() {
         let _environment = lock_environment();
@@ -4909,6 +5621,7 @@ mod tests {
         assert!(!context.contains("Disk project source"));
     }
 
+    #[cfg(feature = "external-sources")]
     #[tokio::test]
     async fn conditional_rules_persist_once_and_reload_after_compaction() {
         let _environment = lock_environment();
@@ -4955,6 +5668,7 @@ mod tests {
             workspace: Some(workspace),
             context: HashMap::new(),
             subagent_parent_info: None,
+            observation_relation: bitfun_observability::TraceRelation::Root,
             permission_delegation: None,
             permission_runtime_ceiling: None,
             delegation_policy: bitfun_runtime_ports::DelegationPolicy::top_level(),
@@ -5092,6 +5806,7 @@ mod tests {
             partial_recovery_reason: None,
             had_assistant_text: false,
             had_thinking_content: false,
+            first_result_ms: None,
         }
     }
 
@@ -5486,6 +6201,7 @@ mod tests {
             workspace: None,
             context: HashMap::new(),
             subagent_parent_info: None,
+            observation_relation: bitfun_observability::TraceRelation::Root,
             permission_delegation: None,
             permission_runtime_ceiling: None,
             delegation_policy: bitfun_runtime_ports::DelegationPolicy::top_level(),

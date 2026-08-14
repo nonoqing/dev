@@ -16,7 +16,18 @@ Authority language: <zh-CN | en>
 
 ## Surfaces / layers touched
 
-## Risks
+## Risk scan
+
+| Dimension | Affected? | Risk / evidence | Mitigation or N/A reason |
+|---|---|---|---|
+| Security / permissions | | | |
+| Credentials / privacy | | | |
+| Network / external systems | | | |
+| Data or state migration | | | |
+| Release / packaging / rollout | | | |
+| Remote / multi-host | | | |
+| i18n | | | |
+| Theme / interaction | | | |
 
 ## Acceptance
 
@@ -33,6 +44,8 @@ Authority language: <zh-CN | en>
 | State | Meaning | Owner |
 |---|---|---|
 
+## Migration and compatibility
+
 ## Remote compatibility
 
 ## Failure / cancel / partial success
@@ -40,6 +53,8 @@ Authority language: <zh-CN | en>
 ## i18n and theme
 
 ## Security
+
+## Release and rollout
 
 ## Test approach
 
@@ -49,8 +64,16 @@ Authority language: <zh-CN | en>
 
 Risk: <Low|Medium|High>. <one-line reason>.
 
-- [ ] <task>. Risk: <Low|Medium|High>.
-- [ ] <task>. Risk: <Low|Medium|High>.
+#### Task 1: <independently deliverable change>
+
+- [ ] Change: <files / behavior / boundary>.
+- Risk: <Low|Medium|High>. <one-line reason>.
+- Verify: <focused command or review evidence>.
+- Rollback: <how to undo or fall back; use N/A only with a reason>.
+
+## Overall rollback
+
+Cross-task ordering, compatibility fallback, and any irreversible step.
 
 ## Verification
 

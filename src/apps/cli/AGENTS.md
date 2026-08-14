@@ -35,14 +35,17 @@ runtime owner moved.
 Normal interactive submissions follow:
 
 ```text
-ChatView -> CliAgentRuntimeClient -> AgentRuntime SDK
-         -> Core owner -> Session / Agent execution / ToolPipeline
+ChatView -> TuiAgentClient -> TuiBackend -> App Server client
+         -> App Server handler -> Agent Runtime owner -> ToolPipeline
 ```
 
-Shared TUI inserts versioned local IPC between `CliAgentRuntimeClient` and the
-same Agent Runtime SDK. It must not create a second product implementation.
-Side-effecting operations need stable identities, controller/idle rules,
-bounded frames, and outcome-unknown handling before a connection can retry.
+Embedded TUI uses an in-memory App Server connection. During the migration,
+Shared TUI uses a CLI Host compatibility adapter that implements `TuiBackend`
+over the private versioned Runtime IPC; the TUI client and controllers must not
+reference that IPC. Replacing the physical Shared transport with App Server
+Pipe/UDS framing belongs to Phase 5. Side-effecting operations need stable
+identities, controller/idle rules, bounded frames, and outcome-unknown handling
+before a connection can retry.
 
 Explicit Shell input follows:
 
@@ -60,7 +63,9 @@ restrictions remain enforced.
 ## TUI rules
 
 - Derive slash commands, palette actions, help, availability, and key bindings
-  from the action registry. Do not add a second command table.
+  from the action registry. Do not add a second command table. Emacs-style
+  editing keys (Ctrl+A/E/K/U, Alt+D/Ctrl+D, undo) are handled by a shared
+  `TextInput::handle_emacs_edit_key` fallback in both chat and startup.
 - Match established competitor entry flows when equivalent behavior exists.
   Prefer OpenCode names and interactions; do not invent `/shell` or aliases for
   the `!` Shell entry.
@@ -71,10 +76,18 @@ restrictions remain enforced.
   keeps chat/shell histories separate, treats `/` as command text, and rejects
   images and structured `@` references before Runtime submission.
 - Direct paste, `Ctrl+V`, and bracketed paste share `ComposerDraft`. Shared TUI
-  rejects unsupported image payloads before IPC.
+  rejects unsupported image payloads before IPC. Prompt stash
+  (`StashStore`, JSONL-persisted) is a separate local-only mechanism and does
+  not enter `ComposerDraft` or Runtime submission.
 - Local effects such as `/editor`, copy, and export stay local. Product work
   such as shell execution, session mutation, and permissions goes through typed
-  Runtime owners.
+  Runtime owners. Session pinning is local-only (persisted to CLI config);
+  model favorite is persisted to backend `AIModelConfig`.
+- Terminal suspend (Unix Ctrl+Z via SIGTSTP/SIGCONT) is handled at the event
+  loop layer before key dispatch. With focused non-empty composer input,
+  Ctrl+D deletes one word forward like Alt+D; with empty input it exits when
+  the current page/runtime state permits. Ctrl+C retains clear/interrupt/exit
+  behavior.
 - Session-lineage membership, order, legacy relationship normalization,
   transcript reads, and targeted cancellation stay in shared Runtime owners.
   TUI may keep only the selector/read-only inspection state and must preserve
@@ -88,6 +101,10 @@ restrictions remain enforced.
 
 - Assemble CLI through `DeliveryProfile::Cli` and validated product Runtime
   parts. Hiding a command is not a backend capability restriction.
+- The CLI selects the reviewed `bitfun-core` owner-feature closure
+  (`agent-runtime`, `canvas-runtime`, `external-sources`, `plugin-runtime`, and
+  `ssh-remote`). Do not replace it with `product-full` or a CLI-named umbrella;
+  add a Core feature only when a production CLI path consumes that owner.
 - CLI consumes typed external-source summaries and actions. It does not parse
   source files, import executable modules, start plugin workers, duplicate
   approval state, or treat static discovery as runtime availability.
@@ -100,6 +117,13 @@ restrictions remain enforced.
 Detailed compatibility rules belong in the dedicated architecture documents,
 not in this file.
 
+## Commands
+
+```bash
+pnpm run cli:dev
+pnpm run cli:install
+```
+
 ## Verification
 
 Run the smallest checks matching the changed path:
@@ -109,14 +133,11 @@ cargo check -p bitfun-cli
 cargo test -p bitfun-cli
 ```
 
-Also run focused owner tests when a surface crosses a shared boundary:
-
-- Agent Runtime port/SDK changes: `cargo test -p bitfun-agent-runtime`
-- Shared IPC/protocol changes: `cargo test -p bitfun-agent-runtime-ipc`
-- Core turn/tool/persistence behavior: the focused `bitfun-core` tests, then
-  the repository shared-Rust verification row
-- terminal lifecycle/input changes: the nearest PTY/ConPTY or input test
-- product/packaging changes: product assembly and archive smoke paths
+When a CLI change crosses a shared boundary, use the focused command maintained
+by that owner: Agent Runtime for port/SDK behavior, the IPC adapter for shared
+protocol behavior, Core for turn/tool/persistence behavior, Terminal for
+PTY/ConPTY lifecycle, and Product Assembly for packaging. Do not copy those
+owners' commands into this guide.
 
 Use [`README.md`](README.md) for user-facing behavior and installation. Keep
 developer internals here or in architecture docs instead of expanding the user

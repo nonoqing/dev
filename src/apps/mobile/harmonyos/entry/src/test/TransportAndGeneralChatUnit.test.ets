@@ -1,7 +1,7 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { RemoteI18n } from '../main/ets/i18n/RemoteI18n';
 import { ChatSessionController, ChatSessionSnapshot } from '../main/ets/services/ChatSessionController';
-import { ChatComposerPolicy } from '../main/ets/services/ChatComposerPolicy';
+import { ChatComposerPolicy, ComposerPrimaryAction } from '../main/ets/services/ChatComposerPolicy';
 import { ChatTimelineItem, ChatTimelineProjector } from '../main/ets/services/ChatTimelineProjector';
 import { ChatTimelineStore } from '../main/ets/services/ChatTimelineStore';
 import { ConversationEvent } from '../main/ets/services/ConversationEvent';
@@ -20,10 +20,13 @@ import { GeneralChatCommandClient, GeneralChatCommandController } from '../main/
 import {
   GeneralChatConfigSnapshot,
   GeneralChatConfigStore,
-  GeneralChatConfigValidator
+  GeneralChatConfigUpdate,
+  GeneralChatConfigValidator,
+  GeneralChatModelSelectionPolicy
 } from '../main/ets/services/general-chat/GeneralChatConfigStore';
 import { GeneralChatDraftController, GeneralChatDraftScheduler } from '../main/ets/services/general-chat/GeneralChatDraftController';
 import { GeneralChatDraftLifecycleController } from '../main/ets/services/general-chat/GeneralChatDraftLifecycleController';
+import { GeneralChatCloudConfigPolicy } from '../main/ets/services/general-chat/GeneralChatCloudConfigPolicy';
 import { GeneralChatEventMapper } from '../main/ets/services/general-chat/GeneralChatEventMapper';
 import { GeneralChatExportFormatter } from '../main/ets/services/general-chat/GeneralChatExportFormatter';
 import {
@@ -50,6 +53,7 @@ import { ModelProviderSseParser } from '../main/ets/services/general-chat/ModelP
 import { MockGeneralChatAdapter } from '../main/ets/services/general-chat/MockGeneralChatAdapter';
 import { MarkdownParser } from '../main/ets/services/MarkdownParser';
 import { RemoteCommandFactory } from '../main/ets/services/RemoteCommandFactory';
+import { toRemoteQuestionAnswer } from '../main/ets/pages/components/ConversationUiModels';
 import { RemoteCrypto, RemoteCryptoCipher } from '../main/ets/services/RemoteCrypto';
 import { RemoteDescriptorParser } from '../main/ets/services/RemoteDescriptorParser';
 import { RemoteActivityLifecycleController } from '../main/ets/services/RemoteActivityLifecycleController';
@@ -82,6 +86,7 @@ import {
 import { VoiceInputCallbacks, VoiceInputService } from '../main/ets/services/VoiceInputService';
 import { AppShellState } from '../main/ets/pages/state/AppShellState';
 import { GeneralChatPageState } from '../main/ets/pages/state/GeneralChatPageState';
+import { SettingsController } from '../main/ets/pages/viewmodel/SettingsController';
 import { RemotePageState } from '../main/ets/pages/state/RemotePageState';
 import { ConversationViewState } from '../main/ets/pages/state/ConversationViewState';
 import {
@@ -213,6 +218,54 @@ function modelProviderRecordedResponse(statusCode: number, body: string): ModelP
   response.statusCode = statusCode;
   response.body = body;
   return response;
+}
+
+class InMemorySettingsConfigStore extends GeneralChatConfigStore {
+  snapshotResult: GeneralChatConfigSnapshot = {
+    apiUrl: '',
+    modelName: '',
+    hasApiKey: false
+  };
+  accessTokenResult: string = '';
+  modelCatalogResults: RemoteModelCatalog[] = [];
+  modelCatalogCalls: number = 0;
+  saveRequests: GeneralChatConfigUpdate[] = [];
+  selectLocalModelCalls: number = 0;
+
+  async snapshot(): Promise<GeneralChatConfigSnapshot> {
+    return this.snapshotResult;
+  }
+
+  async save(update: GeneralChatConfigUpdate): Promise<GeneralChatConfigSnapshot> {
+    this.saveRequests.push(update);
+    this.snapshotResult = {
+      apiUrl: update.apiUrl.trim(),
+      modelName: update.modelName.trim(),
+      hasApiKey: !update.clearApiKey
+    };
+    return this.snapshotResult;
+  }
+
+  async accessToken(): Promise<string> {
+    return this.accessTokenResult;
+  }
+
+  async modelCatalog(): Promise<RemoteModelCatalog> {
+    const index = Math.min(this.modelCatalogCalls, this.modelCatalogResults.length - 1);
+    this.modelCatalogCalls += 1;
+    if (index >= 0) {
+      return this.modelCatalogResults[index];
+    }
+    return { version: 1, models: [], default_models: {} };
+  }
+
+  async selectLocalModel(): Promise<void> {
+    this.selectLocalModelCalls += 1;
+  }
+
+  async activeSnapshot(): Promise<GeneralChatConfigSnapshot> {
+    return this.snapshotResult;
+  }
 }
 
 export default function transportAndGeneralChatUnitTest() {
@@ -532,6 +585,21 @@ export default function transportAndGeneralChatUnitTest() {
       expect(messages.length).assertEqual(1);
       expect(messages[0].status).assertEqual('sent');
     });
+
+    it('does not persist assistant retry detail after an interrupted turn', 0, async () => {
+      const localStore = new FakeGeneralChatLocalStore();
+      const repository = new GeneralChatRepository(new MockGeneralChatAdapter(), localStore);
+      const session = await repository.createSession('中断恢复');
+      const interrupted = chatMessage('assistant-failed-1', 'assistant', 'Partial reply', 'failed');
+      interrupted.detail = 'Retry prompt';
+
+      await repository.recordAssistantMessage(session.id, interrupted);
+
+      const messages = await repository.messages(session.id);
+      expect(messages[0].status).assertEqual('failed');
+      expect(messages[0].detail || '').assertEqual('');
+      expect((await localStore.loadMessages(session.id))[0].detail || '').assertEqual('');
+    });
   });
 
   describe('GeneralChatExportFormatter', () => {
@@ -652,6 +720,39 @@ export default function transportAndGeneralChatUnitTest() {
       expect(ChatComposerPolicy.canSend('运行任务', 0, false, true, 'connected')).assertEqual(true);
       expect(ChatComposerPolicy.canSend('运行任务', 0, false, true, 'reconnecting')).assertEqual(true);
     });
+
+    it('lets a draft outrank a running turn where the message can be handed over', 0, () => {
+      expect(ChatComposerPolicy.primaryAction('追加要求', 0, false, false, true, true, true, 'connected', true))
+        .assertEqual(ComposerPrimaryAction.Send);
+      expect(ChatComposerPolicy.primaryAction('', 0, false, false, true, true, true, 'connected', true))
+        .assertEqual(ComposerPrimaryAction.Stop);
+    });
+
+    it('keeps a running turn in front of the draft where nothing queues it', 0, () => {
+      expect(ChatComposerPolicy.primaryAction('追加要求', 0, true, false, true, false, false, 'connected', true))
+        .assertEqual(ComposerPrimaryAction.Stop);
+      expect(ChatComposerPolicy.primaryAction('', 0, true, false, true, false, false, 'connected', true))
+        .assertEqual(ComposerPrimaryAction.Stop);
+    });
+
+    it('keeps dictation in front of the draft it is still writing', 0, () => {
+      expect(ChatComposerPolicy.primaryAction('说到一半', 0, false, true, false, true, true, 'connected', true))
+        .assertEqual(ComposerPrimaryAction.Stop);
+      expect(ChatComposerPolicy.primaryAction('说到一半', 0, false, true, true, true, true, 'connected', true))
+        .assertEqual(ComposerPrimaryAction.Stop);
+    });
+
+    it('still shows a draft it cannot carry as blocked rather than idle', 0, () => {
+      expect(ChatComposerPolicy.primaryAction('断线时写的', 0, false, false, true, true, true, 'failed', true))
+        .assertEqual(ComposerPrimaryAction.SendBlocked);
+    });
+
+    it('offers dictation only once no turn is running and no draft exists', 0, () => {
+      expect(ChatComposerPolicy.primaryAction('', 0, false, false, false, true, true, 'connected', true))
+        .assertEqual(ComposerPrimaryAction.Voice);
+      expect(ChatComposerPolicy.primaryAction('', 0, false, false, false, true, true, 'connected', false))
+        .assertEqual(ComposerPrimaryAction.Idle);
+    });
   });
 
   describe('GeneralChatApiClient', () => {
@@ -728,6 +829,133 @@ export default function transportAndGeneralChatUnitTest() {
       }, false);
       expect(urlError).assertEqual('API URL 必须以 http:// 或 https:// 开头。');
       expect(keyError).assertEqual('请输入 API Key。');
+    });
+  });
+
+  describe('SettingsController', () => {
+    it('tests model configuration with the stored key when the form keeps it unchanged', 0, async () => {
+      const store = new InMemorySettingsConfigStore();
+      store.snapshotResult = {
+        apiUrl: 'https://chat.example.com',
+        modelName: 'model-a',
+        hasApiKey: true
+      };
+      store.accessTokenResult = ' stored-key ';
+      let probedApiKey = '';
+      const controller = new SettingsController(store, new GeneralChatPageState(), {
+        probeConfiguration: async (_apiUrl: string, apiKey: string, _modelName: string): Promise<void> => {
+          probedApiKey = apiKey;
+        }
+      });
+
+      const error = await controller.test('https://chat.example.com', '', 'model-a', false);
+
+      expect(error).assertEqual('');
+      expect(probedApiKey).assertEqual('stored-key');
+    });
+
+    it('saves the first local model and projects its catalog into page state', 0, async () => {
+      const store = new InMemorySettingsConfigStore();
+      store.modelCatalogResults = [
+        { version: 1, models: [], default_models: {} },
+        {
+          version: 2,
+          models: [{
+            id: 'local-general-chat',
+            name: 'model-a',
+            provider: 'local',
+            base_url: 'https://chat.example.com',
+            model_name: 'model-a',
+            enabled: true,
+            capabilities: ['text_chat']
+          }],
+          default_models: { primary: 'local-general-chat' },
+          session_model_id: 'local-general-chat'
+        }
+      ];
+      const state = new GeneralChatPageState();
+      const controller = new SettingsController(store, state, {
+        probeConfiguration: async (_apiUrl: string, _apiKey: string, _modelName: string): Promise<void> => {
+        }
+      });
+
+      const error = await controller.save(
+        'https://chat.example.com', 'new-key', 'model-a', false
+      );
+
+      expect(error).assertEqual('');
+      expect(store.saveRequests.length).assertEqual(1);
+      expect(store.selectLocalModelCalls).assertEqual(1);
+      expect(state.apiUrl).assertEqual('https://chat.example.com');
+      expect(state.conversation.selectedModelId).assertEqual('local-general-chat');
+      expect(state.serviceState).assertEqual(GeneralChatServiceState.Ready);
+    });
+  });
+
+  describe('GeneralChatModelSelectionPolicy', () => {
+    it('keeps an existing cloud selection when a local model is saved', 0, () => {
+      const shouldActivateLocal = GeneralChatModelSelectionPolicy.shouldActivateSavedLocalModel({
+        version: 4,
+        models: [{
+          id: 'cloud:account-model',
+          name: 'Account model',
+          provider: 'openai',
+          base_url: 'https://chat.example.com/v1',
+          model_name: 'account-model',
+          enabled: true,
+          capabilities: []
+        }],
+        default_models: { primary: 'cloud:account-model' },
+        session_model_id: 'cloud:account-model'
+      });
+
+      expect(shouldActivateLocal).assertFalse();
+    });
+
+    it('activates the first saved local model when no model was previously available', 0, () => {
+      const shouldActivateLocal = GeneralChatModelSelectionPolicy.shouldActivateSavedLocalModel({
+        version: 1,
+        models: [],
+        default_models: {}
+      });
+
+      expect(shouldActivateLocal).assertTrue();
+    });
+  });
+
+  describe('GeneralChatCloudConfigPolicy', () => {
+    it('orders the primary model first while retaining other compatible account models', 0, () => {
+      const payload = '{"config":{"ai":{"default_models":{"primary":"primary-model"},"models":[' +
+        '{"id":"fallback-model","provider":"openai","model_name":"fallback","base_url":"https://fallback.example.com/v1","api_key":"fallback-key","enabled":true,"category":"general_chat"},' +
+        '{"id":"primary-model","provider":"openai","model_name":"primary","base_url":"https://primary.example.com/v1/","api_key":"primary-key","enabled":true,"category":"code_specialized"}' +
+        ']}}}';
+
+      const models = GeneralChatCloudConfigPolicy.models(payload);
+
+      expect(models.length).assertEqual(2);
+      expect(models[0].modelId).assertEqual('cloud:primary-model');
+      expect(models[0].apiUrl).assertEqual('https://primary.example.com/v1');
+      expect(models[0].modelName).assertEqual('primary');
+      expect(models[0].apiKey).assertEqual('primary-key');
+      expect(models[1].modelId).assertEqual('cloud:fallback-model');
+    });
+
+    it('skips subscription models and adapts an Anthropic general-chat endpoint', 0, () => {
+      const payload = '{"ai":{"default_models":{"primary":"subscription-model"},"models":[' +
+        '{"id":"subscription-model","provider":"openai","model_name":"codex","base_url":"https://subscription.example.com","api_key":"unused","enabled":true,"category":"general_chat","auth":{"type":"subscription"}},' +
+        '{"id":"anthropic-model","provider":"anthropic","model_name":"claude","base_url":"https://api.anthropic.com/","api_key":"anthropic-key","enabled":true,"category":"general_chat"}' +
+        ']}}';
+
+      const selected = GeneralChatCloudConfigPolicy.selectModel(payload);
+
+      expect(selected?.modelId).assertEqual('cloud:anthropic-model');
+      expect(selected?.apiUrl).assertEqual('https://api.anthropic.com/v1/messages');
+    });
+
+    it('returns no model for malformed or unusable cloud settings', 0, () => {
+      const unusable = '{"ai":{"models":[{"id":"disabled","enabled":false,"base_url":"https://api.example.com","model_name":"model","api_key":"key"}]}}';
+      expect(GeneralChatCloudConfigPolicy.models('{not-json').length).assertEqual(0);
+      expect(GeneralChatCloudConfigPolicy.models(unusable).length).assertEqual(0);
     });
   });
 
@@ -1009,13 +1237,24 @@ export default function transportAndGeneralChatUnitTest() {
 
     it('builds tool and file commands', 0, () => {
       const answers: RemoteQuestionAnswerPayload = { answer: 'yes', '0': 'yes' };
+      const multipleAnswers: RemoteQuestionAnswerPayload = { '0': 'yes', '1': ['tests', 'docs'] };
 
       expectCommandJson(RemoteCommandFactory.confirmTool('tool-1'), '{"cmd":"confirm_tool","tool_id":"tool-1"}');
       expectCommandJson(RemoteCommandFactory.rejectTool('tool-1', 'no'), '{"cmd":"reject_tool","tool_id":"tool-1","reason":"no"}');
       expectCommandJson(RemoteCommandFactory.cancelTool('tool-1', 'stop'), '{"cmd":"cancel_tool","tool_id":"tool-1","reason":"stop"}');
       expectCommandJson(RemoteCommandFactory.answerQuestion('tool-2', answers), '{"cmd":"answer_question","tool_id":"tool-2","answers":{"0":"yes","answer":"yes"}}');
+      expectCommandJson(RemoteCommandFactory.answerQuestion('tool-3', multipleAnswers), '{"cmd":"answer_question","tool_id":"tool-3","answers":{"0":"yes","1":["tests","docs"]}}');
       expectCommandJson(RemoteCommandFactory.getFileInfo('/tmp/a.txt', 's1'), '{"cmd":"get_file_info","path":"/tmp/a.txt","session_id":"s1"}');
       expectCommandJson(RemoteCommandFactory.readFileChunk('/tmp/a.txt', 12, 64, 's1'), '{"cmd":"read_file_chunk","path":"/tmp/a.txt","offset":12,"limit":64,"session_id":"s1"}');
+    });
+
+    it('preserves indexed question answers when dispatching from the UI', 0, () => {
+      const answers = toRemoteQuestionAnswer({ '0': 'tests', '1': ['docs', 'src'] });
+
+      expectCommandJson(
+        RemoteCommandFactory.answerQuestion('tool-4', answers),
+        '{"cmd":"answer_question","tool_id":"tool-4","answers":{"0":"tests","1":["docs","src"]}}'
+      );
     });
   });
 

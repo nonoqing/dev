@@ -10,9 +10,11 @@ import {
   Square,
 } from 'lucide-react';
 import { DotMatrixLoader, IconButton } from '@/component-library';
+import { PresenceBoundary } from '@/component-library/components/PresenceBoundary';
 import { sessionAPI, type SessionLineageSnapshot } from '@/infrastructure/api/service-api/SessionAPI';
 import { getAppearanceOverlayHost } from '@/infrastructure/appearance';
 import { computeFixedPopoverPosition } from '@/shared/utils/fixedPopoverViewport';
+import { useAnchoredPopoverPosition } from '@/shared/utils/useAnchoredPopoverPosition';
 import { flowChatStore } from '../../store/FlowChatStore';
 import {
   buildSessionLineageTree,
@@ -65,6 +67,7 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
   t,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [keyboardNavigationOpen, setKeyboardNavigationOpen] = useState(false);
   const [snapshot, setSnapshot] = useState<SessionLineageSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -74,6 +77,8 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
   const [openActionSessionId, setOpenActionSessionId] = useState<string | null>(null);
   const [cancellingSessionIds, setCancellingSessionIds] = useState<Set<string>>(new Set());
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const actionMenuAnchorRef = useRef<HTMLButtonElement | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const requestGenerationRef = useRef(0);
@@ -116,6 +121,7 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
   useEffect(() => {
     requestGenerationRef.current += 1;
     setIsOpen(false);
+    setKeyboardNavigationOpen(false);
     setSnapshot(null);
     setLoadFailed(false);
     setExpandedSessionIds(new Set());
@@ -124,6 +130,28 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
     setCancellingSessionIds(new Set());
     setActionMenuPosition(null);
   }, [sessionId]);
+
+  const closePopover = useCallback((source: 'keyboard' | 'pointer' | 'selection') => {
+    const activeElement = document.activeElement;
+    const focusIsInside = Boolean(
+      activeElement
+      && (
+        panelRef.current?.contains(activeElement)
+        || actionMenuRef.current?.contains(activeElement)
+      ),
+    );
+
+    if (source === 'pointer') {
+      setKeyboardNavigationOpen(false);
+    }
+    if (source === 'keyboard' || source === 'selection' || focusIsInside) {
+      triggerRef.current?.focus();
+    }
+
+    setIsOpen(false);
+    setOpenActionSessionId(null);
+    setActionMenuPosition(null);
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -148,16 +176,16 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
     const handlePointerDown = (event: MouseEvent) => {
       if (
         !containerRef.current?.contains(event.target as Node) &&
+        !panelRef.current?.contains(event.target as Node) &&
         !actionMenuRef.current?.contains(event.target as Node)
       ) {
-        setIsOpen(false);
-        setOpenActionSessionId(null);
+        closePopover('pointer');
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setIsOpen(false);
-        setOpenActionSessionId(null);
+        event.preventDefault();
+        closePopover('keyboard');
       }
     };
     document.addEventListener('mousedown', handlePointerDown);
@@ -166,7 +194,7 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
       document.removeEventListener('mousedown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen]);
+  }, [closePopover, isOpen]);
 
   const updateActionMenuPosition = useCallback(() => {
     const anchor = actionMenuAnchorRef.current;
@@ -208,6 +236,20 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
     );
   }, [liveRevision, sessionId, snapshot]);
   const descendantCount = countSessionLineageDescendants(tree);
+  const panelLayout = useAnchoredPopoverPosition({
+    open: isOpen,
+    anchorRef: triggerRef,
+    popoverRef: panelRef,
+    preferredPlacement: 'bottom',
+    alignment: 'end',
+    gap: 8,
+    layoutRevision: `${descendantCount}:${isLoading}:${loadFailed}`,
+  });
+  const retainedPanelLayoutRef = useRef(panelLayout);
+  if (panelLayout) {
+    retainedPanelLayoutRef.current = panelLayout;
+  }
+  const renderedPanelLayout = panelLayout ?? retainedPanelLayoutRef.current;
 
   useEffect(() => {
     if (!tree) return;
@@ -253,9 +295,8 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
       isRoot: node.isRoot,
     } satisfies SessionTreeSelection;
     onSelectSession?.(selection);
-    setIsOpen(false);
-    setOpenActionSessionId(null);
-  }, [onSelectSession]);
+    closePopover('selection');
+  }, [closePopover, onSelectSession]);
 
   const handleActionMenuToggle = useCallback((
     event: React.MouseEvent<HTMLButtonElement>,
@@ -430,6 +471,7 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
       data-bf-part="sessionTree"
     >
       <IconButton
+        ref={triggerRef}
         className={[
           'session-tree-popover__trigger',
           isOpen && 'session-tree-popover__trigger--active',
@@ -443,7 +485,18 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
         ].filter(Boolean).join(' ') || undefined}
         variant="ghost"
         size="xs"
-        onClick={() => setIsOpen(open => !open)}
+        onClick={(event) => {
+          const nextOpen = !isOpen;
+          if (nextOpen) {
+            setKeyboardNavigationOpen(event.detail === 0);
+            setIsOpen(true);
+          } else {
+            if (event.detail !== 0) {
+              setKeyboardNavigationOpen(false);
+            }
+            closePopover(event.detail === 0 ? 'keyboard' : 'pointer');
+          }
+        }}
         tooltip={panelLabel}
         aria-label={panelLabel}
         aria-expanded={isOpen}
@@ -459,13 +512,25 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
         </span>
       </IconButton>
 
-      {isOpen ? (
-        <div
+      <PresenceBoundary active={isOpen}>
+        {createPortal(
+          <div
+          ref={panelRef}
           className="session-tree-popover__panel"
           data-bf-component="flow-chat-header"
           data-bf-part="sessionTreePanel"
+          data-bf-placement={renderedPanelLayout?.placement ?? 'bottom'}
+          data-open={isOpen ? 'true' : 'false'}
+          data-keyboard-open={keyboardNavigationOpen ? 'true' : 'false'}
           role="dialog"
           aria-label={panelLabel}
+          aria-hidden={!isOpen}
+          {...(!isOpen ? { inert: '' } : {})}
+          style={{
+            top: `${renderedPanelLayout?.top ?? 0}px`,
+            left: `${renderedPanelLayout?.left ?? 0}px`,
+            visibility: renderedPanelLayout ? 'visible' : 'hidden',
+          }}
         >
           <div
             className="session-tree-popover__header"
@@ -523,8 +588,10 @@ export const SessionTreePopover: React.FC<SessionTreePopoverProps> = ({
               </div>
             ) : null}
           </div>
-        </div>
-      ) : null}
+          </div>,
+          getAppearanceOverlayHost(),
+        )}
+      </PresenceBoundary>
     </div>
   );
 };

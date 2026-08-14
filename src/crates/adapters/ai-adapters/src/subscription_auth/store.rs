@@ -495,18 +495,12 @@ fn open_store_lock_file(path: &Path) -> Result<File> {
         ));
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .with_context(|| {
-                format!(
-                    "restrict subscription credential transaction lock permissions {}",
-                    path.display()
-                )
-            })?;
-    }
+    bitfun_services_core::path_utils::set_mode(path, 0o600).with_context(|| {
+        format!(
+            "restrict subscription credential transaction lock permissions {}",
+            path.display()
+        )
+    })?;
     Ok(file)
 }
 

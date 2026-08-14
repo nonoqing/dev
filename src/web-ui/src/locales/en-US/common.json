@@ -77,6 +77,7 @@
       "sessions": "Sessions",
       "project": "Directory",
       "persona": "Assistant",
+      "todos": "Todos",
       "agents": "Agents",
       "skills": "Skills",
       "tools": "Tools",
@@ -87,6 +88,7 @@
     },
     "tooltips": {
       "persona": "Assistant — create and manage all assistant instances",
+      "todos": "Todos — every scheduled task, by list and calendar",
       "agents": "Which agents it can call",
       "skills": "What it knows — specialized knowledge files",
       "tools": "What it can use — built-in tools & MCP services",
@@ -107,6 +109,10 @@
       "empty": "No results found",
       "sessionSearchHintDefault": "Type a keyword to search sessions in open workspaces",
       "sessionWorkspaceHint": "in {{workspace}}"
+    },
+    "githubStar": {
+      "label": "Star",
+      "tooltip": "Star BitFun on GitHub"
     },
     "displayModes": {
       "pro": "Expert Mode",
@@ -174,6 +180,8 @@
       "newExternalAgentSessionShort": "{{agentName}} Session",
       "newClawSession": "New Claw session",
       "newPrimaryAssistantSession": "New primary assistant session",
+      "chooseAssistant": "Choose assistant",
+      "newAssistantSessionFor": "New session with {{assistantName}}",
       "modeCode": "Code",
       "modeCowork": "Cowork",
       "noSessions": "No sessions",
@@ -276,7 +284,7 @@
         "enabledHint": "Enable this job",
         "scheduleKind": "Schedule type",
         "at": "Run at",
-        "everyMs": "Interval (minutes)",
+        "everyMs": "Interval",
         "anchorMs": "Anchor time (optional)",
         "cronExpr": "Cron expression",
         "timezone": "Timezone (optional)",
@@ -301,9 +309,13 @@
         "cron": "Cron"
       },
       "scheduleSummary": {
-        "every": "Every {{everyMinutes}} minutes",
         "cron": "Cron: {{expr}}",
-        "cronWithTz": "Cron: {{expr}} · {{tz}}"
+        "cronWithTz": "Cron: {{expr}} · {{tz}}",
+        "everyUnit": {
+          "minute": "Every {{value}} minutes",
+          "hour": "Every {{value}} hours",
+          "day": "Every {{value}} days"
+        }
       },
       "targets": {
         "session": "Session",
@@ -350,6 +362,11 @@
         "promptRequired": "Please enter the job prompt",
         "workspaceRequired": "Please enter a workspace path",
         "sessionRequired": "Please select a session"
+      },
+      "intervalUnits": {
+        "minute": "Minutes",
+        "hour": "Hours",
+        "day": "Days"
       }
     },
     "workspaces": {
@@ -648,6 +665,11 @@
     "checkPortOwned": "In use by this host's BitFun relay",
     "relayPort": "Relay port",
     "relayPortHint": "Default is 9700. If busy, pick a free port and allow it in your cloud security group.",
+    "mirrorMode": "Download and image route",
+    "mirrorModeAuto": "Auto-detect (recommended)",
+    "mirrorModeCn": "Mainland China acceleration",
+    "mirrorModeGlobal": "Global official sources",
+    "mirrorModeHint": "Auto mode detects the server's network region, using GHCR accelerators in mainland China and official GHCR elsewhere. Override it when cloud IP geolocation is inaccurate.",
     "portConflictTitle": "Port {{port}} is already in use",
     "portConflictDesc": "Change the port above; the check refreshes automatically. Deploy will use your selected port.",
     "portInvalid": "Enter a valid port between 1 and 65535",
@@ -658,6 +680,7 @@
     "installDocker": "Install Docker Automatically",
     "installingDocker": "Installing Docker… Enter sudo password in the terminal if prompted.",
     "dockerInstallFailed": "Docker installation failed. Check the terminal or install manually.",
+    "dockerAutoInstallHint": "Not installed — one-click deploy will install Docker first",
     "dockerManualHint": "Docker is required. Install it manually, then re-check.",
     "interactiveTerminalHint": "Deployment uses an interactive terminal: you can enter sudo passwords there. Closing this window stops the remote task.",
     "openingTerminal": "Opening remote terminal…",
@@ -668,7 +691,7 @@
     "redeploy": "Redeploy",
     "startDeploy": "Start Deployment",
     "deployingTitle": "Deploying relay server…",
-    "deployingHint": "Use the terminal below for sudo prompts and live output. The first build can take several minutes. Closing this window stops the remote deploy.",
+    "deployingHint": "One-click deploy installs Docker when needed, pulls the signed Relay image through the selected route, and starts it. Use the terminal for sudo prompts. Closing this window stops the remote deploy.",
     "waitingRemoteOutput": "Waiting for remote output…",
     "deploySucceeded": "Deployment succeeded",
     "deployFailed": "Deployment failed",
@@ -1161,6 +1184,7 @@
     "browser": "Browser",
     "insights": "Insights",
     "assistant": "Assistant",
+    "todos": "Todos",
     "shell": "Shell",
     "panelView": "Panel View"
   },
@@ -1460,7 +1484,7 @@
   },
   "dispatch": {
     "configureTitle": "Run on {{target}}",
-    "configureSubtitle": "Choose what to send and how this task should handle permission requests.",
+    "configureSubtitle": "Choose the code to send. Model and permission handling stay in the composer, exactly as for a local session.",
     "readinessTitle": "Target check",
     "checkingTarget": "Checking target…",
     "probeFailed": "Could not check this target. Make sure it is online and the connection works.",
@@ -1475,38 +1499,28 @@
     "includeUncommittedHint": "Only Git-visible changes are sent. Ignored files, including local .env files and build output, stay on this device.",
     "cliStatus": "$t(shared:product.name)",
     "cliReady": "Ready ({{version}})",
-    "cliWillInstall": "Will be prepared when the task starts",
+    "cliCanDeploy": "Ready for one-click setup",
+    "installingCli": "Installing BitFun CLI…",
+    "provisioningDaemon": "Syncing the account and starting the service…",
+    "cancellingPreparation": "Cancelling setup…",
     "cliUpdateRequired": "Needs an update before it can run tasks",
     "cliUnavailable": "BitFun is not installed on this target",
     "deviceUpdateRequired": "Update BitFun on this device, then check again.",
-    "modelStatus": "Model",
-    "modelMatchesLocal": "Ready. Default: {{model}}",
-    "modelDiffersFromLocal": "Ready. {{count}} model(s) are available; settings differ from this device.",
-    "modelReadyCount": "Ready. {{count}} model(s) are available.",
-    "modelAutomatic": "Target default",
-    "modelCheckPending": "Will be checked after BitFun is ready",
-    "modelMissing": "No usable model is configured on the target",
-    "modelMissingOnBoth": "No usable model is configured here or on the target. Add a model in Settings first.",
-    "syncModelDescription": "Copies this device's model settings and API credentials to the target, replacing its current model settings.",
-    "syncModelConfirmTitle": "Sync model configuration to this target?",
-    "syncModelConfirmMessage": "This device's model settings and API credentials will be written to the target user's BitFun configuration, replacing its current model settings.",
-    "syncModelConfirm": "Sync",
-    "syncingModel": "Syncing…",
-    "syncModelFailed": "Could not sync model settings. Check the target connection and try again.",
-    "installAutomaticDescription": "When you send the task, BitFun will prepare this target automatically. No manual installation is needed.",
+    "oneClickDeploy": "Set up BitFun",
+    "oneClickDeployDescription": "Installs the signature-verified BitFun CLI. If this device is signed in, it also syncs the current account and starts an auto-start service.",
+    "prepareSucceededWithAccount": "BitFun CLI is installed, the account was synced securely, and the persistent service is connected.",
+    "prepareSucceededCliOnly": "BitFun CLI is installed. Account sync was skipped because this device is signed out; SSH Dispatch tasks still run as persistent background processes.",
+    "prepareFailed": "BitFun setup did not complete. Failed account and service changes are cleaned up on a best-effort basis; check the target connection or service manager and try again.",
+    "prepareCancelled": "Setup was cancelled.",
+    "prepareCancelFailed": "Setup could not be cancelled. Check the target status again shortly.",
+    "cancelPreparation": "Cancel setup",
+    "retryProvision": "Retry account service",
+    "retryProvisionDescription": "The CLI is ready. Retry only the secure account sync and persistent service setup.",
     "installUnavailable": "No compatible BitFun package is available for this target, so it cannot run tasks. Pick another target, or install BitFun on it yourself and check again.",
     "installDetails": "Installation details",
     "version": "Version",
     "downloadUrl": "Source",
     "integrity": "Integrity check",
-    "approvalTitle": "Permission requests",
-    "approvalHint": "Choose how this task should handle actions that need confirmation.",
-    "approvalReject": "Reject automatically",
-    "approvalRejectDescription": "Reject the action and explain it in the conversation.",
-    "approvalRemote": "Ask this device",
-    "approvalRemoteDescription": "Pause the task and wait for you to decide here.",
-    "approvalAuto": "Approve automatically",
-    "approvalAutoDescription": "Allow requested actions without asking. Use only on a target you trust.",
     "useTarget": "Use this target",
     "cancel": "Cancel",
     "eventHistoryIncomplete": "Some task history is no longer available. The visible conversation may be incomplete.",
@@ -1536,5 +1550,14 @@
   },
   "collapse": "Collapse",
   "expand": "Expand",
-  "retry": "Retry"
+  "retry": "Retry",
+  "dateTimeField": {
+    "label": "Date and time",
+    "openPicker": "Open the date picker",
+    "pickerLabel": "Choose a date",
+    "previousMonth": "Previous month",
+    "nextMonth": "Next month",
+    "now": "Now",
+    "close": "Close"
+  }
 }

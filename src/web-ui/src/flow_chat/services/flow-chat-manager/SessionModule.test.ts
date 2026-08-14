@@ -342,7 +342,7 @@ describe('createChatSession', () => {
     expect(agentApiMocks.createSession).toHaveBeenCalledTimes(1);
   });
 
-  it('snapshots the current mode model into a newly created session', async () => {
+  it('projects the runtime-resolved model for a newly created session', async () => {
     configManagerMocks.getConfigs.mockImplementation(async (paths: string[]) => {
       if (paths.length === 1 && paths[0] === 'ai.agent_model_defaults') {
         return { 'ai.agent_model_defaults': { mode: 'model-b' } };
@@ -356,13 +356,16 @@ describe('createChatSession', () => {
     const { context, flowChatStore } = createContext(createSession({
       workspacePath: '/home/wsp/projects/Test',
     }));
+    agentApiMocks.createSession.mockResolvedValueOnce({
+      sessionId: 'created-1',
+      modelId: 'model-b',
+    });
 
     await createChatSession(context, { workspacePath: '/home/wsp/projects/Test' }, 'agentic');
 
     expect(agentApiMocks.createSession).toHaveBeenCalledWith(expect.objectContaining({
       config: expect.objectContaining({
-        modelName: 'model-b',
-        maxContextTokens: 64000,
+        modelName: undefined,
       }),
     }));
     expect(flowChatStore.createSession).toHaveBeenCalledWith(
@@ -391,6 +394,10 @@ describe('createChatSession', () => {
     const { context, flowChatStore } = createContext(createSession({
       workspacePath: '/home/wsp/projects/Test',
     }));
+    agentApiMocks.createSession.mockResolvedValueOnce({
+      sessionId: 'created-1',
+      modelId: 'model-a',
+    });
 
     await createChatSession(context, {
       workspacePath: '/home/wsp/projects/Test',
@@ -400,7 +407,6 @@ describe('createChatSession', () => {
     expect(agentApiMocks.createSession).toHaveBeenCalledWith(expect.objectContaining({
       config: expect.objectContaining({
         modelName: 'model-a',
-        maxContextTokens: 32000,
       }),
     }));
     expect(flowChatStore.createSession).toHaveBeenCalledWith(
@@ -1294,6 +1300,24 @@ describe('SessionModule historical session coordination', () => {
     expect(context.flowChatStore.getState().sessions.get('history-1')).toMatchObject({
       contextRestoreState: 'failed',
     });
+  });
+
+  it('does not recreate metadata-only non-empty history when context restore fails', async () => {
+    const { context } = createContext(createSession({
+      isHistorical: false,
+      historyState: 'ready',
+      contextRestoreState: 'pending',
+      dialogTurns: [],
+      totalTurnCount: 23,
+    } as any));
+    agentApiMocks.ensureCoordinatorSession.mockRejectedValueOnce(
+      new Error('Session metadata not found')
+    );
+
+    await expect(ensureBackendSession(context, 'history-1')).rejects.toThrow();
+
+    expect(agentApiMocks.ensureCoordinatorSession).toHaveBeenCalledTimes(1);
+    expect(agentApiMocks.createSession).not.toHaveBeenCalled();
   });
 
   it('does not recreate a session that another BitFun instance is writing', async () => {

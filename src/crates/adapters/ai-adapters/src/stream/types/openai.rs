@@ -149,6 +149,10 @@ impl OpenAISSEData {
         self.choices.is_empty()
     }
 
+    pub fn has_usage(&self) -> bool {
+        self.usage.is_some()
+    }
+
     pub fn first_choice_tool_call_count(&self) -> usize {
         self.choices
             .first()

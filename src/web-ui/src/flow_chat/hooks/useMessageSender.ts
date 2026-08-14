@@ -21,10 +21,17 @@ import { createLogger } from '@/shared/utils/logger';
 import { formatContextForPrompt } from '@/shared/utils/contextPrompt';
 import { buildImagePayload } from '../utils/imagePayload';
 import {
+  FLOWCHAT_MESSAGE_SUBMITTED_EVENT,
+  type FlowChatMessageSubmittedRequest,
+} from '../events/flowchatNavigation';
+import {
   composerPresentationSessionReferences,
   type ComposerPresentation,
 } from '../utils/composerPresentation';
-import type { AgentDialogTurnExecution } from '@/infrastructure/api/service-api/AgentAPI';
+import type {
+  AgentDialogTurnExecution,
+  SessionPermissionMode,
+} from '@/infrastructure/api/service-api/AgentAPI';
 
 const log = createLogger('FlowChat');
 
@@ -53,6 +60,14 @@ interface UseMessageSenderProps {
     message: string;
     contextIds: string[];
   }) => void;
+  /**
+   * One-off permission mode armed for the next submission only. It outranks the
+   * session's own mode for that turn and is never persisted, so the session
+   * returns to its own selection afterwards.
+   */
+  turnPermissionMode?: SessionPermissionMode | null;
+  /** Disarms the one-off mode once a submission has carried it. */
+  onTurnPermissionModeConsumed?: () => void;
 }
 
 interface UseMessageSenderReturn {
@@ -79,6 +94,8 @@ export function useMessageSender(props: UseMessageSenderProps): UseMessageSender
     currentAgentType,
     onSessionConflictRetryStart,
     onSessionConflictRetrySuccess,
+    turnPermissionMode,
+    onTurnPermissionModeConsumed,
   } = props;
 
   const sendMessage = useCallback(async (
@@ -152,12 +169,15 @@ export function useMessageSender(props: UseMessageSenderProps): UseMessageSender
           remoteSshHost: context.remoteSshHost,
         }));
       const userMessageMetadata =
-        options?.composerPresentation || sessionReferences.length > 0
+        options?.composerPresentation || sessionReferences.length > 0 || turnPermissionMode
           ? {
               ...(options?.composerPresentation
                 ? { composerPresentation: options.composerPresentation }
                 : {}),
               ...(sessionReferences.length > 0 ? { sessionReferences } : {}),
+              // Read by the coordinator as the turn layer of
+              // `turn -> session -> global default`.
+              ...(turnPermissionMode ? { permission_mode: turnPermissionMode } : {}),
             }
           : undefined;
       let imagePayload: Awaited<ReturnType<typeof buildImagePayload>>;
@@ -223,9 +243,25 @@ export function useMessageSender(props: UseMessageSenderProps): UseMessageSender
 
       onClearContexts();
 
+      // The one-off mode belongs to the submission that just left, not to the
+      // next one the user types.
+      if (turnPermissionMode) {
+        onTurnPermissionModeConsumed?.();
+      }
+
       onExitTemplateMode?.();
 
       onSuccess?.(trimmedMessage);
+      /*
+       * The transcript may be showing a history window this Turn is not in, and
+       * only the submission knows that showing it was asked for. Announced
+       * rather than returned: the composer and the transcript are siblings, and
+       * every host that sends through this hook gets the behaviour.
+       */
+      window.dispatchEvent(new CustomEvent<FlowChatMessageSubmittedRequest>(
+        FLOWCHAT_MESSAGE_SUBMITTED_EVENT,
+        { detail: { sessionId } },
+      ));
       log.info('Message sent successfully', {
         sessionId,
         agentType: agentTypeForSend,
@@ -250,6 +286,8 @@ export function useMessageSender(props: UseMessageSenderProps): UseMessageSender
     currentAgentType,
     onSessionConflictRetryStart,
     onSessionConflictRetrySuccess,
+    turnPermissionMode,
+    onTurnPermissionModeConsumed,
   ]);
 
   return {

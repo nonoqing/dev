@@ -50,22 +50,25 @@ Self-Hosted entries must open `RelayDeployWizard`, not an external README.
 - Use `useI18n(namespace)` for route or feature copy so non-bootstrap
   namespaces stay lazy. Direct `i18nService.t(...)` calls require bootstrap
   namespace coverage.
+- Stable DOM selectors and E2E-facing attributes follow
+  [`docs/development/ui-testids.md`](../../docs/development/ui-testids.md);
+  do not derive test IDs from localized or presentation-only text.
 - Follow `src/web-ui/LOGGING.md`: English only, no emojis, structured logs
 
 ## Commands
 
-These are command references, not the default precheck list. Use Verification
-below for PR scope.
+Keep development/build entry points here. Verification commands are maintained
+only in the section below.
 
 ```bash
 pnpm --dir src/web-ui dev
-pnpm --dir src/web-ui run lint
-pnpm --dir src/web-ui run type-check
-pnpm --dir src/web-ui run test:run     # broad suite; prefer focused paths locally
-pnpm run i18n:contract:test
-pnpm run i18n:audit
 pnpm run build:web                     # build-impacting changes / CI reproduction
 ```
+
+`pnpm run build:web` runs type-check and Vite concurrently; either error may
+appear first and their output uses `[type-check]` / `[vite-build]` prefixes.
+Set `VITE_USE_POLLING=1` only when native file events miss changes, typically on
+a network drive or WSL mount.
 
 ## Verification
 
@@ -75,10 +78,14 @@ Choose the smallest matching check:
 pnpm run i18n:audit
 pnpm run i18n:generate && pnpm run i18n:contract:test && pnpm run i18n:audit
 pnpm run type-check:web && pnpm --dir src/web-ui run test:run src/infrastructure/i18n/core/I18nService.test.ts
+pnpm run motion:audit
 pnpm run type-check:web
 ```
 
 Use the first line for resource-only locale changes, the second for
 contract/shared-term changes, the third for i18n runtime/namespace-loading
-changes, and the fourth for ordinary Web UI code. Rely on CI for full lint,
-build, and broad test coverage unless the local change specifically needs it.
+changes, the fourth for presentation or interaction-motion changes, and the
+fifth for ordinary Web UI code. The motion audit is an intent-review inventory,
+not a pass/fail gate; do not mechanically replace deliberate layout transitions
+or animate virtualized content. Rely on CI for full lint, build, and broad test
+coverage unless the local change specifically needs it.

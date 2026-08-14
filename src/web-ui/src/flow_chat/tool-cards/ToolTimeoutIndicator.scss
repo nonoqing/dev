@@ -1,3 +1,5 @@
+@use '../../component-library/styles/tokens' as tokens;
+
 .tool-timeout-indicator {
   display: inline-flex;
   align-items: center;
@@ -95,7 +97,12 @@
   font-weight: 500;
   letter-spacing: 0.01em;
   line-height: var(--bf-appearance-token-flowchat-compact-line-height);
-  transition: all 0.15s ease;
+  transition:
+    scale 120ms cubic-bezier(0.23, 1, 0.32, 1),
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    opacity 150ms ease;
 
   svg {
     width: 12px;
@@ -126,17 +133,19 @@
 }
 
 .timeout-extend-popover {
-  position: absolute;
-  right: 0;
-  top: calc(100% + var(--bf-appearance-token-flowchat-inline-gap));
-  z-index: 10;
+  position: fixed;
+  z-index: tokens.$z-popover;
+  box-sizing: border-box;
   width: max-content;
-  max-width: 150px;
+  max-width: min(150px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   padding: var(--bf-appearance-token-flowchat-inline-gap) 0;
   border-radius: 6px;
   background: var(--bf-appearance-token-color-bg-elevated);
   border: 1px solid var(--bf-appearance-token-border-base);
   box-shadow: 0 4px 12px var(--bf-appearance-token-color-overlay-black-15);
+  font-family: var(--bf-appearance-token-font-family-sans);
 }
 
 .timeout-extend-option {

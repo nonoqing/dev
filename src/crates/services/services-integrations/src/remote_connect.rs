@@ -23,6 +23,7 @@ mod relay_http;
 pub mod session_store;
 pub mod sync_state;
 
+use bitfun_core_types::{ModelsDevReasoningCatalog, ProviderCatalog, ReasoningCatalogProjection};
 use bitfun_events::AgenticEvent;
 use bitfun_runtime_ports::{
     AgentInputAttachment, AgentSessionCreateRequest, AgentSubmissionRequest, AgentSubmissionSource,
@@ -69,6 +70,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
 
 pub(crate) fn bitfun_home_dir() -> Option<PathBuf> {
     std::env::var_os("BITFUN_HOME")
@@ -1155,11 +1164,12 @@ pub fn remote_session_created_response(session_id: impl Into<String>) -> RemoteR
 
 pub fn remote_session_model_updated_response(
     session_id: impl Into<String>,
-    model_id: impl Into<String>,
+    selection: RemoteSessionModelSelection,
 ) -> RemoteResponse {
     RemoteResponse::SessionModelUpdated {
         session_id: session_id.into(),
-        model_id: model_id.into(),
+        model_id: selection.model_id,
+        reasoning_preset: selection.reasoning_preset,
     }
 }
 
@@ -1194,11 +1204,12 @@ pub trait RemoteSessionRuntimeHost: Send + Sync {
         &self,
         session_id: Option<&str>,
     ) -> Result<RemoteModelCatalog, String>;
-    async fn update_session_model(
+    async fn update_session_model_selection(
         &self,
         session_id: &str,
         model_id: &str,
-    ) -> Result<String, String>;
+        reasoning_preset: Option<Option<&str>>,
+    ) -> Result<RemoteSessionModelSelection, String>;
     async fn ensure_session_loaded(&self, session_id: &str) -> Result<(), String>;
     async fn update_session_title(&self, session_id: &str, title: &str) -> Result<String, String>;
     async fn resolve_session_storage_dir(&self, session_id: &str) -> Option<PathBuf>;
@@ -1346,10 +1357,16 @@ where
         RemoteCommand::SetSessionModel {
             session_id,
             model_id,
-        } => match host.update_session_model(session_id, model_id).await {
-            Ok(normalized_model_id) => {
-                remote_session_model_updated_response(session_id.clone(), normalized_model_id)
-            }
+            reasoning_preset,
+        } => match host
+            .update_session_model_selection(
+                session_id,
+                model_id,
+                reasoning_preset.as_ref().map(|preset| preset.as_deref()),
+            )
+            .await
+        {
+            Ok(selection) => remote_session_model_updated_response(session_id.clone(), selection),
             Err(message) => RemoteResponse::Error { message },
         },
         RemoteCommand::UpdateSessionTitle { session_id, title } => {
@@ -1573,7 +1590,7 @@ pub struct RemoteDefaultModelsConfig {
     pub speech_recognition: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RemoteModelConfig {
     pub id: String,
     pub name: String,
@@ -1584,22 +1601,25 @@ pub struct RemoteModelConfig {
     pub context_window: Option<u32>,
     pub enabled: bool,
     pub capabilities: Vec<String>,
-    pub enable_thinking_process: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_budget_tokens: Option<u32>,
+    pub reasoning: Option<ReasoningCatalogProjection>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RemoteModelCatalog {
     pub version: u64,
     pub models: Vec<RemoteModelConfig>,
+    #[serde(default)]
+    pub provider_catalog: ProviderCatalog,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_dev_reasoning_catalog: Option<ModelsDevReasoningCatalog>,
     pub default_models: RemoteDefaultModelsConfig,
+    #[serde(default)]
+    pub reasoning_preset_selection_supported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_reasoning_preset: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1629,26 +1649,7 @@ impl RemoteModelCapabilityFact {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RemoteReasoningModeFact {
-    Default,
-    Enabled,
-    Disabled,
-    Adaptive,
-}
-
-impl RemoteReasoningModeFact {
-    const fn wire_value(self) -> &'static str {
-        match self {
-            RemoteReasoningModeFact::Default => "default",
-            RemoteReasoningModeFact::Enabled => "enabled",
-            RemoteReasoningModeFact::Disabled => "disabled",
-            RemoteReasoningModeFact::Adaptive => "adaptive",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RemoteModelFacts {
     pub id: String,
     pub name: String,
@@ -1658,23 +1659,37 @@ pub struct RemoteModelFacts {
     pub context_window: Option<u32>,
     pub enabled: bool,
     pub capabilities: Vec<RemoteModelCapabilityFact>,
-    pub enable_thinking_process: bool,
-    pub reasoning_mode: Option<RemoteReasoningModeFact>,
-    pub reasoning_effort: Option<String>,
-    pub thinking_budget_tokens: Option<u32>,
+    pub reasoning: Option<ReasoningCatalogProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteModelCatalogFacts {
+    pub last_modified_ms: i64,
+    pub source_version: Option<u64>,
+    pub models: Vec<RemoteModelFacts>,
+    pub provider_catalog: ProviderCatalog,
+    pub models_dev_reasoning_catalog: Option<ModelsDevReasoningCatalog>,
+    pub default_models: RemoteDefaultModelsConfig,
+    pub session_model_id: Option<String>,
+    pub session_reasoning_preset: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteModelCatalogFacts {
-    pub last_modified_ms: i64,
-    pub models: Vec<RemoteModelFacts>,
-    pub default_models: RemoteDefaultModelsConfig,
-    pub session_model_id: Option<String>,
+pub struct RemoteSessionModelSelection {
+    pub model_id: String,
+    pub reasoning_preset: Option<String>,
 }
 
 pub fn build_remote_model_catalog(facts: RemoteModelCatalogFacts) -> RemoteModelCatalog {
+    let version = catalog_version(
+        facts.last_modified_ms,
+        facts.source_version,
+        &facts.provider_catalog.revision,
+        facts.session_model_id.as_deref(),
+        facts.session_reasoning_preset.as_deref(),
+    );
     RemoteModelCatalog {
-        version: facts.last_modified_ms.max(0) as u64,
+        version,
         models: facts
             .models
             .into_iter()
@@ -1691,17 +1706,55 @@ pub fn build_remote_model_catalog(facts: RemoteModelCatalogFacts) -> RemoteModel
                     .into_iter()
                     .map(|capability| capability.wire_value().to_string())
                     .collect(),
-                enable_thinking_process: model.enable_thinking_process,
-                reasoning_mode: model
-                    .reasoning_mode
-                    .map(|reasoning_mode| reasoning_mode.wire_value().to_string()),
-                reasoning_effort: model.reasoning_effort,
-                thinking_budget_tokens: model.thinking_budget_tokens,
+                reasoning: model.reasoning,
             })
             .collect(),
+        provider_catalog: facts.provider_catalog,
+        models_dev_reasoning_catalog: facts.models_dev_reasoning_catalog,
         default_models: facts.default_models,
+        reasoning_preset_selection_supported: true,
         session_model_id: facts.session_model_id,
+        session_reasoning_preset: facts.session_reasoning_preset,
     }
+}
+
+fn catalog_version(
+    last_modified_ms: i64,
+    source_version: Option<u64>,
+    provider_catalog_revision: &str,
+    session_model_id: Option<&str>,
+    session_reasoning_preset: Option<&str>,
+) -> u64 {
+    const MAX_SAFE_JAVASCRIPT_INTEGER: u64 = (1_u64 << 53) - 1;
+    let config_version = last_modified_ms.max(0) as u64;
+    let mut version = match source_version {
+        Some(source_version) => config_version ^ source_version.rotate_left(17),
+        None => config_version,
+    };
+    if !provider_catalog_revision.is_empty() {
+        version ^= stable_selection_hash(Some(provider_catalog_revision), None).rotate_left(11);
+    }
+    if session_model_id.is_some() || session_reasoning_preset.is_some() {
+        version ^=
+            stable_selection_hash(session_model_id, session_reasoning_preset).rotate_left(29);
+    }
+    version & MAX_SAFE_JAVASCRIPT_INTEGER
+}
+
+fn stable_selection_hash(model_id: Option<&str>, reasoning_preset: Option<&str>) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in model_id
+        .unwrap_or_default()
+        .bytes()
+        .chain(std::iter::once(0))
+        .chain(reasoning_preset.unwrap_or_default().bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 pub fn normalize_remote_session_model_id(model_id: Option<&str>) -> Option<String> {
@@ -1745,7 +1798,7 @@ pub fn normalize_remote_model_selection(
         .ok_or_else(|| format!("Unknown model selection: {requested_model_id}"))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RemoteModelCatalogPollDelta {
     pub changed: bool,
     pub catalog: Option<RemoteModelCatalog>,
@@ -2127,6 +2180,8 @@ pub enum RemoteCommand {
     SetSessionModel {
         session_id: String,
         model_id: String,
+        #[serde(default, deserialize_with = "deserialize_present_nullable")]
+        reasoning_preset: Option<Option<String>>,
     },
     UpdateSessionTitle {
         session_id: String,
@@ -2195,6 +2250,27 @@ pub enum RemoteCommand {
     /// relay device APIs directly. Answered by the host runtime; other hosts
     /// return an error response.
     GetDelegatedIdentity,
+    /// Ask the paired desktop to mint a *full* account device credential for a
+    /// separate device that cannot type a password (a watch). The desktop calls
+    /// the relay's `/api/auth/provision-device` with its own device token, then
+    /// returns the minted credential together with the account master key over
+    /// this already-encrypted room channel. The relay never sees the master key.
+    ///
+    /// Unlike `GetDelegatedIdentity` this yields a 30-day full credential rather
+    /// than a 24-hour delegated one, because the provisioned device is a primary
+    /// surface and cannot re-authenticate on its own when the token lapses.
+    ///
+    /// `request_id` is minted by the device being provisioned, not by the
+    /// desktop, so that a retry anywhere along the watch → phone → desktop chain
+    /// replays one idempotent relay request instead of registering a second
+    /// device. Answered by the host runtime; other hosts return an error
+    /// response.
+    ProvisionPeerDevice {
+        /// 32 lowercase hex characters; the relay rejects any other shape.
+        device_id: String,
+        device_name: String,
+        request_id: String,
+    },
     Ping,
 
     // ── Device-to-device distributed control ──────────────────────────────
@@ -2295,6 +2371,7 @@ pub enum RemoteResponse {
     SessionModelUpdated {
         session_id: String,
         model_id: String,
+        reasoning_preset: Option<String>,
     },
     SessionTitleUpdated {
         session_id: String,
@@ -2413,6 +2490,16 @@ pub enum RemoteResponse {
     /// Delegated account identity for a paired room-channel client.
     /// `master_key` is base64-encoded; `device_id` is the delegating host.
     DelegateIdentity {
+        token: String,
+        user_id: String,
+        master_key: String,
+        device_id: String,
+    },
+    /// A full account device credential minted for a paired client's peer
+    /// device. `master_key` is base64-encoded; `device_id` echoes the *newly
+    /// provisioned* device, not the delegating host — the opposite of
+    /// `DelegateIdentity`, whose `device_id` names the desktop.
+    PeerDeviceProvisioned {
         token: String,
         user_id: String,
         master_key: String,
@@ -2546,6 +2633,12 @@ where
         // for hosts that cannot delegate an account identity.
         RemoteCommand::GetDelegatedIdentity => RemoteResponse::Error {
             message: "Delegated identity is not available on this host".to_string(),
+        },
+
+        // Same contract as GetDelegatedIdentity above: the host runtime owns the
+        // account credentials and answers before dispatch reaches this router.
+        RemoteCommand::ProvisionPeerDevice { .. } => RemoteResponse::Error {
+            message: "Device provisioning is not available on this host".to_string(),
         },
 
         RemoteCommand::SendSessionToDevice { .. }
@@ -3551,6 +3644,7 @@ mod tests {
     struct FakeSessionHost {
         created_requests: Mutex<Vec<AgentSessionCreateRequest>>,
         list_identities: Mutex<Vec<RemoteSessionWorkspaceIdentity>>,
+        model_updates: Mutex<Vec<(String, String, Option<Option<String>>)>>,
         removed_trackers: Mutex<Vec<String>>,
         history_error: Option<String>,
     }
@@ -3605,17 +3699,30 @@ mod tests {
             Ok(RemoteModelCatalog {
                 version: 1,
                 models: Vec::new(),
+                provider_catalog: Default::default(),
+                models_dev_reasoning_catalog: None,
                 default_models: RemoteDefaultModelsConfig::default(),
+                reasoning_preset_selection_supported: true,
                 session_model_id: None,
+                session_reasoning_preset: None,
             })
         }
 
-        async fn update_session_model(
+        async fn update_session_model_selection(
             &self,
-            _session_id: &str,
+            session_id: &str,
             model_id: &str,
-        ) -> Result<String, String> {
-            Ok(model_id.to_string())
+            reasoning_preset: Option<Option<&str>>,
+        ) -> Result<RemoteSessionModelSelection, String> {
+            self.model_updates.lock().unwrap().push((
+                session_id.to_string(),
+                model_id.to_string(),
+                reasoning_preset.map(|preset| preset.map(ToOwned::to_owned)),
+            ));
+            Ok(RemoteSessionModelSelection {
+                model_id: model_id.to_string(),
+                reasoning_preset: reasoning_preset.flatten().map(ToOwned::to_owned),
+            })
         }
 
         async fn ensure_session_loaded(&self, _session_id: &str) -> Result<(), String> {
@@ -3743,6 +3850,38 @@ mod tests {
         assert_eq!(
             created_requests[0].remote_ssh_host.as_deref(),
             Some("host-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_session_handler_forwards_and_returns_reasoning_preset() {
+        let host = FakeSessionHost::default();
+
+        let response = handle_remote_session_command(
+            &host,
+            &RemoteCommand::SetSessionModel {
+                session_id: "session-a".to_string(),
+                model_id: "model-1".to_string(),
+                reasoning_preset: Some(Some("high".to_string())),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            RemoteResponse::SessionModelUpdated {
+                session_id: "session-a".to_string(),
+                model_id: "model-1".to_string(),
+                reasoning_preset: Some("high".to_string()),
+            }
+        );
+        assert_eq!(
+            host.model_updates.lock().unwrap().as_slice(),
+            [(
+                "session-a".to_string(),
+                "model-1".to_string(),
+                Some(Some("high".to_string())),
+            )]
         );
     }
 

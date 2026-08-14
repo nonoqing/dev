@@ -44,6 +44,7 @@ pub(super) struct ConversationSelectorState {
     visible: bool,
     title: &'static str,
     confirm_label: &'static str,
+    pending_delete_id: Option<String>,
 }
 
 impl ConversationSelectorState {
@@ -54,6 +55,7 @@ impl ConversationSelectorState {
             visible: false,
             title,
             confirm_label,
+            pending_delete_id: None,
         }
     }
 
@@ -116,6 +118,14 @@ impl ConversationSelectorState {
             .map(|point| point.id.clone())
     }
 
+    pub(super) fn set_pending_delete_id(&mut self, id: Option<String>) {
+        self.pending_delete_id = id;
+    }
+
+    pub(super) fn pending_delete_id(&self) -> Option<&str> {
+        self.pending_delete_id.as_deref()
+    }
+
     pub(super) fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if !self.visible {
             return;
@@ -132,15 +142,38 @@ impl ConversationSelectorState {
             height,
         };
         let preview_width = width.saturating_sub(16) as usize;
+        let has_pending_delete = self.pending_delete_id.is_some();
         let items = self.points.iter().map(|point| {
+            let is_pending_delete = self
+                .pending_delete_id
+                .as_deref()
+                .is_some_and(|id| id == point.id);
+            let title = if is_pending_delete {
+                "Press ctrl+d again to confirm".to_string()
+            } else {
+                one_line_preview(&point.title, preview_width)
+            };
+            let title_style = if is_pending_delete {
+                theme.style(StyleKind::Error)
+            } else {
+                theme.style(StyleKind::Primary)
+            };
             ListItem::new(Line::from(vec![
-                Span::styled(
-                    one_line_preview(&point.title, preview_width),
-                    theme.style(StyleKind::Primary),
-                ),
+                Span::styled(title, title_style),
                 Span::styled(format!("  {}", point.footer), theme.style(StyleKind::Muted)),
             ]))
         });
+        let highlight_style = if has_pending_delete {
+            Style::default()
+                .bg(theme.error)
+                .fg(theme.selection_foreground())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .bg(theme.primary)
+                .fg(theme.selection_foreground())
+                .add_modifier(Modifier::BOLD)
+        };
         let list = List::new(items.collect::<Vec<_>>())
             .block(
                 Block::default()
@@ -149,23 +182,22 @@ impl ConversationSelectorState {
                     .style(Style::default().bg(theme.background))
                     .title(format!(" {} ", self.title)),
             )
-            .highlight_style(
-                Style::default()
-                    .bg(theme.primary)
-                    .fg(theme.selection_foreground())
-                    .add_modifier(Modifier::BOLD),
-            );
+            .highlight_style(highlight_style);
         frame.render_widget(Clear, popup);
         frame.render_stateful_widget(list, popup, &mut self.list_state);
 
         let hint_y = popup.y + popup.height;
         if hint_y < area.y + area.height {
-            frame.render_widget(
-                Paragraph::new(format!(
-                    " Up/Down: Navigate  Enter: {}  Esc: Close ",
+            let hint_label = if has_pending_delete {
+                " Up/Down: Navigate  Ctrl+D: Delete  Esc: Close ".to_string()
+            } else {
+                format!(
+                    " Up/Down: Navigate  Enter: {}  Ctrl+D: Delete  Esc: Close ",
                     self.confirm_label
-                ))
-                .style(theme.style(StyleKind::Muted)),
+                )
+            };
+            frame.render_widget(
+                Paragraph::new(hint_label).style(theme.style(StyleKind::Muted)),
                 Rect {
                     x: popup.x,
                     y: hint_y,

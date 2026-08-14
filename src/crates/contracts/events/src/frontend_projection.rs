@@ -266,6 +266,7 @@ pub fn project_agentic_frontend_event(event: AgenticEvent) -> Option<AgenticFron
             max_context_tokens,
             is_subagent,
             cached_tokens,
+            reasoning_tokens,
             token_details,
         } => Some(AgenticFrontendEvent::new(
             "agentic://token-usage-updated",
@@ -280,6 +281,7 @@ pub fn project_agentic_frontend_event(event: AgenticEvent) -> Option<AgenticFron
                 "maxContextTokens": max_context_tokens,
                 "isSubagent": is_subagent,
                 "cachedTokens": cached_tokens,
+                "reasoningTokens": reasoning_tokens,
                 "tokenDetails": token_details,
             }),
         )),
@@ -313,6 +315,7 @@ pub fn project_agentic_frontend_event(event: AgenticEvent) -> Option<AgenticFron
             has_summary,
             summary_source,
             applied,
+            ..
         } => Some(AgenticFrontendEvent::new(
             "agentic://context-compression-completed",
             json!({
@@ -334,6 +337,7 @@ pub fn project_agentic_frontend_event(event: AgenticEvent) -> Option<AgenticFron
             turn_id,
             compression_id,
             error,
+            ..
         } => Some(AgenticFrontendEvent::new(
             "agentic://context-compression-failed",
             json!({
@@ -375,6 +379,18 @@ pub fn project_agentic_frontend_event(event: AgenticEvent) -> Option<AgenticFron
                 "sessionId": session_id,
                 "previousModelId": previous_model_id,
                 "newModelId": new_model_id,
+                "reason": reason,
+            }),
+        )),
+        AgenticEvent::SessionReasoningPresetAutoCleared {
+            session_id,
+            previous_preset_id,
+            reason,
+        } => Some(AgenticFrontendEvent::new(
+            "agentic://session-reasoning-preset-auto-cleared",
+            json!({
+                "sessionId": session_id,
+                "previousPresetId": previous_preset_id,
                 "reason": reason,
             }),
         )),
@@ -469,7 +485,10 @@ pub fn project_agentic_frontend_event(event: AgenticEvent) -> Option<AgenticFron
                 "displayContent": display_content,
             }),
         )),
-        AgenticEvent::SystemError { .. } => None,
+        AgenticEvent::SystemError { .. }
+        | AgenticEvent::SessionOperationCompleted { .. }
+        | AgenticEvent::PermissionEvaluationCompleted { .. }
+        | AgenticEvent::PermissionConfirmationCompleted { .. } => None,
     }
 }
 
@@ -537,6 +556,7 @@ mod tests {
             session_id: "session-1".to_string(),
             turn_id: "turn-1".to_string(),
             compression_id: "compression-1".to_string(),
+            trigger: "manual".to_string(),
             compression_count: 1,
             tokens_before: 100,
             tokens_after: 100,
@@ -563,6 +583,10 @@ mod tests {
             success: Some(true),
             finish_reason: Some("stop".to_string()),
             has_final_response: Some(true),
+            first_result_ms: None,
+            modified_file_count: None,
+            added_lines: None,
+            deleted_lines: None,
         })
         .expect("projected");
 
@@ -711,5 +735,39 @@ mod tests {
         assert_eq!(projected.event_name, "session_title_generated");
         assert_eq!(projected.payload["sessionId"], "session-1");
         assert!(projected.payload["timestamp"].as_i64().is_some());
+    }
+
+    #[test]
+    fn internal_observability_event_is_not_frontend_visible_or_session_routed() {
+        let event = AgenticEvent::SessionOperationCompleted {
+            operation: crate::SafeSessionOperation::Resume,
+            session_class: crate::SafeSessionClass::Standard,
+            remote: false,
+            outcome: crate::SafeOperationOutcome::Completed,
+            error_type: None,
+            duration_ms: 4,
+        };
+
+        assert_eq!(event.session_id(), None);
+        assert_eq!(project_agentic_frontend_event(event), None);
+    }
+
+    #[test]
+    fn reasoning_preset_auto_clear_projects_canonical_auto_transition() {
+        let projected =
+            project_agentic_frontend_event(AgenticEvent::SessionReasoningPresetAutoCleared {
+                session_id: "session-1".to_string(),
+                previous_preset_id: "high".to_string(),
+                reason: "reasoning_catalog_updated".to_string(),
+            })
+            .expect("projected");
+
+        assert_eq!(
+            projected.event_name,
+            "agentic://session-reasoning-preset-auto-cleared"
+        );
+        assert_eq!(projected.payload["sessionId"], "session-1");
+        assert_eq!(projected.payload["previousPresetId"], "high");
+        assert_eq!(projected.payload["reason"], "reasoning_catalog_updated");
     }
 }

@@ -20,6 +20,7 @@ before choosing a level.
 | Operational local log | Runtime lifecycle, safe state transitions, degradation, and failures | Safe metadata only; never raw user, model, tool, file, terminal, or protocol content |
 | Scoped local diagnostic | Reproduce a specific problem such as Flow Chat layout or model exchange behavior | Disabled by default, explicitly enabled, narrowly scoped, bounded, and never automatically uploaded |
 | Telemetry | Aggregated operational health across installations | Typed allowlist only; no arbitrary log bodies, attributes, errors, identifiers, paths, or content |
+| Debug sensitive telemetry | Explicitly authorized remote troubleshooting | Closed owner-built records only; may include redacted content, paths, commands, and business IDs through the dedicated bounded channel |
 | User-facing status | Information the user must understand or act on | Use the owning UI, CLI output, or API result rather than a log entry |
 
 Operational logs must never be forwarded wholesale into telemetry. Scoped
@@ -115,7 +116,7 @@ or a support bundle:
 Replace the entire value with a fixed marker such as `[redacted]`. Keeping the
 first or last characters is not redaction.
 
-### Prohibited in Operational Logs and Telemetry
+### Prohibited in Operational Logs and Safe Telemetry
 
 Do not place the following in ordinary logs or telemetry:
 
@@ -129,6 +130,24 @@ Do not place the following in ordinary logs or telemetry:
   data, hostnames, IP addresses, proxy identities, email addresses, and device
   names.
 - Raw third-party errors or stack traces that may echo any of the values above.
+
+The dedicated `TelemetryLevel::Debug` channel is the only remote exception for
+the content, paths, commands, and business IDs listed above. It requires
+separate persisted sensitive-content consent on Desktop or the explicit
+`BITFUN_TELEMETRY_LEVEL=debug` deployment setting on Server/Relay. Its fixed
+record variants are created by the authoritative Turn, Inference, Tool, or
+Approval owner; ordinary log text and public
+events are never projected into it. Known credential shapes are replaced as a
+whole value, but free-text pattern redaction may miss an unknown secret.
+Accounts, emails, organizations, device identity, and credentials remain
+prohibited. Debug records use a separate bounded in-memory queue, are not
+written to a retry file, and are discarded immediately when Debug is lowered
+or disabled.
+
+Each content-bearing field carries its redacted value, original byte size, and
+truncation flag. Content fields share a deterministic per-record budget, and
+the serialized record has a final 256 KiB bound. Recovery remains a terminal
+fact of Inference, Tool, or Compression; it is not a standalone Debug event.
 
 When a scoped local diagnostic genuinely requires private content, it must have
 its own explicit user-facing switch, default to off, state what it captures,
@@ -197,9 +216,14 @@ dropped entries, and can be disabled without changing product behavior.
 
 ## Telemetry Boundary
 
-Telemetry accepts only registered, typed facts. It must not accept arbitrary
-attribute names, message bodies, JSON values, raw errors, business identifiers,
-paths, prompts, tool inputs, or tool outputs.
+Safe Trace, Metric, and Log telemetry accepts only registered, typed facts. It
+must not accept arbitrary attribute names, message bodies, JSON values, raw
+errors, business identifiers, paths, prompts, tool inputs, or tool outputs.
+
+Debug sensitive telemetry uses a separate closed record enum and separate Log
+scope. It does not relax `ValidatedRecord`, `AttributeValue`, the static safe
+attribute allowlist, or Metric labels. There is intentionally no public API for
+arbitrary event names or arbitrary JSON records.
 
 Use finite enums and numeric aggregates to keep cardinality bounded. Stream
 chunks, terminal chunks, token deltas, and file events contribute only to an

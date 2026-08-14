@@ -17,12 +17,12 @@ use std::collections::HashSet;
 use std::path::Path;
 
 impl AgentRegistry {
-    /// Return every effective local subagent definition that can participate in
-    /// product-level external-source conflict resolution. This deliberately
-    /// ignores presentation visibility: a hidden but explicitly addressable
-    /// local agent must still block a same-name external route from being
-    /// selected silently.
-    pub(crate) async fn get_local_subagents_for_external_resolution(
+    /// Return every effective local agent definition that can participate in
+    /// product-level external-source conflict resolution. Main-agent modes and
+    /// subagents share one logical id namespace in external ecosystems, so a
+    /// same-name local definition in either role must prevent silent takeover.
+    #[cfg(feature = "external-sources")]
+    pub(crate) async fn get_local_agents_for_external_resolution(
         &self,
         workspace_root: Option<&Path>,
     ) -> Vec<AgentInfo> {
@@ -140,6 +140,17 @@ impl AgentRegistry {
 
     /// get all mode agent information, used for frontend mode selector etc.
     pub async fn get_modes_info(&self) -> Vec<AgentInfo> {
+        self.get_modes_info_for_workspace(None, false).await
+    }
+
+    /// Return main-agent profiles for one execution workspace. External
+    /// profiles are a workspace projection over the same generation registry
+    /// used by Task; remote/read-only hosts must keep this disabled.
+    pub async fn get_modes_info_for_workspace(
+        &self,
+        workspace_root: Option<&Path>,
+        external_sources_supported: bool,
+    ) -> Vec<AgentInfo> {
         self.ensure_user_custom_agents_loaded().await;
         let map = self.read_agents();
         let mut result: Vec<AgentInfo> = map
@@ -148,6 +159,11 @@ impl AgentRegistry {
             .map(AgentInfo::from_agent_entry)
             .collect();
         drop(map);
+        if external_sources_supported {
+            if let Some(workspace_root) = workspace_root {
+                result = self.apply_external_routes_to_modes(workspace_root, result);
+            }
+        }
         result.sort_by(|a, b| {
             let a_rank = match a.source {
                 AgentSource::Builtin => mode_presentation_rank(&a.id),
@@ -415,14 +431,22 @@ impl AgentRegistry {
     }
 }
 
+#[cfg(feature = "external-sources")]
 fn local_conflict_info(
     entry: &AgentEntry,
     parent_agent_type: Option<&str>,
     project_overrides: Option<&crate::service::config::types::AgentSubagentOverrideConfig>,
     user_overrides: &crate::service::config::types::AgentSubagentOverrideConfig,
 ) -> Option<AgentInfo> {
-    if entry.category != AgentCategory::SubAgent || entry.source == AgentSource::External {
+    if !matches!(
+        entry.category,
+        AgentCategory::Mode | AgentCategory::SubAgent
+    ) || entry.source == AgentSource::External
+    {
         return None;
+    }
+    if entry.category == AgentCategory::Mode {
+        return Some(AgentInfo::from_agent_entry(entry));
     }
     let availability =
         resolve_availability(entry, parent_agent_type, project_overrides, user_overrides);

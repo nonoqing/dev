@@ -244,6 +244,10 @@ impl Sink for GrepSink {
 /// Progress report callback type
 pub type ProgressCallback = Arc<dyn Fn(usize, usize, usize) + Send + Sync>;
 
+/// Function pointer for checking whether a path has multiple hard links.
+/// Injected by Assembly because Execution cannot depend on Services.
+pub type HardLinkChecker = fn(&Path) -> std::io::Result<bool>;
+
 /// grep search options
 #[derive(Debug, Clone)]
 pub struct GrepOptions {
@@ -279,6 +283,9 @@ pub struct GrepOptions {
     pub excluded_paths: Vec<String>,
     /// Reject linked file entries when the caller requires workspace identity.
     pub reject_linked_files: bool,
+    /// Injected hard-link checker. When `reject_linked_files` is true but this
+    /// is `None`, hard-link checks are skipped (files are allowed).
+    pub hard_link_checker: Option<HardLinkChecker>,
 }
 
 impl Default for GrepOptions {
@@ -300,6 +307,7 @@ impl Default for GrepOptions {
             display_base: None,
             excluded_paths: Vec::new(),
             reject_linked_files: false,
+            hard_link_checker: None,
         }
     }
 }
@@ -475,6 +483,12 @@ impl GrepOptions {
 
     pub fn reject_linked_files(mut self, reject: bool) -> Self {
         self.reject_linked_files = reject;
+        self
+    }
+
+    /// Inject a hard-link checker function (provided by Services via Assembly).
+    pub fn hard_link_checker(mut self, checker: HardLinkChecker) -> Self {
+        self.hard_link_checker = Some(checker);
         self
     }
 
@@ -790,7 +804,10 @@ pub fn grep_search(
                     .file_type()
                     .is_some_and(|file_type| file_type.is_symlink());
                 let path_has_multiple_hard_links = options.reject_linked_files
-                    && crate::fs::path_has_multiple_hard_links(path).unwrap_or(true);
+                    && options
+                        .hard_link_checker
+                        .map(|checker| checker(path).unwrap_or(true))
+                        .unwrap_or(false);
                 if options.reject_linked_files && (path_is_symlink || path_has_multiple_hard_links)
                 {
                     continue;
@@ -999,6 +1016,19 @@ mod tests {
         std::os::windows::fs::symlink_file(target, alias).is_ok()
     }
 
+    /// Test-only hard-link checker. Uses `nlink()` from std; only
+    /// compiled on Unix because `tool-execution` no longer depends on
+    /// the `windows` crate for `GetFileInformationByHandle`.
+    #[cfg(unix)]
+    fn test_hard_link_checker(path: &std::path::Path) -> std::io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path)?;
+        if metadata.is_dir() {
+            return Ok(false);
+        }
+        Ok(metadata.nlink() > 1)
+    }
+
     #[test]
     fn truncates_very_long_output_lines() {
         let root = make_temp_dir("truncate");
@@ -1111,6 +1141,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn exact_exclusions_block_file_hard_link_aliases() {
         let root = make_temp_dir("excluded-hard-link");
@@ -1123,7 +1154,8 @@ mod tests {
             GrepOptions::new("linked-review-token", root.to_string_lossy().to_string())
                 .output_mode(OutputMode::FilesWithMatches)
                 .excluded_paths(vec![excluded.to_string_lossy().to_string()])
-                .reject_linked_files(true),
+                .reject_linked_files(true)
+                .hard_link_checker(test_hard_link_checker),
             None,
             None,
         )

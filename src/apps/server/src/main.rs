@@ -1,3 +1,17 @@
+// The app-server's `Builder::on_receive_request(...)` chain monomorphizes
+// into a deeply nested `ChainedHandler<ChainedHandler<…>>` (~20 request
+// handlers plus a dispatch handler). Computing the resulting connection
+// future's layout pushes the trait solver past the default 128 limit, so bump
+// it. Matches the compiler's own suggestion in the overflow diagnostic.
+#![recursion_limit = "256"]
+
+//! Legacy Web Server entrypoint.
+//!
+//! This host was already deprecated before the current App Server refactor.
+//! Refactor work in this app validates protocol and host boundaries; it is not
+//! expected to preserve or complete every legacy Web/Desktop capability, and
+//! it must not be treated as a production-readiness claim.
+
 use anyhow::Result;
 /// BitFun Server
 ///
@@ -15,6 +29,8 @@ use serde::Serialize;
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc};
 use tower_http::cors::CorsLayer;
 
+mod app_server;
+mod bootstrap;
 mod routes;
 
 pub(crate) struct DispatchHostState {
@@ -25,6 +41,10 @@ pub(crate) struct DispatchHostState {
 /// Application state
 #[derive(Clone)]
 pub struct AppState {
+    // NOTE(Step 2a): only read by the external_sources dispatch path, which is
+    // temporarily dead under browser-direct ACP-over-WS. Kept for the follow-up
+    // that brings external_sources onto the app-server schema.
+    #[allow(dead_code)]
     external_workspace_root: Option<PathBuf>,
     allowed_browser_origins: Arc<HashSet<String>>,
     dispatch_host: Option<Arc<DispatchHostState>>,
@@ -71,6 +91,33 @@ async fn main() -> Result<()> {
 
     tracing::info!("BitFun Server v{}", env!("CARGO_PKG_VERSION"));
 
+    let telemetry_data_dir = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("BitFun")
+        .join("server");
+    let telemetry_runtime = bitfun_observability_otel::TelemetryRuntimeHandle::new(
+        bitfun_observability_otel::TelemetryRuntimeMetadata::new(
+            bitfun_observability::TelemetryEntrypoint::Server,
+            telemetry_data_dir,
+        ),
+        Arc::new(bitfun_observability_otel::ReadOnlySecretFileProvider::new(
+            bitfun_observability_otel::telemetry_secret_dir_from_env(),
+        )),
+    );
+    let _telemetry_shutdown = telemetry_runtime.shutdown_guard();
+    let telemetry_level = bitfun_observability_otel::telemetry_level_from_env();
+    let user_telemetry = bitfun_observability::TelemetryUserConfig::with_sensitive_content_consent(
+        telemetry_level,
+        telemetry_level == bitfun_observability::TelemetryLevel::Debug,
+    );
+    if let Err(error) = telemetry_runtime.apply_config(
+        &user_telemetry,
+        &bitfun_observability_otel::TelemetryDeploymentConfig::from_deployment_env(),
+    ) {
+        tracing::warn!("Telemetry is unavailable; effective level is off: {error}");
+    }
+    let startup_observation = telemetry_runtime.startup_guard();
+
     let args = ServerArgs::parse();
     let external_workspace_root = args
         .workspace
@@ -82,6 +129,44 @@ async fn main() -> Result<()> {
                 .map_err(|error| anyhow::anyhow!("Could not open Server workspace: {error}"))
         })
         .transpose()?;
+
+    // Initialize the full agentic stack (coordinator, scheduler, token usage,
+    // MCP/config/filesystem services, event queue). This binding is held alive
+    // for the lifetime of the server so its services outlive every websocket
+    // connection; the app-server client and spawned tasks hold their own Arc
+    // clones of the coordinator, scheduler, and event queue.
+    let server_state = bootstrap::initialize(
+        external_workspace_root
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned()),
+        telemetry_runtime.telemetry(),
+    )
+    .await?;
+
+    // Build the agent runtime the same way the Desktop session application does,
+    // then build an in-process `BitfunAppServer` for it. Each WebSocket
+    // connection is handed straight to `BitfunAppServer::serve` over a WS-bridged
+    // `Lines` transport (browser-direct ACP-over-WS, Step 2), so the browser
+    // connects directly to the in-process app-server over native JSON-RPC — no
+    // shared in-process client, no custom WS envelope.
+    let agent_runtime =
+        bitfun_core::product_runtime::CoreProductAgentRuntime::build_session_surface(
+            server_state.coordinator.clone(),
+            server_state.scheduler.clone(),
+            server_state.token_usage_service.clone(),
+        )
+        .map_err(|error| anyhow::anyhow!("Failed to build agent runtime: {error}"))?;
+    // The event source wraps the same `EventQueue` the coordinator publishes to;
+    // each connection's `serve` main loop subscribes independently and projects
+    // runtime events to the frontend shape before pushing them to the browser.
+    let event_source =
+        bitfun_agent_runtime::sdk::AgentEventSource::new(server_state.event_queue.clone());
+    let bitfun_app_server = app_server::build(agent_runtime, event_source);
+
+    tracing::info!(
+        "App-server ready; each WebSocket connection drives one in-process serve over native JSON-RPC"
+    );
+
     let configured_origins = if args.allowed_origins.is_empty() {
         DEFAULT_ALLOWED_BROWSER_ORIGINS
             .iter()
@@ -139,6 +224,10 @@ async fn main() -> Result<()> {
                 .allow_methods([Method::GET])
                 .allow_origin(cors_origins),
         )
+        // The BitFunAppServer is cloned per WebSocket connection through an axum
+        // Extension (cheap Arc clone); each connection spawns its own `serve`
+        // over a WS-bridged `Lines` transport.
+        .layer(axum::Extension(bitfun_app_server))
         .with_state(app_state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
@@ -151,9 +240,18 @@ async fn main() -> Result<()> {
     );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    startup_observation.complete();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        tracing::warn!("Failed to install Ctrl+C handler");
+    }
 }
 
 pub(crate) fn normalize_browser_origin(value: &str) -> Result<String> {
@@ -231,12 +329,16 @@ mod tests {
             .next()
             .expect("Server production entrypoint");
         assert!(
-            !main_source.contains("bootstrap::initialize"),
-            "the current read-only HTTP shell must not silently start an Agent Runtime"
+            main_source.contains("bootstrap::initialize"),
+            "the Server entrypoint must initialize the Agent Runtime through bootstrap"
+        );
+        assert!(
+            main_source.contains("telemetry_runtime.telemetry()"),
+            "the Server entrypoint must pass the shared telemetry facade into bootstrap"
         );
         assert!(
             main_source.contains("DispatchHostState"),
-            "the lightweight Server Host should expose dispatch without booting an Agent Runtime"
+            "the Server Host should expose dispatch after booting the shared Agent Runtime"
         );
     }
 }

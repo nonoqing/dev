@@ -1,6 +1,9 @@
 import { ConversationUiQuestionAnswer, ConversationUiToolStatus } from './ConversationUiModels';
 import { RemoteI18n } from '../../i18n/RemoteI18n';
-import { ACCENT, CARD, INK, LINE, MUTED, RED } from './Theme';
+import { ToolFileReference, ToolFileReferenceResolver } from '../../services/ToolFileReferenceResolver';
+import { CARD, FILE_LINK, GREEN, INK, LINE, MUTED, RED, SOFT } from './Theme';
+import { ToolGlyph } from './ToolGlyphs';
+import { ToolConfirmationPanel, ToolQuestionAnswerPanel } from './ToolInteractionPanels';
 
 interface QuestionPreview {
   header?: string;
@@ -58,11 +61,8 @@ export struct ToolStatusList {
   @Event onCancelTool: (toolId: string) => void = (_toolId: string) => {};
   @Event onAnswerQuestion: (toolId: string, answers: ConversationUiQuestionAnswer) => void =
     (_toolId: string, _answers: ConversationUiQuestionAnswer) => {};
-  @Local questionAnswerToolId: string = '';
-  @Local questionAnswerText: string = '';
-  @Local toolInputEditToolId: string = '';
-  @Local toolInputEditText: string = '';
-  @Local toolInputEditError: string = '';
+  @Event onOpenFilePreview: (path: string, label: string) => void =
+    (_path: string, _label: string) => {};
   @Local expanded: boolean = false;
   @Local expandedToolKey: string = '';
 
@@ -107,21 +107,23 @@ export struct ToolStatusList {
         this.ToolStatusIcon(tool)
         Text(this.toolLineLabel(tool))
           .fontSize(13)
-          .fontColor(this.hasToolError(tool) ? RED : MUTED)
+          .fontColor(this.hasToolError(tool) ? RED :
+            (this.toolFilePath(tool).length > 0 ? FILE_LINK : MUTED))
           .layoutWeight(1)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .onClick(() => {
+            if (this.toolFilePath(tool).length > 0) {
+              this.openToolFile(tool);
+            } else {
+              this.toggleToolExpanded(tool, index);
+            }
+          })
         this.TrailingChevron(tool, index)
       }
       .width('100%')
       .height(28)
       .alignItems(VerticalAlign.Center)
-      .onClick(() => {
-        if (this.canExpandTool(tool)) {
-          const key = this.toolKey(tool, index);
-          this.expandedToolKey = this.expandedToolKey === key ? '' : key;
-        }
-      })
 
       if (this.canExpandTool(tool) && this.expandedToolKey === this.toolKey(tool, index)) {
         if (this.toolInputPreview(tool).length > 0) {
@@ -133,41 +135,23 @@ export struct ToolStatusList {
       }
 
       if (this.isPendingConfirmation(tool)) {
-        if (this.hasEditableToolInput(tool)) {
-          this.ToolInputEditor(tool)
-        }
-        Row({ space: 8 }) {
-          Text(RemoteI18n.t('chat.approve'))
-            .fontSize(12)
-            .fontColor(CARD)
-            .textAlign(TextAlign.Center)
-            .height(32)
-            .layoutWeight(1)
-            .backgroundColor(ACCENT)
-            .borderRadius(16)
-            .onClick(() => {
-              this.approveToolWithInput(tool);
-            })
-          Text(RemoteI18n.t('chat.reject'))
-            .fontSize(12)
-            .fontColor(INK)
-            .textAlign(TextAlign.Center)
-            .height(32)
-            .layoutWeight(1)
-            .backgroundColor('#F0EFEB')
-            .borderRadius(16)
-            .border({ width: 1, color: LINE })
-            .onClick(() => {
-              this.onRejectTool(tool.id || '');
-            })
-        }
-        .width('100%')
-        .padding({ left: 30 })
+        ToolConfirmationPanel({
+          toolId: tool.id || '',
+          defaultInputText: this.defaultToolInputText(tool),
+          hasEditableInput: this.hasEditableToolInput(tool),
+          onApproveTool: this.onApproveTool,
+          onRejectTool: this.onRejectTool
+        })
       }
       if (this.isQuestionTool(tool)) {
-        this.QuestionAnswer(tool)
+        ToolQuestionAnswerPanel({
+          toolId: tool.id || '',
+          questionsJson: this.questionInputJson(tool),
+          isBusy: this.isBusy,
+          onAnswerQuestion: this.onAnswerQuestion
+        })
       }
-      if (this.isRunningTool(tool)) {
+      if (this.isRunningTool(tool) || this.isQuestionTool(tool)) {
         Row() {
           Blank()
           Text(RemoteI18n.t('chat.cancelTool'))
@@ -176,7 +160,7 @@ export struct ToolStatusList {
             .textAlign(TextAlign.Center)
             .height(32)
             .padding({ left: 14, right: 14 })
-            .backgroundColor('#F0EFEB')
+            .backgroundColor(SOFT)
             .borderRadius(16)
             .border({ width: 1, color: LINE })
             .onClick(() => {
@@ -214,7 +198,14 @@ export struct ToolStatusList {
   @Builder
   TrailingChevron(tool: ConversationUiToolStatus, index: number) {
     if (this.canExpandTool(tool)) {
-      this.ChevronIcon(this.expandedToolKey === this.toolKey(tool, index) ? 'down' : 'right')
+      Stack({ alignContent: Alignment.Center }) {
+        this.ChevronIcon(this.expandedToolKey === this.toolKey(tool, index) ? 'down' : 'right')
+      }
+      .width(32)
+      .height(28)
+      .onClick(() => {
+        this.toggleToolExpanded(tool, index);
+      })
     } else {
       Text('')
         .width(14)
@@ -248,122 +239,12 @@ export struct ToolStatusList {
 
   @Builder
   SummaryTypeSymbol(entry: ToolRenderEntry) {
-    if (entry.searchCount > 0 && entry.readCount === 0) {
-      SymbolGlyph($r('sys.symbol.magnifyingglass'))
-        .fontSize(14)
-        .fontColor([this.summaryTypeColor(entry)])
-        .width(15)
-        .height(15)
-    } else if (entry.readCount > 0 && entry.searchCount === 0) {
-      SymbolGlyph($r('sys.symbol.doc_text'))
-        .fontSize(14)
-        .fontColor([this.summaryTypeColor(entry)])
-        .width(15)
-        .height(15)
-    } else {
-      SymbolGlyph($r('sys.symbol.rectangle_stack'))
-        .fontSize(14)
-        .fontColor([this.summaryTypeColor(entry)])
-        .width(15)
-        .height(15)
-    }
+    ToolGlyph({ kind: this.summaryGlyphKind(entry), color: this.summaryTypeColor(entry) })
   }
 
   @Builder
   ToolTypeSymbol(tool: ConversationUiToolStatus) {
-    if (this.isQuestionLikeTool(tool)) {
-      SymbolGlyph($r('sys.symbol.questionmark_circle'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isTodoTool(tool)) {
-      SymbolGlyph($r('sys.symbol.list_checkmark'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isTaskTool(tool)) {
-      SymbolGlyph($r('sys.symbol.robot'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isGitTool(tool)) {
-      SymbolGlyph($r('sys.symbol.arrow_triangle_merge'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isDeleteTool(tool)) {
-      SymbolGlyph($r('sys.symbol.trash'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isDiffTool(tool)) {
-      SymbolGlyph($r('sys.symbol.doc_text_badge_magnifyingglass'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isPatchTool(tool)) {
-      SymbolGlyph($r('sys.symbol.code_square'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isFileCreateTool(tool)) {
-      SymbolGlyph($r('sys.symbol.doc_text_badge_arrow_up'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isFileMutationTool(tool)) {
-      SymbolGlyph($r('sys.symbol.square_and_pencil'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isFileReadTool(tool)) {
-      if (this.isDirectoryListTool(tool)) {
-        SymbolGlyph($r('sys.symbol.folder'))
-          .fontSize(14)
-          .fontColor([this.toolTypeColor(tool)])
-          .width(15)
-          .height(15)
-      } else {
-        SymbolGlyph($r('sys.symbol.doc_text'))
-          .fontSize(14)
-          .fontColor([this.toolTypeColor(tool)])
-          .width(15)
-          .height(15)
-      }
-    } else if (this.isSearchTool(tool)) {
-      SymbolGlyph($r('sys.symbol.magnifyingglass'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isWebTool(tool)) {
-      SymbolGlyph($r('sys.symbol.link'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else if (this.isCommandTool(tool)) {
-      SymbolGlyph($r('sys.symbol.code_square'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    } else {
-      SymbolGlyph($r('sys.symbol.wrench_and_screwdriver'))
-        .fontSize(14)
-        .fontColor([this.toolTypeColor(tool)])
-        .width(15)
-        .height(15)
-    }
+    ToolGlyph({ kind: this.toolGlyphKind(tool), color: this.toolTypeColor(tool) })
   }
 
   @Builder
@@ -381,76 +262,8 @@ export struct ToolStatusList {
   }
 
   @Builder
-  RunningDotsIcon() {
-    Row({ space: 2 }) {
-      Text('')
-        .width(3.5)
-        .height(3.5)
-        .borderRadius(2)
-        .backgroundColor('#2F80ED')
-      Text('')
-        .width(3.5)
-        .height(3.5)
-        .borderRadius(2)
-        .backgroundColor('#2F80ED')
-      Text('')
-        .width(3.5)
-        .height(3.5)
-        .borderRadius(2)
-        .backgroundColor('#2F80ED')
-    }
-    .width(16)
-    .height(16)
-    .justifyContent(FlexAlign.Center)
-  }
-
-  @Builder
-  AlertCircleIcon(color: string, mark: string) {
-    Text(mark)
-      .width(16)
-      .height(16)
-      .fontSize(10)
-      .fontColor(color)
-      .textAlign(TextAlign.Center)
-      .border({ width: 1.5, color })
-      .borderRadius(8)
-  }
-
-  @Builder
-  NeutralDotIcon() {
-    Stack() {
-      Text('')
-        .width(4)
-        .height(4)
-        .borderRadius(2)
-        .backgroundColor(MUTED)
-        .position({ x: 6, y: 6 })
-    }
-    .width(16)
-    .height(16)
-  }
-
-  @Builder
   ChevronIcon(direction: string) {
-    if (direction === 'right') {
-      SymbolGlyph($r('sys.symbol.chevron_right'))
-        .fontSize(18)
-        .fontColor([MUTED])
-        .width(14)
-        .height(14)
-    } else if (direction === 'up') {
-      SymbolGlyph($r('sys.symbol.chevron_up'))
-        .fontSize(18)
-        .fontColor([MUTED])
-        .width(14)
-        .height(14)
-    } else {
-      SymbolGlyph($r('sys.symbol.chevron_down'))
-        .fontSize(18)
-        .fontColor([MUTED])
-        .width(14)
-        .height(14)
-    }
+    ToolGlyph({ kind: `chevron_${direction}`, color: MUTED })
   }
 
   @Builder
@@ -469,99 +282,6 @@ export struct ToolStatusList {
     }
     .width('100%')
     .padding({ left: 30, top: 2 })
-  }
-
-  @Builder
-  ToolInputEditor(tool: ConversationUiToolStatus) {
-    Column({ space: 6 }) {
-      Row() {
-        Text(RemoteI18n.t('chat.toolInput'))
-          .fontSize(11)
-          .fontColor(MUTED)
-        Blank()
-        Text(RemoteI18n.t('chat.reset'))
-          .fontSize(11)
-          .fontColor(MUTED)
-          .onClick(() => {
-            this.toolInputEditToolId = tool.id || '';
-            this.toolInputEditText = this.defaultToolInputText(tool);
-            this.toolInputEditError = '';
-          })
-      }
-      .width('100%')
-      TextArea({ placeholder: RemoteI18n.t('chat.editJsonInput'), text: this.toolInputTextForTool(tool) })
-        .height(96)
-        .fontSize(12)
-        .fontColor(INK)
-        .lineHeight(17)
-        .backgroundColor('#FBFAF7')
-        .borderRadius(14)
-        .padding(10)
-        .border({ width: 1, color: this.toolInputErrorForTool(tool.id || '').length > 0 ? RED : LINE })
-        .defaultFocus(false)
-        .enabled(true)
-        .onChange((value: string) => {
-          this.toolInputEditToolId = tool.id || '';
-          this.toolInputEditText = value;
-          this.toolInputEditError = '';
-        })
-      if (this.toolInputErrorForTool(tool.id || '').length > 0) {
-        Text(this.toolInputErrorForTool(tool.id || ''))
-          .fontSize(11)
-          .fontColor(RED)
-      }
-    }
-    .width('100%')
-    .padding({ left: 30 })
-  }
-
-  @Builder
-  QuestionAnswer(tool: ConversationUiToolStatus) {
-    Column({ space: 8 }) {
-      Text(this.questionPrompt(tool))
-        .fontSize(12)
-        .lineHeight(17)
-        .fontColor(INK)
-        .width('100%')
-      TextArea({ placeholder: RemoteI18n.t('chat.answerPlaceholder'), text: this.answerTextForTool(tool.id || '') })
-        .height(78)
-        .fontSize(13)
-        .backgroundColor(CARD)
-        .borderRadius(14)
-        .padding(12)
-        .border({ width: 1, color: LINE })
-        .defaultFocus(false)
-        .enabled(true)
-        .onChange((value: string) => {
-          this.questionAnswerToolId = tool.id || '';
-          this.questionAnswerText = value;
-        })
-      Row({ space: 8 }) {
-        Text(RemoteI18n.t('chat.submitAnswer'))
-          .fontSize(12)
-          .fontColor(this.canSubmitQuestion(tool.id || '') ? CARD : MUTED)
-          .textAlign(TextAlign.Center)
-          .height(32)
-          .layoutWeight(1)
-          .backgroundColor(this.canSubmitQuestion(tool.id || '') ? ACCENT : '#EDEBE6')
-          .borderRadius(16)
-          .onClick(() => {
-            if (this.canSubmitQuestion(tool.id || '')) {
-              const answer = this.questionAnswerText.trim();
-              const answers: ConversationUiQuestionAnswer = {
-                answer,
-                '0': answer
-              };
-              this.onAnswerQuestion(tool.id || '', answers);
-              this.questionAnswerText = '';
-              this.questionAnswerToolId = '';
-            }
-          })
-      }
-      .width('100%')
-    }
-    .width('100%')
-    .padding({ left: 30 })
   }
 
   private displayStatus(status: string): string {
@@ -592,9 +312,9 @@ export struct ToolStatusList {
       this.isRunningTool(tool);
   }
 
-  private toolRowBg(tool: ConversationUiToolStatus, index: number): string {
+  private toolRowBg(tool: ConversationUiToolStatus, index: number): ResourceColor {
     if (this.isEmphasizedToolRow(tool, index)) {
-      return '#FBFAF7';
+      return SOFT;
     }
     return '#00000000';
   }
@@ -746,18 +466,6 @@ export struct ToolStatusList {
     };
   }
 
-  private hasCollapsibleTools(): boolean {
-    let runLength = 0;
-    return this.tools.some((tool: ConversationUiToolStatus) => {
-      if (this.shouldCollapseExploreTool(tool)) {
-        runLength += 1;
-        return runLength >= 2;
-      }
-      runLength = 0;
-      return false;
-    });
-  }
-
   private shouldCollapseExploreTool(tool: ConversationUiToolStatus): boolean {
     if (this.hasToolError(tool) || this.isPendingConfirmation(tool) || this.isQuestionTool(tool) ||
       this.isRunningTool(tool)) {
@@ -809,6 +517,29 @@ export struct ToolStatusList {
 
   private normalizedToolName(tool: ConversationUiToolStatus): string {
     return (tool.name || 'Tool').replace(/[\s-]/g, '_').toLowerCase();
+  }
+
+  private summaryGlyphKind(entry: ToolRenderEntry): string {
+    if (entry.searchCount > 0 && entry.readCount === 0) return 'search';
+    if (entry.readCount > 0 && entry.searchCount === 0) return 'document';
+    return 'stack';
+  }
+
+  private toolGlyphKind(tool: ConversationUiToolStatus): string {
+    if (this.isQuestionLikeTool(tool)) return 'question';
+    if (this.isTodoTool(tool)) return 'todo';
+    if (this.isTaskTool(tool)) return 'task';
+    if (this.isGitTool(tool)) return 'git';
+    if (this.isDeleteTool(tool)) return 'delete';
+    if (this.isDiffTool(tool)) return 'diff';
+    if (this.isPatchTool(tool)) return 'patch';
+    if (this.isFileCreateTool(tool)) return 'create';
+    if (this.isFileMutationTool(tool)) return 'mutate';
+    if (this.isFileReadTool(tool)) return this.isDirectoryListTool(tool) ? 'folder' : 'document';
+    if (this.isSearchTool(tool)) return 'search';
+    if (this.isWebTool(tool)) return 'web';
+    if (this.isCommandTool(tool)) return 'command';
+    return 'tool';
   }
 
   private isQuestionLikeTool(tool: ConversationUiToolStatus): boolean {
@@ -1110,108 +841,53 @@ export struct ToolStatusList {
     return this.operationLabel(tool);
   }
 
+  private toolFileReference(tool: ConversationUiToolStatus): ToolFileReference | undefined {
+    return ToolFileReferenceResolver.resolve(tool.name || '', tool.tool_input, tool.input_preview || '');
+  }
+
+  private toolFilePath(tool: ConversationUiToolStatus): string {
+    return this.toolFileReference(tool)?.path || '';
+  }
+
+  private openToolFile(tool: ConversationUiToolStatus): void {
+    const reference = this.toolFileReference(tool);
+    if (reference) {
+      this.onOpenFilePreview(reference.path, reference.label);
+    }
+  }
+
+  private toggleToolExpanded(tool: ConversationUiToolStatus, index: number): void {
+    if (!this.canExpandTool(tool)) {
+      return;
+    }
+    const key = this.toolKey(tool, index);
+    this.expandedToolKey = this.expandedToolKey === key ? '' : key;
+  }
+
   private canExpandTool(tool: ConversationUiToolStatus): boolean {
     return this.hasToolError(tool) || this.isPendingConfirmation(tool) || this.isQuestionTool(tool) ||
       this.isRunningTool(tool) || this.isCompletedTool(tool) || this.isCancelledTool(tool);
   }
 
-  private toolTypeColor(tool: ConversationUiToolStatus): string {
-    if (this.isQuestionLikeTool(tool)) {
-      return '#A15C00';
-    }
-    if (this.isTodoTool(tool)) {
-      return '#21A85A';
-    }
-    if (this.isTaskTool(tool)) {
-      return '#2D7DDF';
-    }
-    if (this.isGitTool(tool)) {
-      return '#6C5CE7';
-    }
+  private toolTypeColor(tool: ConversationUiToolStatus): ResourceColor {
     if (this.isDeleteTool(tool)) {
       return RED;
     }
-    if (this.isDiffTool(tool)) {
-      return '#7E62D9';
-    }
-    if (this.isPatchTool(tool)) {
-      return '#C2542D';
-    }
-    if (this.isFileCreateTool(tool)) {
-      return '#21A85A';
-    }
-    if (this.isFileMutationTool(tool)) {
-      return '#C2542D';
-    }
-    if (this.isFileReadTool(tool)) {
-      return '#7E62D9';
-    }
-    if (this.isSearchTool(tool)) {
-      return '#D28A16';
-    }
-    if (this.isWebTool(tool)) {
-      return '#2D7DDF';
-    }
-    if (this.isCommandTool(tool)) {
-      return '#1E7A70';
+    if (this.isTodoTool(tool) || this.isFileCreateTool(tool)) {
+      return GREEN;
     }
     return MUTED;
   }
 
-  private toolTypeBg(tool: ConversationUiToolStatus): string {
-    if (this.isQuestionLikeTool(tool)) {
-      return '#FFF4DE';
-    }
-    if (this.isTodoTool(tool)) {
-      return '#EAF7EF';
-    }
-    if (this.isTaskTool(tool)) {
-      return '#EAF3FF';
-    }
-    if (this.isGitTool(tool)) {
-      return '#F0EDFF';
-    }
-    if (this.isDeleteTool(tool)) {
-      return '#FFECEA';
-    }
-    if (this.isDiffTool(tool)) {
-      return '#F0EDFF';
-    }
-    if (this.isPatchTool(tool)) {
-      return '#FFF0EA';
-    }
-    if (this.isFileCreateTool(tool)) {
-      return '#EAF7EF';
-    }
-    if (this.isFileMutationTool(tool)) {
-      return '#FFF0EA';
-    }
-    if (this.isFileReadTool(tool)) {
-      return '#F0EDFF';
-    }
-    if (this.isSearchTool(tool)) {
-      return '#FFF4DE';
-    }
-    if (this.isWebTool(tool)) {
-      return '#EAF3FF';
-    }
-    if (this.isCommandTool(tool)) {
-      return '#E8F6F4';
-    }
-    return '#F5F4F0';
+  private toolTypeBg(_tool: ConversationUiToolStatus): ResourceColor {
+    return SOFT;
   }
 
-  private toolTypeBorderColor(tool: ConversationUiToolStatus): string {
+  private toolTypeBorderColor(tool: ConversationUiToolStatus): ResourceColor {
     if (this.hasToolError(tool)) {
-      return '#F0B3AA';
+      return RED;
     }
-    if (this.isPendingConfirmation(tool) || this.isQuestionTool(tool)) {
-      return '#E5C98E';
-    }
-    if (this.isRunningTool(tool)) {
-      return '#9FC5F8';
-    }
-    return '#00000000';
+    return LINE;
   }
 
   private toolStatusIcon(tool: ConversationUiToolStatus): string {
@@ -1231,19 +907,9 @@ export struct ToolStatusList {
     return '•';
   }
 
-  private toolStatusColor(tool: ConversationUiToolStatus): string {
+  private toolStatusColor(tool: ConversationUiToolStatus): ResourceColor {
     if (this.hasToolError(tool)) {
       return RED;
-    }
-    const normalized = (tool.status || '').toLowerCase();
-    if (normalized === 'running' || normalized === 'active') {
-      return '#A15C00';
-    }
-    if (normalized === 'pending_confirmation' || normalized === 'needs_confirmation') {
-      return '#A15C00';
-    }
-    if (normalized === 'cancelled' || normalized === 'canceled' || normalized === 'rejected') {
-      return MUTED;
     }
     return MUTED;
   }
@@ -1256,24 +922,12 @@ export struct ToolStatusList {
       this.isCancelledTool(tool);
   }
 
-  private summaryTypeColor(entry: ToolRenderEntry): string {
-    if (entry.searchCount > 0 && entry.readCount === 0) {
-      return '#D28A16';
-    }
-    if (entry.readCount > 0 && entry.searchCount === 0) {
-      return '#7E62D9';
-    }
+  private summaryTypeColor(_entry: ToolRenderEntry): ResourceColor {
     return MUTED;
   }
 
-  private summaryTypeBg(entry: ToolRenderEntry): string {
-    if (entry.searchCount > 0 && entry.readCount === 0) {
-      return '#FFF4DE';
-    }
-    if (entry.readCount > 0 && entry.searchCount === 0) {
-      return '#F0EDFF';
-    }
-    return '#F5F4F0';
+  private summaryTypeBg(_entry: ToolRenderEntry): ResourceColor {
+    return SOFT;
   }
 
   private toolPreview(preview: string): string {
@@ -1345,50 +999,6 @@ export struct ToolStatusList {
     }
   }
 
-  private toolInputTextForTool(tool: ConversationUiToolStatus): string {
-    const toolId = tool.id || '';
-    if (this.toolInputEditToolId === toolId) {
-      return this.toolInputEditText;
-    }
-    return this.defaultToolInputText(tool);
-  }
-
-  private toolInputErrorForTool(toolId: string): string {
-    return this.toolInputEditToolId === toolId ? this.toolInputEditError : '';
-  }
-
-  private approveToolWithInput(tool: ConversationUiToolStatus): void {
-    const toolId = tool.id || '';
-    if (toolId.length === 0) {
-      return;
-    }
-    if (!this.hasEditableToolInput(tool)) {
-      this.onApproveTool(toolId);
-      return;
-    }
-
-    const rawInput = this.toolInputTextForTool(tool).trim();
-    if (rawInput.length === 0) {
-      this.toolInputEditToolId = toolId;
-      this.toolInputEditError = RemoteI18n.t('chat.jsonObjectRequired');
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(rawInput) as Object;
-      if (parsed === null || Array.isArray(parsed)) {
-        this.toolInputEditToolId = toolId;
-        this.toolInputEditError = RemoteI18n.t('chat.jsonObjectRequired');
-        return;
-      }
-      this.toolInputEditError = '';
-      this.onApproveTool(toolId, parsed);
-    } catch (_err) {
-      this.toolInputEditToolId = toolId;
-      this.toolInputEditError = RemoteI18n.t('chat.jsonInvalid');
-    }
-  }
-
   private isRunningTool(tool: ConversationUiToolStatus): boolean {
     const status = (tool.status || '').toLowerCase();
     return (status === 'running' || status === 'active') && (tool.id || '').length > 0;
@@ -1406,8 +1016,8 @@ export struct ToolStatusList {
 
   private isQuestionTool(tool: ConversationUiToolStatus): boolean {
     const status = (tool.status || '').toLowerCase();
-    const name = tool.name || '';
-    return name === 'AskUserQuestion' &&
+    const name = this.normalizedToolName(tool);
+    return (name === 'askuserquestion' || name === 'ask_user_question') &&
       status !== 'completed' &&
       status !== 'done' &&
       status !== 'failed' &&
@@ -1430,6 +1040,16 @@ export struct ToolStatusList {
     return this.toolPreview(preview);
   }
 
+  private questionInputJson(tool: ConversationUiToolStatus): string {
+    if (tool.tool_input) {
+      try {
+        return JSON.stringify(tool.tool_input);
+      } catch (_err) {
+      }
+    }
+    return this.toolInputPreview(tool);
+  }
+
   private questionPromptFromJson(preview: string): string {
     if (preview.trim().length === 0) {
       return '';
@@ -1450,16 +1070,6 @@ export struct ToolStatusList {
     } catch (_err) {
     }
     return '';
-  }
-
-  private answerTextForTool(toolId: string): string {
-    return this.questionAnswerToolId === toolId ? this.questionAnswerText : '';
-  }
-
-  private canSubmitQuestion(toolId: string): boolean {
-    return toolId.length > 0 &&
-      this.questionAnswerToolId === toolId &&
-      this.questionAnswerText.trim().length > 0;
   }
 
   private toolKey(tool: ConversationUiToolStatus, index: number): string {

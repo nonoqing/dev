@@ -22,7 +22,7 @@ export interface PermissionRule {
 }
 
 export interface PermissionPolicyConfig {
-  preset: 'ask' | 'full_access';
+  preset: 'ask' | 'deny' | 'full_access';
   rules: PermissionRule[];
 }
 
@@ -31,6 +31,7 @@ export interface PermissionInteractionConfig {
 }
 
 export interface ToolPermissionConfig {
+  default_permission: PermissionEffect;
   policy: PermissionPolicyConfig;
   interaction: PermissionInteractionConfig;
 }
@@ -61,7 +62,7 @@ export interface MemoriesConfig {
 export interface AppConfig {
   language: string;
   auto_update: boolean;
-  telemetry: boolean;
+  telemetry: TelemetryUserConfigV1 | TelemetryUserConfigV2;
   startup_behavior: string;
   confirm_on_exit: boolean;
   restore_windows: boolean;
@@ -74,6 +75,49 @@ export interface AppConfig {
   ai_experience: AIExperienceConfig;
   user_tool_groups?: UserToolGroupsConfig;
   user_skill_groups?: UserSkillGroupsConfig;
+}
+
+export type TelemetryLevel = 'off' | 'basic' | 'diagnostic' | 'debug';
+
+export interface TelemetryUserConfigV1 {
+  version: 1;
+  level: TelemetryLevel;
+}
+
+export interface TelemetryUserConfigV2 {
+  version: 2;
+  level: TelemetryLevel;
+  sensitive_content_consent: boolean;
+}
+
+export type TelemetryHealthState =
+  | 'closed'
+  | 'starting'
+  | 'healthy'
+  | 'degraded'
+  | 'backlogged'
+  | 'shutting_down';
+
+export interface TelemetryHealthSnapshot {
+  state: TelemetryHealthState;
+  userLevel: TelemetryLevel;
+  effectiveLevel: TelemetryLevel;
+  generation: number;
+  queuedRecords: number;
+  queuedBytes: number;
+  inFlightBatches: number;
+  retryAttempts: number;
+  locallyDropped: number;
+  ambiguous: number;
+  acknowledged: number;
+  serverRejected: number;
+  lastSuccessUnixMs?: number | null;
+}
+
+export interface TelemetryState {
+  level: TelemetryLevel;
+  sensitiveContentConsent: boolean;
+  health: TelemetryHealthSnapshot;
 }
 
 export interface UserToolGroupsConfig {
@@ -190,11 +234,47 @@ export type ModelCategory =
   | 'multimodal'
   | 'speech_recognition';
 
-export type ReasoningMode =
-  | 'default'
-  | 'enabled'
-  | 'disabled'
-  | 'adaptive';
+export type ReasoningCatalogBinding =
+  | { source: 'auto' }
+  | { source: 'models_dev'; provider: string; model: string }
+  | { source: 'disabled' };
+
+export type ReasoningPresetAction =
+  | { type: 'effort'; value: string }
+  | { type: 'toggle'; enabled: boolean }
+  | { type: 'budget_tokens'; value: number }
+  | { type: 'request_patch'; body: Record<string, unknown> };
+
+export interface ReasoningPreset {
+  id: string;
+  label?: string;
+  order?: number;
+  disabled?: boolean;
+  actions?: ReasoningPresetAction[];
+}
+
+export interface ReasoningConfig {
+  catalog?: ReasoningCatalogBinding;
+  default_preset?: string;
+  presets?: ReasoningPreset[];
+}
+
+export type ReasoningPresetSource = 'models_dev' | 'adapter_fallback' | 'model_config';
+
+export interface ReasoningPresetDescriptor {
+  id: string;
+  label: string;
+  order: number;
+  actions: ReasoningPresetAction[];
+  source: ReasoningPresetSource;
+}
+
+export interface ReasoningCatalogProjection {
+  status: 'unsupported' | 'known' | 'unknown';
+  default_preset?: string;
+  presets?: ReasoningPresetDescriptor[];
+  unavailable_presets?: ReasoningPresetDescriptor[];
+}
 
 export interface ModelMetadata {
   category: ModelCategory;
@@ -243,24 +323,31 @@ export interface AIModelConfig {
   capabilities: ModelCapability[];
   recommended_for?: string[];
   metadata?: Record<string, any>;
-  reasoning_mode?: ReasoningMode;
+  /** Canonical reasoning preset configuration. */
+  reasoning?: ReasoningConfig;
   /** Parse `<think>...</think>` text chunks into streaming reasoning content. */
   inline_think_in_text?: boolean;
-  /** Provider-specific reasoning effort. */
-  reasoning_effort?: string;
-  /** Optional Anthropic manual thinking token budget. */
-  thinking_budget_tokens?: number;
   /** Authentication source. Defaults to inline `api_key`. */
   auth?: AuthConfig;
+  /** Whether this model is marked as a favorite. */
+  favorite?: boolean;
 }
 
 /** Subscription provider for in-app OAuth auth. */
 export type SubscriptionProvider = 'codex' | 'antigravity' | 'opencode';
 
+/** OpenCode billing/API product. Both plans reuse the same signed-in account. */
+export type OpenCodePlan = 'zen' | 'go';
+
 /** Authentication source persisted on each model entry. */
 export type AuthConfig =
   | { type: 'api_key' }
-  | { type: 'subscription'; provider: SubscriptionProvider };
+  | {
+      type: 'subscription';
+      provider: SubscriptionProvider;
+      /** Absent on legacy OpenCode configs, which continue to use Zen. */
+      plan?: OpenCodePlan;
+    };
 
 export interface ProxyConfig {
   enabled: boolean;
@@ -311,6 +398,7 @@ export interface AIConfig {
   subagent_batch_execution_policy?: 'safe_only' | 'force_parallel' | 'serial';
   computer_use_enabled?: boolean;
   browser_control_preferred_browser?: string;
+  browser_control_auto_connect_on_startup?: boolean;
 }
 
 export interface StoredAgentProfileConfigItem {
@@ -618,6 +706,15 @@ export interface ConfigValidationResult {
   valid: boolean;
   errors: ConfigValidationError[];
   warnings: ConfigValidationWarning[];
+  diagnostics?: ConfigDiagnostic[];
+}
+
+export interface ConfigDiagnostic {
+  path: string;
+  message: string;
+  code: string;
+  severity: 'error' | 'warning';
+  recoverability: 'none' | 'auto_fix' | 'model_disabled' | 'defaults_used';
 }
 
 export interface ConfigValidationError {
@@ -690,6 +787,8 @@ export interface ConfigPanelProps {
 export interface RuntimeLoggingInfo {
   effectiveLevel: BackendLogLevel;
   sessionLogDir: string;
+  earlyStartupLogPath: string;
+  nativeStartupTracePath: string;
   appLogPath: string;
   aiLogPath: string;
   flashgrepLogPath: string;

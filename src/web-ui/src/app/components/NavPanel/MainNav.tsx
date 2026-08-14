@@ -14,7 +14,7 @@
 import React, { useCallback, useState, useMemo, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { getAppearanceOverlayHost } from '@/infrastructure/appearance/runtime/AppearanceOverlayHost';
-import { Plus, FolderOpen, FolderPlus, History, Check, User, Users, Puzzle, Blocks, ChevronDown, Search } from 'lucide-react';
+import { Plus, FolderOpen, FolderPlus, History, Check, User, Users, Puzzle, Blocks, CalendarClock, ChevronDown, Search } from 'lucide-react';
 // import { PanelsTopLeft } from 'lucide-react'; // temporarily hidden: Pages nav entry
 import { Tooltip } from '@/component-library';
 import { useApp } from '../../hooks/useApp';
@@ -22,6 +22,7 @@ import { useSceneManager } from '../../hooks/useSceneManager';
 import { useI18n } from '@/infrastructure/i18n/hooks/useI18n';
 import type { SceneTabId } from '../SceneBar/types';
 import SectionHeader from './components/SectionHeader';
+import AssistantSessionCreateMenu from './components/AssistantSessionCreateMenu';
 import MiniAppEntry from './components/MiniAppEntry';
 import WorkspaceListSection from './sections/workspaces/WorkspaceListSection';
 import SessionsSection from './sections/sessions/SessionsSection';
@@ -35,7 +36,7 @@ import { workspaceManager } from '@/infrastructure/services/business/workspaceMa
 import { useWorkspaceContext } from '@/infrastructure/contexts/WorkspaceContext';
 import { createLogger } from '@/shared/utils/logger';
 import { notificationService } from '@/shared/notification-system';
-import { WorkspaceKind, isRemoteWorkspace } from '@/shared/types';
+import { WorkspaceKind, isRemoteWorkspace, type WorkspaceInfo } from '@/shared/types';
 import {
   findReusableEmptySessionId,
   flowChatSessionConfigForWorkspace,
@@ -86,6 +87,7 @@ const MainNav: React.FC<MainNavProps> = ({
     recentWorkspaces,
     openedWorkspacesList,
     assistantWorkspacesList,
+    primaryAssistantWorkspaceId,
     normalWorkspacesList,
     switchWorkspace,
     setActiveWorkspace,
@@ -176,8 +178,18 @@ const MainNav: React.FC<MainNavProps> = ({
   const isAssistantWorkspaceActive = currentWorkspace?.workspaceKind === WorkspaceKind.Assistant;
 
   const primaryAssistantWorkspace = useMemo(
-    () => pickPrimaryAssistantWorkspace(assistantWorkspacesList),
-    [assistantWorkspacesList]
+    () => pickPrimaryAssistantWorkspace(assistantWorkspacesList, primaryAssistantWorkspaceId),
+    [assistantWorkspacesList, primaryAssistantWorkspaceId]
+  );
+
+  const orderedAssistantWorkspacesList = useMemo(
+    () => primaryAssistantWorkspace
+      ? [
+          primaryAssistantWorkspace,
+          ...assistantWorkspacesList.filter(workspace => workspace.id !== primaryAssistantWorkspace.id),
+        ]
+      : assistantWorkspacesList,
+    [assistantWorkspacesList, primaryAssistantWorkspace]
   );
 
   const defaultAssistantWorkspace =
@@ -257,29 +269,32 @@ const MainNav: React.FC<MainNavProps> = ({
     void handleCreateProjectSession('Cowork');
   }, [handleCreateProjectSession, setSessionMode]);
 
-  const handleCreatePrimaryAssistantSession = useCallback(async () => {
-    if (!primaryAssistantWorkspace) {
-      notificationService.warning(t('nav.workspaces.createSessionFailed'), { duration: 4000 });
-      return;
-    }
-
+  const handleCreateAssistantSession = useCallback(async (workspace: WorkspaceInfo) => {
     try {
       const sessionId = await flowChatManager.createChatSession(
-        flowChatSessionConfigForWorkspace(primaryAssistantWorkspace),
+        flowChatSessionConfigForWorkspace(workspace),
         'Claw'
       );
       await openMainSession(sessionId, {
-        workspaceId: primaryAssistantWorkspace.id,
+        workspaceId: workspace.id,
         activateWorkspace: setActiveWorkspace,
       });
     } catch (error) {
-      log.error('Failed to create primary assistant session', { error });
+      log.error('Failed to create assistant session', { workspaceId: workspace.id, error });
       notificationService.error(
         error instanceof Error ? error.message : t('nav.workspaces.createSessionFailed'),
         { duration: 4000 }
       );
     }
-  }, [primaryAssistantWorkspace, setActiveWorkspace, t]);
+  }, [setActiveWorkspace, t]);
+
+  const handleCreatePrimaryAssistantSession = useCallback(async () => {
+    if (!primaryAssistantWorkspace) {
+      notificationService.warning(t('nav.workspaces.createSessionFailed'), { duration: 4000 });
+      return;
+    }
+    await handleCreateAssistantSession(primaryAssistantWorkspace);
+  }, [handleCreateAssistantSession, primaryAssistantWorkspace, t]);
 
   const handleOpenProject = useCallback(async () => {
     try {
@@ -383,6 +398,10 @@ const MainNav: React.FC<MainNavProps> = ({
     setSelectedAssistantWorkspaceId,
     switchLeftPanelTab,
   ]);
+
+  const handleOpenTodos = useCallback(() => {
+    openScene('todos');
+  }, [openScene]);
 
   const handleOpenAgents = useCallback(() => {
     openScene('agents');
@@ -494,10 +513,11 @@ const MainNav: React.FC<MainNavProps> = ({
 
   const createCodeTooltip = t('nav.sessions.newCodeSession');
   const createCoworkTooltip = t('nav.sessions.newCoworkSession');
-  const createAssistantSessionTooltip = t('nav.sessions.newPrimaryAssistantSession');
   const assistantTooltip = t('nav.items.persona');
+  const todosTooltip = t('nav.tooltips.todos');
   const addWorkspaceTooltip = t('nav.tooltips.addWorkspace');
   const isAssistantActive = activeTabId === 'assistant';
+  const isTodosActive = activeTabId === 'todos';
   const agentsTooltip = t('nav.tooltips.agents');
   const skillsTooltip = t('nav.tooltips.skills');
   const extensionsLabel = t('nav.sections.extensions');
@@ -584,6 +604,25 @@ const MainNav: React.FC<MainNavProps> = ({
               <User size={15} />
             </span>
             <span>{t('nav.items.persona')}</span>
+          </button>
+        </Tooltip>
+
+        <Tooltip content={todosTooltip} placement="right" followCursor>
+          <button
+            type="button"
+            className={`bitfun-nav-panel__top-action-btn${isTodosActive ? ' is-active' : ''}`}
+            data-bf-component="nav-panel"
+            data-bf-part="topAction"
+            data-bf-action="todos"
+            data-bf-state={isTodosActive ? 'active' : ''}
+            onClick={handleOpenTodos}
+            aria-label={todosTooltip}
+            data-testid="nav-todos-btn"
+          >
+            <span className="bitfun-nav-panel__top-action-icon-slot" aria-hidden="true">
+              <CalendarClock size={15} />
+            </span>
+            <span>{t('nav.items.todos')}</span>
           </button>
         </Tooltip>
 
@@ -683,23 +722,18 @@ const MainNav: React.FC<MainNavProps> = ({
             isOpen={expandedSections.has('assistant-sessions')}
             onToggle={() => toggleSection('assistant-sessions')}
             actions={
-              <Tooltip content={createAssistantSessionTooltip} placement="right" followCursor>
-                <button
-                  type="button"
-                  className="bitfun-nav-panel__section-action"
-                  aria-label={createAssistantSessionTooltip}
-                  onClick={() => { void handleCreatePrimaryAssistantSession(); }}
-                  data-testid="nav-primary-assistant-session-add-btn"
-                >
-                  <Plus size={13} />
-                </button>
-              </Tooltip>
+              <AssistantSessionCreateMenu
+                assistants={orderedAssistantWorkspacesList}
+                primaryAssistant={primaryAssistantWorkspace}
+                onCreatePrimary={handleCreatePrimaryAssistantSession}
+                onCreateAssistant={handleCreateAssistantSession}
+              />
             }
           />
           <div className={`bitfun-nav-panel__collapsible${expandedSections.has('assistant-sessions') ? '' : ' is-collapsed'}`} data-bf-component="nav-panel" data-bf-part="sectionContent" data-bf-state={expandedSections.has('assistant-sessions') ? 'open' : ''}>
             <div className="bitfun-nav-panel__collapsible-inner">
               <div className="bitfun-nav-panel__items bitfun-nav-panel__items--session-blocks">
-                {assistantWorkspacesList.map(workspace => {
+                {orderedAssistantWorkspacesList.map(workspace => {
                   const assistantDisplayName =
                     workspace.workspaceKind === WorkspaceKind.Assistant
                       ? workspace.identity?.name?.trim() || workspace.name

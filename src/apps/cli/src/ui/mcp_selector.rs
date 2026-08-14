@@ -20,6 +20,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::ui::{
     responsive_popup::{render_too_small, responsive_popup, ResponsivePopup},
+    selector_common::PagedSelector,
     theme::{StyleKind, Theme},
 };
 
@@ -296,6 +297,14 @@ impl McpSelectorState {
         let selected = self.list_state.selected().unwrap_or(0);
         let next = (selected + 1) % self.items.len();
         self.list_state.select(Some(next));
+    }
+
+    pub(super) fn move_page_up(&mut self) {
+        PagedSelector::move_page_up(self)
+    }
+
+    pub(super) fn move_page_down(&mut self) {
+        PagedSelector::move_page_down(self)
     }
 
     /// Get the selected MCP item (for toggle action)
@@ -894,5 +903,23 @@ mod tests {
         let area = state.last_area.expect("popup area");
         assert!(area.width < 50);
         assert_eq!(state.item_index_at(area.y + 3, area), Some(1));
+    }
+}
+
+impl PagedSelector for McpSelectorState {
+    fn last_area(&self) -> Option<Rect> {
+        self.last_area
+    }
+
+    fn list_state_mut(&mut self) -> &mut ListState {
+        &mut self.list_state
+    }
+
+    fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
     }
 }

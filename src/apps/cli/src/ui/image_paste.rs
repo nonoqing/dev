@@ -62,8 +62,21 @@ pub(crate) enum ImagePasteError {
 }
 
 pub(crate) fn read_clipboard(cwd: &Path) -> Result<Option<ImagePaste>, ImagePasteError> {
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|error| ImagePasteError::Clipboard(error.to_string()))?;
+    // Try the system clipboard first; on platforms without direct clipboard
+    // access (OHOS, headless, SSH) fall back to an OSC 52 terminal query.
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(error) => {
+            #[cfg(unix)]
+            if let Some(text) = read_clipboard_text_osc52() {
+                if !text.is_empty() {
+                    return classify_pasted_text(&text, cwd).map(Some);
+                }
+                return Ok(None);
+            }
+            return Err(ImagePasteError::Clipboard(error.to_string()));
+        }
+    };
     match clipboard.get_image() {
         Ok(image) => {
             return image_from_rgba(
@@ -80,9 +93,120 @@ pub(crate) fn read_clipboard(cwd: &Path) -> Result<Option<ImagePaste>, ImagePast
     }
     match clipboard.get_text() {
         Ok(text) if !text.is_empty() => classify_pasted_text(&text, cwd).map(Some),
-        Ok(_) | Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        Ok(_) | Err(arboard::Error::ContentNotAvailable) => {
+            #[cfg(unix)]
+            if let Some(text) = read_clipboard_text_osc52() {
+                if !text.is_empty() {
+                    return classify_pasted_text(&text, cwd).map(Some);
+                }
+            }
+            Ok(None)
+        }
         Err(error) => Err(ImagePasteError::Clipboard(error.to_string())),
     }
+}
+
+/// Query the terminal clipboard via OSC 52.
+///
+/// Sends `ESC ] 52 ; c ; ? BEL` and reads the base64-encoded response that the
+/// terminal writes back. Used when the system clipboard (`arboard`) is
+/// unavailable — e.g. on OHOS where the terminal is the only clipboard
+/// provider.
+#[cfg(unix)]
+fn read_clipboard_text_osc52() -> Option<String> {
+    use std::io::{IsTerminal, Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
+
+    const TIMEOUT: Duration = Duration::from_millis(100);
+    const POLL_INTERVAL: Duration = Duration::from_millis(2);
+    const READ_CHUNK: usize = 4096;
+
+    if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
+        return None;
+    }
+
+    // OSC 52 clipboard query: ESC ] 52 ; c ; ? BEL
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(b"\x1b]52;c;?\x07");
+    let _ = stdout.flush();
+    drop(stdout);
+
+    let start = Instant::now();
+    let mut buf = Vec::with_capacity(1024);
+
+    let fd = std::io::stdin().as_raw_fd();
+    // SAFETY: fcntl with F_GETFL/F_SETFL is a standard, thread-safe fd flag
+    // manipulation. The original flags are restored before returning so that
+    // crossterm's event reader is unaffected.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 {
+            return None;
+        }
+        if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return None;
+        }
+
+        let mut stdin = std::io::stdin().lock();
+        let mut tmp = [0u8; READ_CHUNK];
+        while start.elapsed() < TIMEOUT {
+            match stdin.read(&mut tmp) {
+                Ok(0) => {
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    // Break when we have a complete OSC 52 response
+                    // (terminated by BEL or ST).
+                    if buf.contains(&b'\x07') || buf.windows(2).any(|w| w == b"\x1b\\") {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Restore original fd flags regardless of the read outcome.
+        let _ = libc::fcntl(fd, libc::F_SETFL, flags);
+    }
+
+    parse_osc52_response(&buf)
+}
+
+/// Parse an OSC 52 clipboard response and return the decoded text.
+///
+/// Expected format: `ESC ] 52 ; <selector> ; <base64> BEL` (or ST-terminated).
+#[cfg(unix)]
+fn parse_osc52_response(buf: &[u8]) -> Option<String> {
+    use base64::Engine as _;
+
+    let prefix = b"\x1b]52;";
+    let start = buf.windows(prefix.len()).position(|w| w == prefix)?;
+    let rest = &buf[start + prefix.len()..];
+
+    // Skip the clipboard selector (c, p, s0, ...) and find the data separator.
+    let semi = rest.iter().position(|&b| b == b';')?;
+    let payload = &rest[semi + 1..];
+
+    // Find the terminator: BEL (\x07) or ST (\x1b\\).
+    let end = payload
+        .iter()
+        .position(|&b| b == b'\x07')
+        .or_else(|| payload.windows(2).position(|w| w == b"\x1b\\"))?;
+
+    let base64_data = &payload[..end];
+    if base64_data.is_empty() {
+        return None;
+    }
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(base64_data)
+        .ok()?;
+    String::from_utf8(decoded).ok()
 }
 
 pub(crate) fn classify_pasted_text(text: &str, cwd: &Path) -> Result<ImagePaste, ImagePasteError> {
@@ -418,5 +542,79 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
         assert!(output.exceeded);
         assert!(output.bytes.is_empty());
+    }
+
+    #[cfg(unix)]
+    fn osc52_response(text: &str, terminator: &[u8]) -> Vec<u8> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+        let mut buf = b"\x1b]52;c;".to_vec();
+        buf.extend_from_slice(b64.as_bytes());
+        buf.extend_from_slice(terminator);
+        buf
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_response_with_bel_terminator_decodes_clipboard_text() {
+        let buf = osc52_response("hello world", b"\x07");
+        assert_eq!(parse_osc52_response(&buf).as_deref(), Some("hello world"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_response_with_st_terminator_decodes_clipboard_text() {
+        let buf = osc52_response("hello world", b"\x1b\\");
+        assert_eq!(parse_osc52_response(&buf).as_deref(), Some("hello world"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_empty_clipboard_returns_none() {
+        let buf = b"\x1b]52;c;\x07";
+        assert_eq!(parse_osc52_response(buf), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_response_with_leading_bytes_still_parses() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode("pasted".as_bytes());
+        let buf = format!("\x1b[31m\x1b]52;c;{b64}\x07");
+        assert_eq!(parse_osc52_response(buf.as_bytes()).as_deref(), Some("pasted"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_multibyte_utf8_text_decodes_correctly() {
+        let buf = osc52_response("你好,世界!🌍", b"\x07");
+        assert_eq!(parse_osc52_response(&buf).as_deref(), Some("你好,世界!🌍"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_non_clipboard_response_returns_none() {
+        let buf = b"\x1b]11;rgb:0000/0000/0000\x07";
+        assert_eq!(parse_osc52_response(buf), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_invalid_base64_returns_none() {
+        let buf = b"\x1b]52;c;!!!\x07";
+        assert_eq!(parse_osc52_response(buf), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_primary_selection_selector_is_accepted() {
+        let buf = osc52_response("from selection", b"\x07");
+        // Replace 'c' selector with 'p' to simulate a primary-selection response.
+        let buf: Vec<u8> = buf
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| if i == 5 { b'p' } else { b })
+            .collect();
+        assert_eq!(parse_osc52_response(&buf).as_deref(), Some("from selection"));
     }
 }

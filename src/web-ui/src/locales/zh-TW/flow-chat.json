@@ -93,6 +93,7 @@
     "failedDescription": "可以重新載入已儲存的會話內容；若會話來自其他裝置，請先檢查帳號登入與網路連線。",
     "preparingOlderHistory": "正在準備更早的歷史記錄...",
     "olderHistoryNotReady": "更早的歷史記錄暫未準備好。",
+    "newerHistoryNotReady": "更新的歷史記錄暫未準備好。",
     "remoteSessionMissing": "在後端找不到該會話資料。若剛重新連接過 SSH 遠端工作區，請關閉並重新開啟該遠端項目，或新增會話後再試。",
     "retry": "重試"
   },
@@ -174,7 +175,6 @@
       "tokens": "{{value}} Tokens"
     },
     "loading": {
-      "markdown": "正在產生用量報告...",
       "title": "正在產生用量報告",
       "description": "正在讀取本機工作階段記錄，並整理隱私安全的統計摘要。",
       "steps": {
@@ -280,7 +280,9 @@
     },
     "slowestLabels": {
       "modelCall": "第 {{turn}} 回合模型呼叫",
-      "modelCallUnknown": "模型呼叫"
+      "modelCallUnknown": "模型呼叫",
+      "turn": "第 {{turn}} 回合",
+      "turnUnknown": "回合"
     },
     "slowest": {
       "details": {
@@ -413,6 +415,7 @@
       "interrupted": "已中斷"
     },
     "menu": {
+      "switchPet": "切換寵物",
       "closePet": "關閉寵物",
       "closeBubble": "關閉該氣泡"
     },
@@ -484,11 +487,6 @@
     "rollbackDialogIntro": "將執行：",
     "rollbackDialogBulletFiles": "撤銷從該輪開始的所有檔案修改",
     "rollbackDialogBulletHistory": "刪除該輪及之後的對話記錄（不可恢復）",
-    "rollbackPanelDialogTitle": "回滾到第 {{index}} 輪之前？",
-    "rollbackPanelDialogIntro": "將執行：",
-    "rollbackPanelBulletRestore": "將檔案恢復到第 {{index}} 輪之前的狀態",
-    "rollbackPanelBulletUndo": "撤銷從該輪開始的所有檔案變更",
-    "rollbackPanelBulletHistory": "保留會話歷史（之後仍可繼續對話）",
     "rollbackSuccess": "已回滾並刪除後續對話記錄",
     "rollbackFailed": "回滾失敗",
     "saveEdit": "儲存並重跑",
@@ -664,6 +662,9 @@
       "cliInstallFailed": "無法準備遠端執行環境。請檢查 SSH 連線後重試。",
       "cliInstallInProgress": "正在準備遠端執行環境…",
       "cliInstallUnknownVersion": "所需版本",
+      "modelSyncStarted": "正在將本機的模型設定複製到遠端裝置…",
+      "modelSyncSucceeded": "模型設定已複製，遠端裝置可以執行所選模型。",
+      "modelSyncFailed": "無法將模型設定複製到遠端裝置。",
       "errors": {
         "attachmentUnavailable": "這張圖片無法傳送到遠端裝置。請重新加入後再試。",
         "deviceAttachmentTooLarge": "透過帳號裝置傳送的圖片總大小不能超過 192 KB。請壓縮圖片，或改用 SSH 目標。",
@@ -674,12 +675,12 @@
         "sessionUnavailable": "遠端任務資訊不完整。請重新開啟任務，或建立新任務。",
         "compactWhileRunning": "請等待目前遠端任務完成後再壓縮上下文。",
         "compactRejected": "目標裝置未能開始壓縮，請稍後重試。",
-        "imagesWhileRunning": "圖片會隨下一輪訊息傳送。請等待目前遠端任務完成後再試。",
         "sessionNotReady": "遠端任務仍在準備中，請稍後再傳送。",
         "submissionUnconfirmed": "暫時無法確認目標是否已收到任務。請稍後檢查任務狀態。"
       }
     },
     "addBoostTooltip": "智能體模式、圖片或 Skill",
+    "modeChangeFailed": "切換智能體模式失敗，請重試。",
     "permissionMode": {
       "menuLabel": "權限模式",
       "globalScope": "全域",
@@ -708,9 +709,19 @@
         "tooltip": "此工作階段的權限由 ACP 用戶端控制。"
       },
       "fullAccessWarningTitle": "啟用完全存取？",
-      "fullAccessWarningMessage": "完全存取會預設允許工具執行，不再逐次確認。",
+      "fullAccessWarningMessage": "完全存取會預設放行工具呼叫，不再逐次確認。此設定僅作用於目前工作階段，專案規則與強制規則仍然生效。",
       "fullAccessConfirm": "啟用完全存取",
-      "cancel": "取消"
+      "cancel": "取消",
+      "sessionScope": "目前工作階段",
+      "currentSessionOverride": "權限：{{mode}}（僅目前工作階段）",
+      "resetToDefault": "跟隨預設模式",
+      "noSession": "請先開啟或新建工作階段，再變更其權限模式。",
+      "turnScope": "僅下一則訊息",
+      "currentTurnOverride": "權限：{{mode}}（僅下一則訊息）",
+      "nextTurnOnly": "僅下一則訊息使用「{{mode}}」",
+      "nextTurnOnlyShort": "僅一次",
+      "fullAccessWarningMessageNextTurn": "完全存取會預設放行工具呼叫，不再逐次確認。此設定僅作用於下一則訊息，專案規則與強制規則仍然生效。",
+      "openDefaultSettings": "開啟權限設定"
     },
     "addModeTooltip": "附加 Plan 或 Debug",
     "boostSectionAgent": "智能體",
@@ -795,6 +806,10 @@
     "nativeCommandReconfirmationRequired": "先前選擇的外部命令已無法使用。請從斜線選單中選擇 BitFun 命令後再執行。",
     "selectHint": "↑↓ 選擇 · Enter 確認 · Esc 取消",
     "current": "目前",
+    "commandStatus": {
+      "restricted": "受限",
+      "chooseSource": "選擇來源"
+    },
     "computerUseDisabled": "已在「設定 → 工作階段權限」中停用 Computer Use",
     "professionalMode": "專業模式",
     "designMode": "設計模式",
@@ -884,8 +899,8 @@
     "unknownTool": "未知工具"
   },
   "transcriptExport": {
-    "copyFull": "拷貝完整過程",
-    "copyResult": "拷貝結果",
+    "copyFull": "複製完整過程",
+    "copyResult": "複製結果",
     "copyEmpty": "該對話沒有可複製的內容",
     "exportEmpty": "該工作階段沒有可匯出的內容",
     "exportSuccess": "工作階段已匯出：{{filePath}}",
@@ -1306,9 +1321,6 @@
       "pruned": "已清理",
       "failed": "命令失敗"
     }
-  },
-  "stickyTaskIndicator": {
-    "tooltip": "跳轉到目前任務"
   },
   "sessionFilesBadge": {
     "files": "檔案",
@@ -2389,6 +2401,24 @@
     "xhigh": "Extra High",
     "xhighDesc": "最大推理深度（較慢）"
   },
+  "reasoningSelector": {
+    "title": "思考強度",
+    "auto": "自動",
+    "modelDefault": "模型預設值",
+    "current": "思考強度：{{preset}}",
+    "currentAuto": "思考強度：自動（{{preset}}）",
+    "updateFailed": "更新思考預設失敗",
+    "source": {
+      "models_dev": "models.dev",
+      "adapter_fallback": "內置",
+      "model_config": "自定義"
+    },
+    "sourceTooltip": {
+      "models_dev": "根據 models.dev 的模型中繼資料自動產生",
+      "adapter_fallback": "BitFun 為此模型適配器內置的預設",
+      "model_config": "在此模型的自定義設定中定義"
+    }
+  },
   "coworkScope": {
     "title": "選擇 Cowork 工作區",
     "description": "Cowork 模式需要一個工作區目錄用於讀寫檔案。你可以使用目前項目，或選擇另一個目錄。",
@@ -2458,9 +2488,9 @@
         "prompt": "請幫我寫一封郵件回覆。\n\n對方郵件內容（可粘貼）：\n我的目標（確認/拒絕/推進/澄清）：\n語氣（正式/友好/強硬但禮貌）：\n需要包含的資訊點：\n\n請輸出：\n1) 主題（Subject）建議\n2) 郵件正文（2 個版本：更正式/更簡潔）\n3) 需要對方確認的問題列表（如有）"
       },
       "make_docx": {
-        "title": "寫一份 Word 文檔",
-        "description": "把內容結構化成文檔，並導出為 DOCX。",
-        "prompt": "請幫我寫一份文檔，並導出為 .docx 檔案。\n\n文檔類型（PRD/方案/覆盤/報告/SOP）：\n受眾：\n語氣（正式/友好/簡潔）：\n必須包含的資訊點：\n期望長度：\n\n最終交付：\n1) 建議目錄結構\n2) 完整正文內容\n3) 導出為 DOCX 檔案（儲存到 artifacts/）"
+        "title": "寫一份結構化文檔",
+        "description": "把資料整理成清晰、可複用的文檔。",
+        "prompt": "請幫我寫一份結構化文檔。\n\n文檔類型（PRD/方案/覆盤/報告/SOP）：\n受眾：\n語氣（正式/友好/簡潔）：\n必須包含的資訊點：\n期望長度：\n\n最終交付：\n1) 建議目錄結構\n2) 完整正文內容\n3) 將 Markdown 文檔儲存到 artifacts/"
       },
       "make_spreadsheet": {
         "title": "做一張表格",
@@ -2497,7 +2527,6 @@
     },
     "errors": {
       "emptyContent": "訊息內容不能為空",
-      "richContentUnsupported": "包含附件或結構化資訊的訊息需要等待目前對話完成後傳送",
       "sendNowFailed": "立即發送失敗，請稍後重試"
     }
   },

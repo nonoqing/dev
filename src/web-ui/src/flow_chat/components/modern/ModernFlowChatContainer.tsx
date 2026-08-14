@@ -10,7 +10,7 @@ import { FlowChatManager } from '@/flow_chat/services/FlowChatManager';
 import { useSessionModeStore } from '@/app/stores/sessionModeStore';
 import {
   VirtualMessageList,
-  type FlowChatTurnPinRequestStatus,
+  type FlowChatTurnNavigationStatus,
   type HistoryWindowBoundaryIntentResult,
   type HistoryWindowBoundaryIntentOptions,
   type VirtualMessageListRef,
@@ -51,9 +51,10 @@ import type {
   SessionHistoryPresentation,
 } from '../../types/flow-chat';
 import type { SessionHistoryWindowDirection } from '../../store/FlowChatStore';
-import type {
-  FlowChatFocusItemRequest,
-  FlowChatPinTurnToTopRequest,
+import {
+  FLOWCHAT_MESSAGE_SUBMITTED_EVENT,
+  type FlowChatFocusItemRequest,
+  type FlowChatMessageSubmittedRequest,
 } from '../../events/flowchatNavigation';
 import {
   useBackgroundCommandActivityStore,
@@ -63,7 +64,7 @@ import {
 import {
   useBackgroundSubagentActivityStore,
 } from '../../store/backgroundSubagentActivityStore';
-import type { LineRange } from '@/component-library';
+import { PresenceBoundary, type LineRange } from '@/component-library';
 import { isChatPopupActive, subscribeChatPopupChange } from '../chatPopupState';
 import { useWorkspaceContext } from '@/infrastructure/contexts/WorkspaceContext';
 import { flowChatSessionConfigForCurrentWorkspace } from '@/app/utils/projectSessionWorkspace';
@@ -77,7 +78,6 @@ import { resolveThreadGoalHeaderTitle } from '../../utils/threadGoalDisplay';
 import { hasActiveSessionLineageDescendants } from '../../utils/sessionLineage';
 import {
   findDialogTurn,
-  shouldUseStickyLatestPin,
   shouldUseLatestTurnFollowOutput,
 } from '../../utils/flowChatTurnScrollPolicy';
 import { isRemoteTraceContext, startupTrace } from '@/shared/utils/startupTrace';
@@ -92,9 +92,18 @@ import {
   type HistorySessionOpenIntentDetail,
 } from '../../services/sessionOpenIntent';
 import {
+  recordHistoryPagingEvent,
   recordHistorySessionDiagnosticEvent,
+  warnHistoryPagingRefusedWithPendingTurns,
   warnHistorySessionLoadingLayerStalled,
 } from '../../services/historySessionDiagnostics';
+import {
+  resolveHistoryBoundaryTarget,
+  resolveTailBoundaryPrecondition,
+  resolveTailWindowGrowth,
+  transcriptReachesLatestTurn,
+  type RenderedTranscriptRange,
+} from './flowChatLiveTailWindow';
 import './ModernFlowChatContainer.scss';
 import { PermissionRequestPanel } from './PermissionRequestPanel';
 import { pendingPermissionToolCallIdsForSession } from './permissionRequestRouting';
@@ -103,9 +112,13 @@ import {
   buildContinuousHistoryProjection,
   canRetainContinuousHistoryProjection,
 } from './continuousHistoryProjection';
+import {
+  canonicalSessionTurns,
+  projectedSessionTurnCount,
+  resolveTurnOrdinal,
+} from '../../utils/flowChatTurnIdentity';
 
 const log = createLogger('ModernFlowChatContainer');
-
 
 interface ModernFlowChatContainerProps {
   className?: string;
@@ -125,7 +138,7 @@ interface ModernFlowChatContainerProps {
 interface FlowChatTurnSummary {
   turnId: string;
   turnIndex: number;
-  backendTurnIndex?: number;
+  storageTurnIndex?: number;
 }
 
 interface FlowChatHistoryPresentationState extends SessionHistoryPresentation {
@@ -306,11 +319,7 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
     ? viewportIntent
     : null;
   const activeSessionKnownTurnCount = activeSession
-    ? Math.max(
-      activeSession.totalTurnCount ?? 0,
-      activeSession.turnCatalog?.totalTurnCount ?? 0,
-      activeSession.dialogTurns.length,
-    )
+    ? projectedSessionTurnCount(activeSession)
     : 0;
   const activeHistoryPresentationFitsSession = Boolean(
     activeHistoryPresentation
@@ -386,6 +395,44 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
       ? canonicalizedHistoryPresentation
       : null;
   const isRenderingHistoryProjection = Boolean(renderedHistoryPresentation);
+  /**
+   * The range the reader is actually looking at, for the paging ask.
+   *
+   * Deliberately the *rendered* presentation and not `historyPresentationRef`,
+   * which holds the window the store cut. The continuous projection makes those
+   * two differ — see `resolveHistoryBoundaryTarget`.
+   */
+  const renderedHistoryPresentationRef = useRef(renderedHistoryPresentation);
+  renderedHistoryPresentationRef.current = renderedHistoryPresentation;
+  /*
+   * Whether the transcript on screen still reaches the newest Turn.
+   *
+   * Both consumers of `history-reading` — suppressing streaming follow, and the
+   * jump-to-latest affordance — are asking this, not "did the user navigate".
+   * A turn intent used to answer it faithfully because only navigation ever
+   * activated a history window. Automatic tail paging activates one with nobody
+   * navigating: a session whose loaded tail is shorter than the viewport pages
+   * on open, and the viewport sitting on the newest output was then reported as
+   * reading history, which pinned the jump-to-latest bar open and routed it
+   * through a presentation reset that dropped the window and paged it back in.
+   *
+   * The window's own ordinal bookkeeping answers it exactly — these are ledger
+   * numbers, not measurements — and keeps answering it as the session grows: a
+   * Turn arriving past the end of the window flips this back on its own, where
+   * a provenance flag recorded at activation time would stay stale and leave no
+   * way back to the live tail.
+   *
+   * `isReadingTurnViewport` deliberately keeps its old meaning for the auto-tail
+   * placement below, which asks a different question again: who owns the
+   * viewport. Merging those two is the mistake this fixes.
+   */
+  const renderedTranscriptReachesLatestTurn = transcriptReachesLatestTurn({
+    windowEndOrdinalExclusive: renderedHistoryPresentation?.range.endOrdinalExclusive ?? null,
+    knownTurnCount: activeSessionKnownTurnCount,
+  });
+  const isViewportDetachedFromLiveTail = (
+    isReadingTurnViewport && !renderedTranscriptReachesLatestTurn
+  );
   const virtualItems = useMemo(() => {
     if (!activeSession || !renderedHistoryPresentation) {
       return canonicalVirtualItems;
@@ -414,6 +461,29 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
     respond: respondPermission,
     respondBatch: respondPermissionBatch,
   } = usePermissionRequests(activeSession?.sessionId);
+  const activePermissionPanelSnapshot = activeSession && activePermissionBatch
+    ? {
+        ownerSessionId: activeSession.sessionId,
+        batch: activePermissionBatch,
+        totalPendingCount: permissionRequests.length,
+        aboveChatInput: permissionPanelAboveChatInput,
+        onRespond: respondPermission,
+        onRespondBatch: respondPermissionBatch,
+      }
+    : null;
+  const retainedPermissionPanelSnapshotRef = useRef(activePermissionPanelSnapshot);
+  let renderedPermissionPanelSnapshot = activePermissionPanelSnapshot;
+  if (activePermissionPanelSnapshot) {
+    retainedPermissionPanelSnapshotRef.current = activePermissionPanelSnapshot;
+  } else if (
+    retainedPermissionPanelSnapshotRef.current?.ownerSessionId === activeSession?.sessionId
+  ) {
+    renderedPermissionPanelSnapshot = retainedPermissionPanelSnapshotRef.current;
+  } else {
+    // A retained exit belongs to its originating session. Never let it cross a
+    // session boundary with the new session's callbacks or surrounding props.
+    retainedPermissionPanelSnapshotRef.current = null;
+  }
   const visibleTurnInfo = useVisibleTurnInfo();
   const [queuedTurnNavigation, setQueuedTurnNavigation] = useState<QueuedTurnNavigation | null>(null);
   const [pendingHistoryOpenSession, setPendingHistoryOpenSession] = useState<HistorySessionOpenIntentDetail | null>(null);
@@ -432,12 +502,12 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
   const [stoppingBackgroundCommandIds, setStoppingBackgroundCommandIds] = useState<Set<string>>(() => new Set());
   const [backgroundCommandInputTarget, setBackgroundCommandInputTarget] = useState<FlowChatHeaderCommandSummary | null>(null);
   const [isSendingBackgroundCommandInput, setIsSendingBackgroundCommandInput] = useState(false);
-  const autoPinnedTurnKeyRef = useRef<string | null>(null);
+  const autoTailTurnKeyRef = useRef<string | null>(null);
   const releasedHistoryCompletionKeyRef = useRef<string | null>(null);
   const visibleTurnInfoRef = useRef<VisibleTurnInfo | null>(visibleTurnInfo);
   const turnSummariesRef = useRef<FlowChatTurnSummary[]>([]);
   const turnRailTurnIdsRef = useRef<Set<string>>(new Set());
-  const requestTurnNavigationPinRef = useRef<((turnId: string) => FlowChatTurnPinRequestStatus) | null>(null);
+  const requestTurnNavigationRef = useRef<((turnId: string) => FlowChatTurnNavigationStatus) | null>(null);
   const searchFullHistorySessionIdRef = useRef<string | null>(null);
   const virtualListRef = useRef<VirtualMessageListRef>(null);
   const chatScopeRef = useRef<HTMLDivElement>(null);
@@ -532,18 +602,6 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
     setHistoryBoundaryState(IDLE_HISTORY_BOUNDARY_STATE);
     setQueuedTurnNavigation(null);
   }, [activeSession?.sessionId, continuousHistoryProjectionEligible, updateViewportIntent]);
-
-  const handleBeforeTurnPinRequest = useCallback((request: FlowChatPinTurnToTopRequest) => {
-    const currentViewportIntent = viewportIntentRef.current;
-    if (
-      request.source === 'send-message'
-      && currentViewportIntent?.sessionId === request.sessionId
-      && currentViewportIntent.kind === 'turn'
-      && currentViewportIntent.source === 'history-range'
-    ) {
-      switchToLiveTailForSession(request.sessionId);
-    }
-  }, [switchToLiveTailForSession]);
 
   useEffect(() => {
     historyPresentationRef.current = historyPresentation;
@@ -785,18 +843,15 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
   }, [t]);
 
   const turnSummaries = useMemo<FlowChatTurnSummary[]>(() => {
-    const turns = activeSession?.dialogTurns ?? [];
-    const result: FlowChatTurnSummary[] = [];
-    for (const turn of turns) {
-      if (!turn.userMessage || turn.userMessage.metadata?.usageReportProvisional === true) continue;
-      result.push({
-        turnId: turn.id,
-        turnIndex: result.length + 1,
-        backendTurnIndex: turn.backendTurnIndex,
-      });
+    if (!activeSession) {
+      return [];
     }
-    return result;
-  }, [activeSession?.dialogTurns]);
+    return canonicalSessionTurns(activeSession).map((turn, index) => ({
+        turnId: turn.id,
+        turnIndex: (resolveTurnOrdinal(activeSession, turn) ?? index) + 1,
+        storageTurnIndex: turn.storageTurnIndex ?? turn.backendTurnIndex,
+      }));
+  }, [activeSession]);
   const renderedTurns = useMemo(
     () => renderedHistoryPresentation
       ? renderedHistoryPresentation.turns
@@ -804,28 +859,20 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
     [activeSession?.dialogTurns, renderedHistoryPresentation],
   );
   const renderedTurnSummaries = useMemo<FlowChatTurnSummary[]>(() => {
-    const result: FlowChatTurnSummary[] = [];
-    for (const turn of renderedTurns) {
-      if (!turn.userMessage || turn.userMessage.metadata?.usageReportProvisional === true) continue;
-      result.push({
+    return renderedTurns
+      .filter(turn => turn.userMessage?.metadata?.usageReportProvisional !== true)
+      .map((turn, index) => ({
         turnId: turn.id,
-        turnIndex: result.length + 1,
-        backendTurnIndex: turn.backendTurnIndex,
-      });
-    }
-    return result;
+        turnIndex: index + 1,
+        storageTurnIndex: turn.storageTurnIndex ?? turn.backendTurnIndex,
+      }));
   }, [renderedTurns]);
   const activeTurnCatalog = activeSession?.turnCatalog;
   const turnCatalog = activeTurnCatalog?.sessionId === activeSession?.sessionId
     ? activeTurnCatalog
     : undefined;
-  const sessionTotalTurnCount = Math.max(
-    activeSession?.totalTurnCount ?? 0,
-    turnCatalog?.totalTurnCount ?? 0,
-    turnSummaries.length,
-  );
-  const absoluteTurnIndexOffset = activeSession?.isPartial === true
-    ? Math.max(0, sessionTotalTurnCount - turnSummaries.length)
+  const sessionTotalTurnCount = activeSession
+    ? projectedSessionTurnCount(activeSession)
     : 0;
   const absoluteRenderedTurnSummaries = useMemo<FlowChatTurnSummary[]>(() => {
     if (renderedHistoryPresentation) {
@@ -834,18 +881,14 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
         turnIndex: renderedHistoryPresentation.range.startOrdinal + index + 1,
       }));
     }
-    if (absoluteTurnIndexOffset === 0 && activeSession?.isPartial !== true) {
-      return renderedTurnSummaries;
-    }
     return renderedTurnSummaries.map(turn => ({
       ...turn,
-      turnIndex: typeof turn.backendTurnIndex === 'number'
-        ? turn.backendTurnIndex + 1
-        : turn.turnIndex + absoluteTurnIndexOffset,
+      turnIndex: activeSession
+        ? (resolveTurnOrdinal(activeSession, turn.turnId) ?? turn.turnIndex - 1) + 1
+        : turn.turnIndex,
     }));
   }, [
-    absoluteTurnIndexOffset,
-    activeSession?.isPartial,
+    activeSession,
     renderedHistoryPresentation,
     renderedTurnSummaries,
   ]);
@@ -867,8 +910,9 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
       range.turns.forEach((turn, index) => {
         const loaded = { turnId: turn.id, content: turn.userMessage?.content ?? '' };
         loadedByOrdinal.set(range.startOrdinal + index, loaded);
-        if (typeof turn.backendTurnIndex === 'number') {
-          loadedByStorageIndex.set(turn.backendTurnIndex, loaded);
+        const storageTurnIndex = turn.storageTurnIndex ?? turn.backendTurnIndex;
+        if (typeof storageTurnIndex === 'number') {
+          loadedByStorageIndex.set(storageTurnIndex, loaded);
         }
       });
     }
@@ -878,8 +922,8 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
         content: dialogTurnById.get(summary.turnId)?.userMessage?.content ?? '',
       };
       loadedByOrdinal.set(Math.max(0, summary.turnIndex - 1), loaded);
-      if (typeof summary.backendTurnIndex === 'number') {
-        loadedByStorageIndex.set(summary.backendTurnIndex, loaded);
+      if (typeof summary.storageTurnIndex === 'number') {
+        loadedByStorageIndex.set(summary.storageTurnIndex, loaded);
       }
     }
 
@@ -918,8 +962,8 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
         continue;
       }
       items.push({
-        itemKey: typeof summary.backendTurnIndex === 'number'
-          ? `storage:${summary.backendTurnIndex}`
+        itemKey: typeof summary.storageTurnIndex === 'number'
+          ? `storage:${summary.storageTurnIndex}`
           : `live:${summary.turnId}`,
         turnId: summary.turnId,
         ordinal: Math.max(0, summary.turnIndex - 1),
@@ -1040,7 +1084,6 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
     [activeSession?.dialogTurns, latestTurnId],
   );
   const latestTurnUsesFollowOutput = shouldUseLatestTurnFollowOutput(latestTurn);
-  const latestTurnUsesStickyPin = shouldUseStickyLatestPin(latestTurn);
 
   const navigationVisibleTurnInfo = useMemo<VisibleTurnInfo | null>(() => {
     if (!visibleTurnInfo) {
@@ -1066,10 +1109,10 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
     return {
       ...navigationVisibleTurnInfo,
       turnIndex: absoluteRenderedTurnSummaryById.get(navigationVisibleTurnInfo.turnId)?.turnIndex
-        ?? navigationVisibleTurnInfo.turnIndex + absoluteTurnIndexOffset,
+        ?? navigationVisibleTurnInfo.turnIndex,
       totalTurns: sessionTotalTurnCount,
     };
-  }, [absoluteTurnIndexOffset, absoluteRenderedTurnSummaryById, navigationVisibleTurnInfo, sessionTotalTurnCount]);
+  }, [absoluteRenderedTurnSummaryById, navigationVisibleTurnInfo, sessionTotalTurnCount]);
   useEffect(() => {
     visibleTurnInfoRef.current = visibleTurnInfo;
   }, [visibleTurnInfo]);
@@ -1097,19 +1140,17 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
     return effectiveVisibleTurnInfo?.userMessage ?? '';
   }, [effectiveVisibleTurnInfo?.turnId, effectiveVisibleTurnInfo?.userMessage, renderedTurns, resolveLocalCommandHeaderTitle]);
 
-  const requestTurnNavigationPin = useCallback((turnId: string): FlowChatTurnPinRequestStatus => {
+  const requestTurnNavigation = useCallback((turnId: string): FlowChatTurnNavigationStatus => {
     if (!isViewportActive) {
       return 'rejected';
     }
-    return virtualListRef.current?.pinTurnToTopWithStatus(turnId, {
+    return virtualListRef.current?.navigateToTurnWithStatus(turnId, {
       behavior: 'auto',
-      pinMode: 'transient',
-      alignmentPolicy: 'best-effort',
     }) ?? 'rejected';
   }, [isViewportActive]);
   useEffect(() => {
-    requestTurnNavigationPinRef.current = requestTurnNavigationPin;
-  }, [requestTurnNavigationPin]);
+    requestTurnNavigationRef.current = requestTurnNavigation;
+  }, [requestTurnNavigation]);
   const handleVirtualListUserScrollIntent = useCallback(() => {
     setQueuedTurnNavigation(null);
   }, []);
@@ -1153,8 +1194,8 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
         return;
       }
 
-      const pinStatus = requestTurnNavigationPinRef.current?.(queuedTurnId) ?? 'rejected';
-      if (pinStatus === 'settled' || pinStatus === 'pending') {
+      const navigationStatus = requestTurnNavigationRef.current?.(queuedTurnId) ?? 'rejected';
+      if (navigationStatus === 'settled' || navigationStatus === 'pending') {
         setQueuedTurnNavigation(null);
         return;
       }
@@ -1183,7 +1224,7 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
   ]);
 
   useLayoutEffect(() => {
-    autoPinnedTurnKeyRef.current = null;
+    autoTailTurnKeyRef.current = null;
     releasedHistoryCompletionKeyRef.current = null;
     searchFullHistorySessionIdRef.current = null;
   }, [activeSession?.sessionId]);
@@ -1200,163 +1241,47 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
       ? `${sessionId}:${latestTurnId}:${turnSummaries.length}`
       : null;
     if (
-      !isViewportActive
-      ||
-      !sessionId
-      || isReadingTurnViewport
-      || !latestTurnId
-      || autoPinnedTurnKeyRef.current === latestTurnKey
+      !isViewportActive ||
+      !sessionId ||
+      isReadingTurnViewport ||
+      !latestTurnId ||
+      !latestTurnKey ||
+      autoTailTurnKeyRef.current === latestTurnKey
     ) {
       return;
     }
 
-    const resolvedLatestTurnId = latestTurnId;
-    const resolvedLatestTurnKey = latestTurnKey;
-    const pinMode = latestTurnUsesStickyPin
-      ? 'sticky-latest'
-      : null;
     if (latestTurnUsesFollowOutput) {
-      autoPinnedTurnKeyRef.current = resolvedLatestTurnKey;
-      startupTrace.markPhase('historical_session_latest_anchor_skipped', {
-        sessionId,
-        latestTurnId,
-        reason: 'streaming_follow_output',
-        mode: pinMode ?? 'follow-output',
-        turnCount: turnSummaries.length,
-      });
+      autoTailTurnKeyRef.current = latestTurnKey;
       return;
-    }
-    const previousAnchoredLatestTurnKeyPrefix = `${sessionId}:${latestTurnId}:`;
-    const hasPreviouslyAnchoredSameLatestTurn =
-      autoPinnedTurnKeyRef.current?.startsWith(previousAnchoredLatestTurnKeyPrefix) === true;
-    const latestTurnRenderedInViewport = virtualListRef.current?.isTurnRenderedInViewport(latestTurnId) === true;
-    const sameLatestTurnCountChanged =
-      hasPreviouslyAnchoredSameLatestTurn &&
-      autoPinnedTurnKeyRef.current !== resolvedLatestTurnKey;
-    const shouldSkipLocalFullHistoryReanchor =
-      sameLatestTurnCountChanged &&
-      !isRemoteTraceContext(activeSession.remoteConnectionId, activeSession.remoteSshHost);
-    const shouldForceLatestAnchorAfterTurnCountChange =
-      sameLatestTurnCountChanged &&
-      !shouldSkipLocalFullHistoryReanchor;
-    if (shouldSkipLocalFullHistoryReanchor) {
-      autoPinnedTurnKeyRef.current = resolvedLatestTurnKey;
-      startupTrace.markPhase('historical_session_latest_anchor_skipped', {
-        sessionId,
-        latestTurnId,
-        reason: 'local_full_history_projection',
-        mode: pinMode ?? 'bottom',
-        turnCount: turnSummaries.length,
-      });
-      return;
-    }
-    if (
-      !shouldForceLatestAnchorAfterTurnCountChange &&
-      hasPreviouslyAnchoredSameLatestTurn &&
-      visibleTurnInfo?.turnId === latestTurnId &&
-      latestTurnRenderedInViewport
-    ) {
-      autoPinnedTurnKeyRef.current = resolvedLatestTurnKey;
-      startupTrace.markPhase('historical_session_latest_anchor_skipped', {
-        sessionId,
-        latestTurnId,
-        reason: 'latest_turn_already_visible',
-        mode: pinMode ?? 'bottom',
-      });
-      return;
-    }
-    if (
-      hasPreviouslyAnchoredSameLatestTurn &&
-      visibleTurnInfo?.turnId === latestTurnId &&
-      !latestTurnRenderedInViewport
-    ) {
-      startupTrace.markPhase('historical_session_latest_anchor_stale_visible_info', {
-        sessionId,
-        latestTurnId,
-        mode: pinMode ?? 'bottom',
-      });
     }
 
-    let frameId: number | null = null;
     let cancelled = false;
+    let frameId: number | null = null;
     let attempts = 0;
-
-    const attemptLatestViewportAnchor = () => {
-      if (cancelled) {
-        return;
-      }
-
+    const scrollLatestTurnToNaturalEnd = () => {
+      if (cancelled) return;
       attempts += 1;
-      let accepted = false;
-      const list = virtualListRef.current;
-
-      if (pinMode) {
-        accepted = list?.pinTurnToTop(resolvedLatestTurnId, {
-          behavior: 'auto',
-          pinMode,
-        }) ?? false;
-      } else if (list) {
-        accepted = list.scrollToTurnEndAndClearPin(resolvedLatestTurnId);
-      }
-
-      startupTrace.markPhase('historical_session_latest_anchor_attempt', {
-        sessionId,
-        latestTurnId: resolvedLatestTurnId,
-        accepted,
-        attempt: attempts,
-        mode: pinMode ?? 'bottom',
-      });
-
-      if (accepted) {
-        autoPinnedTurnKeyRef.current = resolvedLatestTurnKey;
+      if (virtualListRef.current?.scrollToTurnEnd(latestTurnId)) {
+        autoTailTurnKeyRef.current = latestTurnKey;
         return;
       }
-
-      if (attempts >= LATEST_TURN_AUTO_PIN_MAX_ATTEMPTS) {
-        startupTrace.markPhase('historical_session_latest_anchor_failed', {
-          sessionId,
-          latestTurnId: resolvedLatestTurnId,
-          attempts,
-          mode: pinMode ?? 'bottom',
-        });
-        return;
+      if (attempts < LATEST_TURN_AUTO_PIN_MAX_ATTEMPTS) {
+        frameId = requestAnimationFrame(scrollLatestTurnToNaturalEnd);
       }
-
-      frameId = requestAnimationFrame(attemptLatestViewportAnchor);
     };
-
-    const shouldAttemptLatestAnchorImmediately =
-      shouldForceLatestAnchorAfterTurnCountChange ||
-      activeSession?.isHistorical === true ||
-      activeSession?.contextRestoreState === 'pending' ||
-      hasPendingHistoryCompletion;
-
-    if (shouldAttemptLatestAnchorImmediately) {
-      attemptLatestViewportAnchor();
-    } else {
-      frameId = requestAnimationFrame(attemptLatestViewportAnchor);
-    }
-
+    frameId = requestAnimationFrame(scrollLatestTurnToNaturalEnd);
     return () => {
       cancelled = true;
-      if (frameId !== null) {
-        cancelAnimationFrame(frameId);
-      }
+      if (frameId !== null) cancelAnimationFrame(frameId);
     };
   }, [
     activeSession?.sessionId,
-    activeSession?.isHistorical,
-    activeSession?.contextRestoreState,
-    activeSession?.remoteConnectionId,
-    activeSession?.remoteSshHost,
-    hasPendingHistoryCompletion,
-    isViewportActive,
     isReadingTurnViewport,
+    isViewportActive,
     latestTurnId,
     latestTurnUsesFollowOutput,
-    latestTurnUsesStickyPin,
     turnSummaries.length,
-    visibleTurnInfo?.turnId,
   ]);
 
   useEffect(() => {
@@ -1540,9 +1465,107 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
     return true;
   }, [activeSession?.sessionId, switchToLiveTailForSession]);
 
+  /*
+   * Keep a tail-anchored history window anchored as the session grows.
+   *
+   * A window paged in from the tail stops at the newest Turn that existed when
+   * it was cut. The session then appends a Turn and nothing moves the window's
+   * end, so the transcript on screen silently stops at the previous Turn: the
+   * message the user just sent is not rendered at all, and because
+   * `latestTurnId` is read off the rendered items, follow-output never even
+   * learns a new Turn exists — no pin, no follow, and no way to scroll to it.
+   *
+   * `resolveTailWindowGrowth` carries the reasoning and the reason it is not
+   * edge-triggered; this effect is only the plumbing.
+   */
+  const tailAnchoredWindowEndRef = useRef<number | null>(null);
+  useEffect(() => {
+    const sessionId = activeSession?.sessionId;
+    const windowEndOrdinalExclusive = sessionId
+      ? renderedHistoryPresentation?.range.endOrdinalExclusive ?? null
+      : null;
+    const growth = resolveTailWindowGrowth({
+      windowEndOrdinalExclusive,
+      knownTurnCount: activeSessionKnownTurnCount,
+      tailAnchoredWindowEnd: tailAnchoredWindowEndRef.current,
+    });
+
+    if (growth === 'release') {
+      tailAnchoredWindowEndRef.current = null;
+      return;
+    }
+    if (growth === 'anchor') {
+      tailAnchoredWindowEndRef.current = windowEndOrdinalExclusive;
+      return;
+    }
+    if (growth === 'none' || !sessionId || windowEndOrdinalExclusive === null) {
+      return;
+    }
+
+    const extended = flowChatStore.extendSessionHistoryWindow(sessionId, 'after');
+    // Requiring real growth keeps a store that declines to extend from being
+    // re-applied under an ever-rising revision forever.
+    if (extended && extended.range.endOrdinalExclusive > windowEndOrdinalExclusive) {
+      tailAnchoredWindowEndRef.current = extended.range.endOrdinalExclusive;
+      applyHistoryPresentation(sessionId, extended, { completedBoundary: 'after' });
+      return;
+    }
+
+    // The newest Turn is not inside the loaded range this window was cut from.
+    // Dropping back to the canonical tail costs a visible re-page of the
+    // history above, which is why it is the fallback and not the rule — but it
+    // is the only branch that always shows the message the user just sent.
+    restoreTailPresentation();
+  }, [
+    activeSession?.sessionId,
+    activeSessionKnownTurnCount,
+    applyHistoryPresentation,
+    renderedHistoryPresentation,
+    restoreTailPresentation,
+  ]);
+
   const jumpToLiveTail = useCallback(() => {
     return restoreTailPresentation({ followLatest: true });
   }, [restoreTailPresentation]);
+
+  /*
+   * A message sent from the composer gives up whatever history window is on
+   * screen.
+   *
+   * `resolveTailWindowGrowth` deliberately leaves a navigated window alone as
+   * the session grows, because a Turn arriving from elsewhere is no reason to
+   * take a reader out of the history they are in. A Turn they submitted
+   * themselves is, and nothing in the ledger tells the two apart — measured, a
+   * message sent while parked on the first Turn left the transcript on a
+   * 24-item window it was never in, with follow-output holding an answer it
+   * had nothing to align.
+   *
+   * Deliberately not `followLatest`. Restoring the tail is enough: the Turn
+   * comes into the transcript, and follow-output pins it to the viewport top
+   * the way it pins any newly submitted Turn.
+   */
+  useEffect(() => {
+    const handleMessageSubmitted = (event: Event) => {
+      const { sessionId } = (event as CustomEvent<FlowChatMessageSubmittedRequest>).detail ?? {};
+      const reaches = transcriptReachesLatestTurn({
+        windowEndOrdinalExclusive: renderedHistoryPresentation?.range.endOrdinalExclusive ?? null,
+        knownTurnCount: activeSessionKnownTurnCount,
+      });
+      if (!sessionId || sessionId !== activeSessionIdRef.current) return;
+      if (reaches) {
+        return;
+      }
+      restoreTailPresentation();
+    };
+    window.addEventListener(FLOWCHAT_MESSAGE_SUBMITTED_EVENT, handleMessageSubmitted);
+    return () => {
+      window.removeEventListener(FLOWCHAT_MESSAGE_SUBMITTED_EVENT, handleMessageSubmitted);
+    };
+  }, [
+    activeSessionKnownTurnCount,
+    renderedHistoryPresentation,
+    restoreTailPresentation,
+  ]);
 
   const handleSearchChange = useCallback((query: string) => {
     setSearchQuery(query);
@@ -1586,8 +1609,8 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
         turnId: renderedTargetId,
         source: isRenderingHistoryProjection ? 'history-range' : 'canonical-tail',
       });
-      const pinStatus = requestTurnNavigationPin(renderedTargetId);
-      if (pinStatus === 'settled' || pinStatus === 'pending') {
+      const navigationStatus = requestTurnNavigation(renderedTargetId);
+      if (navigationStatus === 'settled' || navigationStatus === 'pending') {
         setQueuedTurnNavigation(null);
         return true;
       }
@@ -1619,12 +1642,10 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
         recentHistoryPresentation.range,
       );
       if (reactivatedPresentation) {
-        const preparedPin = virtualListRef.current?.prepareTurnPinToTop(recentHistoryTurn.id, {
+        const preparedNavigation = virtualListRef.current?.prepareTurnNavigation(recentHistoryTurn.id, {
           behavior: 'auto',
-          pinMode: 'transient',
-          alignmentPolicy: 'best-effort',
         }) ?? 'rejected';
-        if (preparedPin !== 'rejected') {
+        if (preparedNavigation !== 'rejected') {
           applyHistoryPresentation(sessionId, reactivatedPresentation, {
             viewportTarget: {
               ordinal: targetItem.ordinal,
@@ -1660,12 +1681,10 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
         return false;
       }
 
-      const preparedPin = virtualListRef.current?.prepareTurnPinToTop(targetTurnId, {
+      const preparedNavigation = virtualListRef.current?.prepareTurnNavigation(targetTurnId, {
         behavior: 'auto',
-        pinMode: 'transient',
-        alignmentPolicy: 'best-effort',
       }) ?? 'rejected';
-      if (preparedPin === 'rejected') {
+      if (preparedNavigation === 'rejected') {
         return false;
       }
       const presentation = flowChatStore.activateSessionHistoryWindow(
@@ -1715,7 +1734,7 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
     applyHistoryPresentation,
     isRenderingHistoryProjection,
     renderedTurnSummaries,
-    requestTurnNavigationPin,
+    requestTurnNavigation,
     restoreTailPresentation,
     turnRailItems,
     updateViewportIntent,
@@ -1787,7 +1806,6 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
     virtualItems,
     virtualListRef,
     onExpandExploreGroup: handleExpandGroup,
-    onBeforeTurnPinRequest: handleBeforeTurnPinRequest,
     onNavigateToFocusTurn: handleNavigateToFocusTurn,
   });
 
@@ -1828,28 +1846,118 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
         historyView?.catalog?.totalTurnCount ?? 0,
         session?.totalTurnCount ?? 0,
       );
-      let targetOrdinal: number;
-      if (presentation) {
-        targetOrdinal = direction === 'before'
-          ? presentation.range.startOrdinal - 1
-          : presentation.range.endOrdinalExclusive;
-      } else {
-        if (
-          direction !== 'before'
-          || session?.isPartial !== true
-          || session.turnCatalog?.sessionId !== sessionId
-        ) {
-          return 'cancelled';
+      const loadedTurnCount = session?.dialogTurns.length ?? 0;
+      recordHistoryPagingEvent(sessionId, 'requested', {
+        direction,
+        hasPresentation: presentation !== null,
+        isPartial: session?.isPartial,
+        historyState: session?.historyState,
+        turnCatalogMatches: session?.turnCatalog?.sessionId === sessionId,
+        catalogTotalTurnCount: historyView?.catalog?.totalTurnCount ?? null,
+        sessionTotalTurnCount: session?.totalTurnCount ?? null,
+        resolvedTotalTurnCount: totalTurnCount,
+        loadedTurnCount,
+        loadedRangeCount: historyView?.loadedRanges.length ?? null,
+      });
+
+      /*
+       * The range the ask is derived from is the one on screen, which is the
+       * continuous projection when that is what is rendered. `presentation`
+       * stays the store's window, because the extension below operates on it.
+       */
+      let renderedRange: RenderedTranscriptRange | null =
+        renderedHistoryPresentationRef.current?.sessionId === sessionId
+          ? renderedHistoryPresentationRef.current.range
+          : null;
+      if (!presentation) {
+        const precondition = resolveTailBoundaryPrecondition({
+          direction,
+          isPartial: session?.isPartial,
+          hasSession: session !== undefined,
+          turnCatalogMatches: session?.turnCatalog?.sessionId === sessionId,
+        });
+        if (precondition !== 'ask') {
+          /*
+           * Told apart because only one of them stops the asking. A boundary
+           * that answers `cancelled` is re-armed and asked again on the
+           * reader's next scroll event, which is right while the catalog is
+           * still on its way and is a treadmill once the session has every Turn
+           * it will ever have.
+           */
+          recordHistoryPagingEvent(
+            sessionId,
+            precondition === 'exhausted' ? 'outcome_exhausted' : 'outcome_cancelled',
+            {
+              direction,
+              reason: precondition === 'exhausted' ? 'no-window-nothing-loadable' : 'precondition',
+              isPartial: session?.isPartial,
+              turnCatalogMatches: session?.turnCatalog?.sessionId === sessionId,
+            },
+          );
+          return precondition;
         }
         const canonicalTailRange = flowChatStore.getSessionCanonicalTailRange(sessionId);
         if (!canonicalTailRange) {
+          recordHistoryPagingEvent(sessionId, 'outcome_not_ready', {
+            direction,
+            reason: 'no-canonical-tail-range',
+          });
           return 'not-ready';
         }
-        targetOrdinal = canonicalTailRange.startOrdinal - 1;
+        // No window, so the transcript on screen is the canonical tail: it
+        // starts where that range does and runs to the newest Turn.
+        renderedRange = {
+          startOrdinal: canonicalTailRange.startOrdinal,
+          endOrdinalExclusive: totalTurnCount,
+        };
+        recordHistoryPagingEvent(sessionId, 'target_resolved', {
+          direction,
+          canonicalTailStartOrdinal: canonicalTailRange.startOrdinal,
+          targetOrdinal: canonicalTailRange.startOrdinal - 1,
+        });
       }
-      if (targetOrdinal < 0 || targetOrdinal >= totalTurnCount) {
+      if (!renderedRange) {
+        recordHistoryPagingEvent(sessionId, 'outcome_not_ready', {
+          direction,
+          reason: 'no-rendered-range',
+        });
+        return 'not-ready';
+      }
+      const target = resolveHistoryBoundaryTarget({
+        direction,
+        renderedRange,
+        knownTurnCount: totalTurnCount,
+      });
+      if (target.status === 'exhausted') {
+        recordHistoryPagingEvent(sessionId, 'outcome_exhausted', {
+          direction,
+          reason: target.reason,
+          renderedStartOrdinal: renderedRange.startOrdinal,
+          renderedEndOrdinalExclusive: renderedRange.endOrdinalExclusive,
+          windowEndOrdinalExclusive: presentation?.range.endOrdinalExclusive ?? null,
+          totalTurnCount,
+        });
+        /*
+         * `exhausted` latches the direction off until the window moves, so
+         * reaching it on an unknown or contradictory total is how history goes
+         * silently missing rather than merely late.
+         *
+         * `reached-latest` is not that. It is what the bottom edge of a live
+         * transcript answers every time the reader arrives at it.
+         */
+        if (target.reason === 'beyond-known-total') {
+          warnHistoryPagingRefusedWithPendingTurns(sessionId, {
+            direction,
+            reason: totalTurnCount <= 0 ? 'exhausted-on-unknown-total' : 'exhausted-beyond-total',
+            isPartial: session?.isPartial,
+            loadedTurnCount,
+            totalTurnCount,
+            targetOrdinal: renderedRange.startOrdinal - 1,
+          });
+        }
         return 'exhausted';
       }
+      const targetOrdinal = target.targetOrdinal;
 
       setHistoryBoundaryState(previous => ({ ...previous, [direction]: 'loading' }));
       let viewportPreparationStarted = false;
@@ -1860,6 +1968,22 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
           after: direction === 'after' ? 12 : 1,
         });
         if (!result.isCurrent || activeSessionIdRef.current !== sessionId) {
+          recordHistoryPagingEvent(sessionId, 'outcome_cancelled', {
+            direction,
+            reason: 'superseded',
+            targetOrdinal,
+            resultIsCurrent: result.isCurrent,
+            activeSessionIsCurrent: activeSessionIdRef.current === sessionId,
+          });
+          /*
+           * The status is ours to clear even though the load was not ours to
+           * finish. Left as it was, this returns silently with the boundary
+           * still reading `loading`, and the reader is shown history being
+           * prepared by nobody for the rest of the session.
+           */
+          if (activeSessionIdRef.current === sessionId) {
+            setHistoryBoundaryState(previous => ({ ...previous, [direction]: 'idle' }));
+          }
           return 'cancelled';
         }
         if (result.status !== 'ready') {
@@ -1869,10 +1993,27 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
               'sequential-history-navigation',
             );
             if (historyReady && activeSessionIdRef.current === sessionId) {
+              recordHistoryPagingEvent(sessionId, 'outcome_applied', {
+                direction,
+                targetOrdinal,
+                reason: 'full-history-hydrated',
+              });
               setHistoryBoundaryState(previous => ({ ...previous, [direction]: 'idle' }));
               return 'applied';
             }
           }
+          /*
+           * A refusal the reader is shown. It was silent here, and a status the
+           * boundary keeps forever deserves a line saying which load produced
+           * it: 266 asks in one session all landed on `not-found` and left the
+           * status standing, with nothing in the trail between the ask and the
+           * complaint.
+           */
+          recordHistoryPagingEvent(sessionId, 'outcome_not_ready', {
+            direction,
+            reason: `load-${result.status}`,
+            targetOrdinal,
+          });
           setHistoryBoundaryState(previous => ({ ...previous, [direction]: 'error' }));
           return 'not-ready';
         }
@@ -1888,6 +2029,26 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
           || !activeSessionIsCurrent
           || !presentationOwnerIsCurrent
         ) {
+          recordHistoryPagingEvent(sessionId, 'outcome_cancelled', {
+            direction,
+            reason: 'viewport-preparation',
+            preparationResult: preparationResult ?? null,
+            activeSessionIsCurrent,
+            presentationOwnerIsCurrent,
+          });
+          if (preparationResult === false && activeSessionIsCurrent) {
+            // The window was fetched and then thrown away: the Turns exist but
+            // never reach the transcript, and the boundary status goes back to
+            // idle exactly as if there were none.
+            warnHistoryPagingRefusedWithPendingTurns(sessionId, {
+              direction,
+              reason: 'viewport-preparation-declined',
+              isPartial: session?.isPartial,
+              loadedTurnCount,
+              totalTurnCount,
+              targetOrdinal,
+            });
+          }
           if (viewportPreparationStarted) {
             options?.cancelViewportPresentationCommit?.();
           }
@@ -1904,6 +2065,11 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
           if (viewportPreparationStarted) {
             options?.cancelViewportPresentationCommit?.();
           }
+          recordHistoryPagingEvent(sessionId, 'outcome_not_ready', {
+            direction,
+            reason: 'no-next-presentation',
+            targetOrdinal,
+          });
           setHistoryBoundaryState(previous => ({ ...previous, [direction]: 'error' }));
           return 'not-ready';
         }
@@ -1917,6 +2083,12 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
               ]?.id ?? null,
             },
           } : {}),
+        });
+        recordHistoryPagingEvent(sessionId, 'outcome_applied', {
+          direction,
+          targetOrdinal,
+          startOrdinal: nextPresentation.range.startOrdinal,
+          endOrdinalExclusive: nextPresentation.range.endOrdinalExclusive,
         });
         return 'applied';
       } catch (error) {
@@ -2319,16 +2491,19 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
           onSend={handleSendBackgroundCommandInput}
         />
 
-        {activePermissionBatch && (
-          <PermissionRequestPanel
-            key={`${activePermissionBatch.sessionId}:${activePermissionBatch.roundId}`}
-            requests={activePermissionBatch.requests}
-            totalPendingCount={permissionRequests.length}
-            aboveChatInput={permissionPanelAboveChatInput}
-            onRespond={respondPermission}
-            onRespondBatch={respondPermissionBatch}
-          />
-        )}
+        <PresenceBoundary active={activePermissionPanelSnapshot != null}>
+          {renderedPermissionPanelSnapshot ? (
+            <PermissionRequestPanel
+              key={`${renderedPermissionPanelSnapshot.batch.sessionId}:${renderedPermissionPanelSnapshot.batch.roundId}`}
+              requests={renderedPermissionPanelSnapshot.batch.requests}
+              totalPendingCount={renderedPermissionPanelSnapshot.totalPendingCount}
+              aboveChatInput={renderedPermissionPanelSnapshot.aboveChatInput}
+              visible={activePermissionPanelSnapshot != null}
+              onRespond={renderedPermissionPanelSnapshot.onRespond}
+              onRespondBatch={renderedPermissionPanelSnapshot.onRespondBatch}
+            />
+          ) : null}
+        </PresenceBoundary>
 
         <div
           className="modern-flowchat-container__messages"
@@ -2389,7 +2564,7 @@ export const ModernFlowChatContainer: React.FC<ModernFlowChatContainerProps> = (
                   items={virtualItems}
                   isViewportActive={isViewportActive}
                   presentationMode={isRenderingHistoryProjection ? 'history-window' : 'tail'}
-                  viewportMode={isReadingTurnViewport ? 'history-reading' : 'live-tail'}
+                  viewportMode={isViewportDetachedFromLiveTail ? 'history-reading' : 'live-tail'}
                   historyWindow={isShowingHistoryPresentation ? activeHistoryPresentation?.range ?? null : null}
                   presentationRevision={isShowingHistoryPresentation ? activeHistoryPresentation?.revision ?? 0 : 0}
                   historyBoundaryState={historyBoundaryState}

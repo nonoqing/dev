@@ -42,6 +42,7 @@ struct WorkspaceStateSnapshot {
     current_workspace: Option<WorkspaceInfoDto>,
     recent_workspaces: Vec<WorkspaceInfoDto>,
     opened_workspaces: Vec<WorkspaceInfoDto>,
+    primary_assistant_workspace_id: Option<String>,
     legacy_remote_workspace: Option<crate::api::RemoteWorkspace>,
 }
 
@@ -52,6 +53,7 @@ pub struct WorkspaceStartupStateSnapshotDto {
     pub current_workspace: Option<WorkspaceInfoDto>,
     pub recent_workspaces: Vec<WorkspaceInfoDto>,
     pub opened_workspaces: Vec<WorkspaceInfoDto>,
+    pub primary_assistant_workspace_id: Option<String>,
     pub legacy_remote_workspace: Option<crate::api::RemoteWorkspace>,
 }
 
@@ -404,6 +406,15 @@ pub struct SetActiveWorkspaceRequest {
 pub struct DeleteAssistantWorkspaceRequest {
     pub workspace_id: String,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetPrimaryAssistantWorkspaceRequest {
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct GetPrimaryAssistantWorkspaceRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1145,9 +1156,14 @@ pub async fn initialize_ai(state: State<'_, AppState>) -> Result<String, String>
 
     let ai_config = bitfun_core::util::types::AIConfig::try_from(model_config.clone())
         .map_err(|e| format!("Failed to convert AI configuration: {}", e))?;
+    let proxy_config = if global_config.ai.proxy.enabled {
+        Some(global_config.ai.proxy.clone())
+    } else {
+        None
+    };
     let ai_client = bitfun_core::infrastructure::ai::AIClient::new_with_runtime_options(
         ai_config,
-        None,
+        proxy_config,
         stream_options,
     );
 
@@ -1182,16 +1198,26 @@ async fn create_transient_ai_client_for_config(
     let mut ai_config: bitfun_core::util::types::AIConfig = model_config
         .try_into()
         .map_err(|e| format!("Failed to convert configuration: {}", e))?;
-
-    bitfun_core::infrastructure::ai::client_factory::apply_subscription_auth(&auth, &mut ai_config)
-        .await
-        .map_err(|e| format!("Failed to resolve subscription auth: {}", e))?;
+    let skip_ssl_verify = ai_config.skip_ssl_verify;
 
     let proxy_config = if global_config.ai.proxy.enabled {
         Some(global_config.ai.proxy.clone())
     } else {
         None
     };
+    let subscription_options =
+        bitfun_core::infrastructure::subscription_auth::SubscriptionHttpOptions::new(
+            proxy_config.clone(),
+            skip_ssl_verify,
+        );
+
+    bitfun_core::infrastructure::ai::client_factory::apply_subscription_auth_with_options(
+        &auth,
+        &mut ai_config,
+        &subscription_options,
+    )
+    .await
+    .map_err(|e| format!("Failed to resolve subscription auth: {}", e))?;
 
     Ok(
         bitfun_core::infrastructure::ai::AIClient::new_with_runtime_options(
@@ -1561,6 +1587,37 @@ pub async fn create_assistant_workspace(
 }
 
 #[tauri::command]
+pub async fn get_primary_assistant_workspace(
+    state: State<'_, AppState>,
+    _request: GetPrimaryAssistantWorkspaceRequest,
+) -> Result<Option<WorkspaceInfoDto>, String> {
+    Ok(state
+        .workspace_service
+        .get_primary_assistant_workspace()
+        .await
+        .map(|workspace| WorkspaceInfoDto::from_workspace_info(&workspace)))
+}
+
+#[tauri::command]
+pub async fn set_primary_assistant_workspace(
+    state: State<'_, AppState>,
+    request: SetPrimaryAssistantWorkspaceRequest,
+) -> Result<WorkspaceInfoDto, String> {
+    let workspace = state
+        .workspace_service
+        .set_primary_assistant_workspace(&request.workspace_id)
+        .await
+        .map_err(|error| format!("Failed to set primary assistant workspace: {}", error))?;
+
+    info!(
+        "Primary assistant workspace changed: workspace_id={}, assistant_id={:?}",
+        workspace.id, workspace.assistant_id
+    );
+
+    Ok(WorkspaceInfoDto::from_workspace_info(&workspace))
+}
+
+#[tauri::command]
 pub async fn delete_assistant_workspace(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
@@ -1579,10 +1636,13 @@ pub async fn delete_assistant_workspace(
         ));
     }
 
-    let assistant_id = workspace_info
-        .assistant_id
-        .clone()
-        .ok_or_else(|| "Default assistant workspace cannot be deleted".to_string())?;
+    if state
+        .workspace_service
+        .is_primary_assistant_workspace(&request.workspace_id)
+        .await
+    {
+        return Err("Primary assistant workspace cannot be deleted".to_string());
+    }
 
     if !state
         .workspace_service
@@ -1641,9 +1701,9 @@ pub async fn delete_assistant_workspace(
     }
 
     info!(
-        "Assistant workspace deleted: workspace_id={}, assistant_id={}, path={}",
+        "Assistant workspace deleted: workspace_id={}, assistant_id={:?}, path={}",
         request.workspace_id,
-        assistant_id,
+        workspace_info.assistant_id,
         workspace_info.root_path.display()
     );
 
@@ -1963,12 +2023,17 @@ async fn collect_workspace_state_snapshot(state: &State<'_, AppState>) -> Worksp
         .into_iter()
         .map(|info| WorkspaceInfoDto::from_workspace_info(&info))
         .collect();
+    let primary_assistant_workspace_id = workspace_service
+        .get_primary_assistant_workspace()
+        .await
+        .map(|workspace| workspace.id);
     let legacy_remote_workspace = state.get_remote_workspace_async().await;
 
     WorkspaceStateSnapshot {
         current_workspace,
         recent_workspaces,
         opened_workspaces,
+        primary_assistant_workspace_id,
         legacy_remote_workspace,
     }
 }
@@ -2085,6 +2150,7 @@ async fn initialize_workspace_startup_state_impl(
         current_workspace: snapshot.current_workspace,
         recent_workspaces: snapshot.recent_workspaces,
         opened_workspaces: snapshot.opened_workspaces,
+        primary_assistant_workspace_id: snapshot.primary_assistant_workspace_id,
         legacy_remote_workspace: snapshot.legacy_remote_workspace,
     })
 }
@@ -3215,7 +3281,12 @@ fn split_remote_archive_path(path: &str) -> Result<(String, String), String> {
     //
     // Checked against the input rather than the resolved parent, which is
     // synthesized for relative paths.
-    if trimmed.split('/').rev().skip(1).any(|component| component == "..") {
+    if trimmed
+        .split('/')
+        .rev()
+        .skip(1)
+        .any(|component| component == "..")
+    {
         return Err(format!(
             "Remote path '{}' must not contain '..' components",
             path
@@ -5096,6 +5167,41 @@ pub async fn get_model_configs(
     }
 }
 
+#[tauri::command]
+pub async fn get_ai_model_catalog() -> Result<bitfun_core::AIModelCatalog, String> {
+    bitfun_core::get_ai_model_catalog().await
+}
+
+#[tauri::command]
+pub async fn project_ai_model_reasoning_catalog(
+    request: bitfun_core_types::ReasoningCatalogProjectionRequest,
+) -> bitfun_core_types::ReasoningCatalogProjection {
+    bitfun_core::project_ai_model_reasoning_catalog(request).await
+}
+
+#[tauri::command]
+pub async fn get_models_dev_catalog_status() -> bitfun_core_types::ModelsDevCatalogStatus {
+    bitfun_core::get_models_dev_catalog_status().await
+}
+
+#[tauri::command]
+pub async fn refresh_models_dev_catalog_now(
+) -> Result<bitfun_core_types::ModelsDevRefreshResult, String> {
+    bitfun_core::refresh_models_dev_catalog_now().await
+}
+
+#[tauri::command]
+pub async fn reveal_models_dev_cache_directory() -> Result<(), String> {
+    let status = bitfun_core::get_models_dev_catalog_status().await;
+    let cache_path = std::path::PathBuf::from(&status.cache_path);
+    let directory = cache_path
+        .parent()
+        .ok_or_else(|| "Models.dev cache directory is unavailable".to_string())?;
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("Failed to create models.dev cache directory: {error}"))?;
+    reveal_local_path_in_explorer(directory, &directory.to_string_lossy())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct IdeControlResultRequest {
     pub request_id: String,
@@ -5147,6 +5253,22 @@ pub struct SubscriptionLoginRequest {
     pub session_id: String,
 }
 
+async fn configured_ai_proxy(
+    state: &State<'_, AppState>,
+) -> Result<Option<bitfun_core::service::config::types::ProxyConfig>, String> {
+    let global_config: bitfun_core::service::config::GlobalConfig = state
+        .config_service
+        .get_config(None)
+        .await
+        .map_err(|e| format!("Failed to get configuration: {}", e))?;
+
+    Ok(global_config
+        .ai
+        .proxy
+        .enabled
+        .then_some(global_config.ai.proxy))
+}
+
 #[tauri::command]
 pub async fn list_subscription_accounts(
 ) -> Result<Vec<bitfun_core::infrastructure::subscription_auth::SubscriptionAccount>, String> {
@@ -5155,11 +5277,18 @@ pub async fn list_subscription_accounts(
 
 #[tauri::command]
 pub async fn start_subscription_login(
+    state: State<'_, AppState>,
     request: SubscriptionLoginRequest,
 ) -> Result<bitfun_core::infrastructure::subscription_auth::LoginStartResult, String> {
-    bitfun_core::infrastructure::subscription_auth::start_login(
+    let proxy_config = configured_ai_proxy(&state).await?;
+    let options = bitfun_core::infrastructure::subscription_auth::SubscriptionHttpOptions::new(
+        proxy_config,
+        false,
+    );
+    bitfun_core::infrastructure::subscription_auth::start_login_with_options(
         request.provider,
         request.session_id,
+        options,
     )
     .await
     .map_err(|e| format!("Failed to start subscription login: {e:#}"))
@@ -5198,9 +5327,18 @@ pub async fn logout_subscription_account(
 
 #[tauri::command]
 pub async fn refresh_subscription_account(
+    state: State<'_, AppState>,
     request: SubscriptionProviderRequest,
 ) -> Result<bitfun_core::infrastructure::subscription_auth::SubscriptionAccount, String> {
-    bitfun_core::infrastructure::subscription_auth::refresh_account(request.provider)
-        .await
-        .map_err(|e| format!("Failed to refresh subscription account: {e:#}"))
+    let proxy_config = configured_ai_proxy(&state).await?;
+    let options = bitfun_core::infrastructure::subscription_auth::SubscriptionHttpOptions::new(
+        proxy_config,
+        false,
+    );
+    bitfun_core::infrastructure::subscription_auth::refresh_account_with_options(
+        request.provider,
+        &options,
+    )
+    .await
+    .map_err(|e| format!("Failed to refresh subscription account: {e:#}"))
 }

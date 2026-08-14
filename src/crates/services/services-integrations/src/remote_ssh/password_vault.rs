@@ -55,12 +55,7 @@ impl SSHPasswordVault {
         tokio::fs::write(&self.key_path, key.as_slice())
             .await
             .context("write ssh password vault key")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&self.key_path, std::fs::Permissions::from_mode(0o600));
-        }
+        let _ = bitfun_services_core::path_utils::set_mode(&self.key_path, 0o600);
         Ok(key)
     }
 
@@ -112,12 +107,7 @@ impl SSHPasswordVault {
         tokio::fs::write(&self.vault_path, body)
             .await
             .context("write ssh password vault")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&self.vault_path, std::fs::Permissions::from_mode(0o600));
-        }
+        let _ = bitfun_services_core::path_utils::set_mode(&self.vault_path, 0o600);
         Ok(())
     }
 
@@ -196,12 +186,7 @@ impl SSHPasswordVault {
             .entry(new_connection_id.to_string())
             .or_insert(entry);
         tokio::fs::write(&self.vault_path, serde_json::to_string_pretty(&file)?).await?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&self.vault_path, std::fs::Permissions::from_mode(0o600));
-        }
+        let _ = bitfun_services_core::path_utils::set_mode(&self.vault_path, 0o600);
         Ok(())
     }
 }

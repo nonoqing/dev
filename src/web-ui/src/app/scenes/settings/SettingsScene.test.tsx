@@ -19,7 +19,19 @@ vi.mock('../../../infrastructure/config/components/AcpAgentsConfig', () => ({
 }));
 
 vi.mock('../../../infrastructure/config/components/ExternalSourcesConfig', () => ({
-  default: () => <div data-testid="external-sources-config" />,
+  default: ({
+    initialFocus,
+    focusRequestId,
+  }: {
+    initialFocus?: 'hooks';
+    focusRequestId?: number;
+  }) => (
+    <div
+      data-testid="external-sources-config"
+      data-initial-focus={initialFocus}
+      data-focus-request-id={focusRequestId}
+    />
+  ),
 }));
 
 vi.mock('../../../infrastructure/config/components/EditorConfig', () => ({
@@ -67,7 +79,15 @@ describe('SettingsScene lazy tab routing', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
-    useSettingsStore.setState({ activeTab: 'basics', searchQuery: '' });
+    useSettingsStore.setState({
+      activeTab: 'basics',
+      contentFocus: null,
+      contentFocusRequestId: 0,
+      tabTransitionTarget: null,
+      tabTransitionMotion: 'instant',
+      tabTransitionSequence: 0,
+      searchQuery: '',
+    });
   });
 
   afterEach(() => {
@@ -75,6 +95,7 @@ describe('SettingsScene lazy tab routing', () => {
       root.unmount();
     });
     container.remove();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -120,6 +141,23 @@ describe('SettingsScene lazy tab routing', () => {
     expect(container.querySelector('[data-testid="external-sources-config"]')).not.toBeNull();
   });
 
+  it('passes a legacy Hook deep-link focus into External AI applications', async () => {
+    useSettingsStore.getState().openTab('external-sources', 'hooks');
+    await act(async () => {
+      root.render(<SettingsScene />);
+    });
+    await waitForPanelContent('external-sources-config');
+
+    const externalSources = container.querySelector('[data-testid="external-sources-config"]');
+    expect(externalSources?.getAttribute('data-initial-focus')).toBe('hooks');
+    expect(externalSources?.getAttribute('data-focus-request-id')).toBe('1');
+
+    await act(async () => {
+      useSettingsStore.getState().openTab('external-sources', 'hooks');
+    });
+    expect(externalSources?.getAttribute('data-focus-request-id')).toBe('2');
+  });
+
   it('renders the lazy voice input config tab', async () => {
     await renderActiveTab('voice-input');
 
@@ -141,6 +179,33 @@ describe('SettingsScene lazy tab routing', () => {
     const scene = container.querySelector('[data-testid="settings-scene"]');
     expect(scene?.getAttribute('data-settings-tab')).toBe('appearance');
     expect(container.querySelector('[data-testid="appearance-config"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="basics-config"]')).toBeNull();
+    expect(container.querySelectorAll('[data-testid="settings-scene-content"]')).toHaveLength(1);
+  });
+
+  it('bridges a pointer tab switch while making the outgoing panel inert', async () => {
+    await act(async () => {
+      root.render(<SettingsScene />);
+    });
+    await waitForPanelContent('basics-config');
+
+    vi.useFakeTimers();
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => (
+      window.setTimeout(() => callback(performance.now()), 16)
+    ));
+    vi.stubGlobal('cancelAnimationFrame', (handle: number) => window.clearTimeout(handle));
+
+    await act(async () => {
+      useSettingsStore.getState().setActiveTab('appearance', 'pointer');
+      await Promise.resolve();
+    });
+
+    const outgoing = container.querySelector('.bitfun-view-transition-boundary__view--outgoing');
+    expect(outgoing?.hasAttribute('inert')).toBe(true);
+    expect(container.querySelector('[data-testid="basics-config"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="appearance-config"]')).not.toBeNull();
+
+    act(() => vi.advanceTimersByTime(232));
     expect(container.querySelector('[data-testid="basics-config"]')).toBeNull();
     expect(container.querySelectorAll('[data-testid="settings-scene-content"]')).toHaveLength(1);
   });

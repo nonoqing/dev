@@ -40,10 +40,12 @@ pub use bitfun_product_domains::external_subagents::{
     ExternalSubagentModelRequest, ExternalSubagentSummary,
 };
 
+use crate::agentic::workspace::workspace_route_key;
 use crate::external_mcp::{
     reconcile_external_mcp_catalog, BitFunExternalMcpRuntime, ExternalMcpDecision,
     ExternalMcpDecisions, ExternalMcpProductState, ExternalMcpRuntimePort,
-    ExternalMcpRuntimeStatus, NativeMcpCandidate,
+    ExternalMcpRuntimeStatus, NativeMcpCandidate, EXTERNAL_MCP_RUNTIME_FAILED,
+    EXTERNAL_MCP_RUNTIME_PREPARATION_FAILED, EXTERNAL_MCP_RUNTIME_STATUS_UNAVAILABLE,
 };
 use crate::external_subagents::{
     project_external_subagents_read_only, reconcile_external_subagents, ExternalSubagentDecisions,
@@ -53,8 +55,8 @@ use crate::external_tools::{
     begin_external_tool_workspace_recovery, external_tool_workspace_requires_recovery,
     invalidate_external_tool_runtime_availability, merge_tool_state,
     project_external_tools_read_only, reconcile_external_tools, release_external_tool_workspace,
-    reset_external_tool_workspace_recovery_budget, workspace_route_key, ExternalToolDecisions,
-    ExternalToolProductState, TOOL_CONFLICT_RESELECTION_REQUIRED, UNRESOLVED_TOOL_CONFLICT_CHOICE,
+    reset_external_tool_workspace_recovery_budget, ExternalToolDecisions, ExternalToolProductState,
+    TOOL_CONFLICT_RESELECTION_REQUIRED, UNRESOLVED_TOOL_CONFLICT_CHOICE,
 };
 use crate::service::config::{subscribe_config_updates, ConfigUpdateEvent};
 use bitfun_claude_code_adapter::{
@@ -138,6 +140,10 @@ const MAX_PROMPT_COMMAND_SHELL_OUTPUT_CHARS: usize = 256 * 1024;
 const PROMPT_COMMAND_SHELL_TIMEOUT_MS: u64 = 30_000;
 const PROMPT_COMMAND_SHELL_KILL_YIELD_MS: u64 = 5_000;
 const MAX_APPROVED_PROMPT_COMMAND_SHELL_PLANS: usize = 512;
+/// Awareness records are tiny and bounded by the number of registered
+/// ecosystems, but the cap keeps a corrupted or hostile file from growing
+/// without limit.
+const MAX_ACKNOWLEDGED_ECOSYSTEMS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedPromptCommandShell {
@@ -288,22 +294,7 @@ fn update_prompt_command_shell_fingerprint(hasher: &mut Sha256, value: &[u8]) {
 }
 
 fn prompt_command_shell_path_bytes(path: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        return path.as_os_str().as_bytes().to_vec();
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        return path
-            .as_os_str()
-            .encode_wide()
-            .flat_map(u16::to_le_bytes)
-            .collect();
-    }
-    #[cfg(not(any(unix, windows)))]
-    path.to_string_lossy().as_bytes().to_vec()
+    bitfun_services_core::path_utils::path_to_native_bytes(path)
 }
 
 fn prompt_command_shell_kind_id(kind: &ExecCommandShellKind) -> String {
@@ -921,6 +912,17 @@ struct ExternalSourcesConfig {
     mcp_server_decisions: BTreeMap<String, ExternalMcpDecision>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     mcp_conflict_choices: BTreeMap<String, String>,
+    /// Ecosystems the user has already been told about, as
+    /// `execution_domain_id` + unit separator + `ecosystem_id`.
+    ///
+    /// This records awareness, not a policy decision: it only suppresses the
+    /// "a new external application was found" hint. It deliberately carries no
+    /// content version, because discovering more commands inside an ecosystem
+    /// the user already knows about is not new information. Awareness is also
+    /// user-wide rather than per workspace, so opening another project does not
+    /// re-announce the same application.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    acknowledged_ecosystems: BTreeSet<String>,
     /// Preserves fields written by a newer preferences schema.
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     extensions: BTreeMap<String, serde_json::Value>,
@@ -970,6 +972,7 @@ impl std::fmt::Debug for ExternalSourcesConfig {
             .field("subagent_model_bindings", &self.subagent_model_bindings)
             .field("mcp_server_decisions", &self.mcp_server_decisions)
             .field("mcp_conflict_choices", &self.mcp_conflict_choices)
+            .field("acknowledged_ecosystems", &self.acknowledged_ecosystems)
             .field("extensions", &self.extensions)
             .finish()
     }
@@ -1064,6 +1067,57 @@ struct ExternalSourcePreferenceStore {
     path: PathBuf,
 }
 
+fn retired_automatic_application_policy() -> ExternalIntegrationPolicyDocument {
+    let mut policy = ExternalIntegrationPolicyDocument::default();
+    policy.user_defaults.enabled = true;
+    for (ecosystem, mode) in [
+        (OPENCODE_ECOSYSTEM_ID, ExternalIntegrationMode::Recommended),
+        (
+            CLAUDE_CODE_ECOSYSTEM_ID,
+            ExternalIntegrationMode::DiscoverOnly,
+        ),
+        (CODEX_ECOSYSTEM_ID, ExternalIntegrationMode::DiscoverOnly),
+    ] {
+        policy
+            .user_defaults
+            .ecosystems
+            .entry(EcosystemId::new(ecosystem).expect("built-in ecosystem id is valid"))
+            .or_default()
+            .mode = mode;
+    }
+    policy
+}
+
+fn normalize_retired_application_defaults(config: &mut ExternalSourcesConfig) {
+    // The retired application setup enabled integrations automatically. Undo
+    // only that exact untouched default; every user-authored deviation wins.
+    let from_retired_automatic_setup = config
+        .extensions
+        .get("configOrigin")
+        .and_then(serde_json::Value::as_str)
+        == Some("fresh_v2");
+    if !from_retired_automatic_setup {
+        return;
+    }
+
+    // Consume the retired origin on the first persisted update, including
+    // documents that already contain a user deviation or application choice.
+    // Otherwise a later user-authored policy matching the old default could be
+    // mistaken for untouched setup state and reset again.
+    config.extensions.remove("configOrigin");
+    let has_application_choice = match config.extensions.get("applicationConnections") {
+        None => false,
+        Some(serde_json::Value::Object(decisions)) => !decisions.is_empty(),
+        Some(_) => true,
+    };
+    if has_application_choice {
+        return;
+    }
+    if config.integration_policy.known() == Some(&retired_automatic_application_policy()) {
+        config.integration_policy = StoredExternalIntegrationPolicy::default();
+    }
+}
+
 impl ExternalSourcePreferenceStore {
     fn new(path: PathBuf) -> Self {
         Self { path }
@@ -1083,7 +1137,11 @@ impl ExternalSourcePreferenceStore {
         JsonFileStore
             .read_locked_optional(&self.path)
             .await
-            .map(|config| config.unwrap_or_default())
+            .map(|config| {
+                let mut config = config.unwrap_or_default();
+                normalize_retired_application_defaults(&mut config);
+                config
+            })
             .map_err(|error| error.to_string())
     }
 
@@ -1092,7 +1150,10 @@ impl ExternalSourcePreferenceStore {
         update: impl FnOnce(&mut ExternalSourcesConfig) -> R,
     ) -> Result<(R, ExternalSourcesConfig), String> {
         JsonFileStore
-            .update_locked(&self.path, ExternalSourcesConfig::default(), update)
+            .update_locked(&self.path, ExternalSourcesConfig::default(), |config| {
+                normalize_retired_application_defaults(config);
+                update(config)
+            })
             .await
             .map_err(|error| error.to_string())
     }
@@ -1168,8 +1229,7 @@ fn workspace_policy_key_from_route(route: &str) -> Option<String> {
         return None;
     }
     let normalized = route.replace('\\', "/");
-    #[cfg(windows)]
-    let normalized = normalized.to_ascii_lowercase();
+    let normalized = bitfun_services_core::path_utils::normalize_path_case(&normalized);
     let mut hasher = Sha256::new();
     hasher.update(normalized.as_bytes());
     Some(format!(
@@ -1924,7 +1984,7 @@ impl WorkspaceExternalSourceService {
                     conflict_choices: &preferences.mcp_conflict_choices,
                 },
             ),
-            Err(error) => {
+            Err(_) => {
                 let mut state = reconcile_external_mcp_catalog(
                     self.execution_domain_id.as_str(),
                     &mcp_workspace_key,
@@ -1939,7 +1999,7 @@ impl WorkspaceExternalSourceService {
                 for entry in &mut state.entries {
                     entry.runtime_id = None;
                     entry.activation_state = ExternalMcpActivationState::RuntimeUnavailable {
-                        reason: error.clone(),
+                        reason: "external_mcp.native_configuration_unavailable".to_string(),
                     };
                 }
                 state.active.clear();
@@ -2178,7 +2238,7 @@ impl WorkspaceExternalSourceService {
                 ExternalMcpActivationState::Active | ExternalMcpActivationState::Starting
             ) {
                 entry.activation_state = ExternalMcpActivationState::RuntimeUnavailable {
-                    reason: "This Host exposes discovery only; use Desktop or an authenticated Peer Host to run external MCP servers".to_string(),
+                    reason: "external_mcp.runtime.host_read_only".to_string(),
                 };
             }
         }
@@ -2315,9 +2375,7 @@ impl WorkspaceExternalSourceService {
                 let status = managed_statuses
                     .get(&candidate.runtime_id)
                     .cloned()
-                    .unwrap_or_else(|| {
-                        Err("The external MCP server status is unavailable".to_string())
-                    });
+                    .unwrap_or_else(|| Err(EXTERNAL_MCP_RUNTIME_STATUS_UNAVAILABLE.to_string()));
                 // Keep failed registrations managed until the user disables
                 // them. Re-installing from a status error would turn a
                 // persistent startup failure into an unbounded retry loop.
@@ -2333,8 +2391,10 @@ impl WorkspaceExternalSourceService {
                     .prepare_server_guarded(&server_id, &behavior_version)
             })
             .await
-            .map_err(|_| "The external MCP configuration could not be prepared".to_string())
-            .and_then(|result| result.map_err(|error| error.message));
+            .map_err(|_| EXTERNAL_MCP_RUNTIME_PREPARATION_FAILED.to_string())
+            .and_then(|result| {
+                result.map_err(|_| EXTERNAL_MCP_RUNTIME_PREPARATION_FAILED.to_string())
+            });
 
             let activation = match prepared {
                 Ok(prepared) => {
@@ -3273,6 +3333,149 @@ impl WorkspaceExternalSourceService {
         self.rebuild_product_snapshot(command_snapshot).await
     }
 
+    async fn set_tool_targets_enabled(
+        &self,
+        decisions: Vec<(String, String)>,
+        enabled: bool,
+        expected_catalog_generation: u64,
+        expected_preference_revision: u64,
+    ) -> Result<ExternalSourceCatalogSnapshot, String> {
+        let _refresh_guard = self.refresh_gate.lock().await;
+        let snapshot = self.snapshot();
+        if snapshot.generation != expected_catalog_generation
+            || snapshot.preference_revision != expected_preference_revision
+        {
+            return Err(stale_operation_error(
+                "External tool catalog changed; refresh before retrying",
+            ));
+        }
+        for (approval_key, decision_key) in &decisions {
+            let source = snapshot
+                .tools
+                .iter()
+                .find(|tool| {
+                    tool.approval_key == *approval_key && tool.decision_key == *decision_key
+                })
+                .map(|tool| &tool.definition.id.target.source)
+                .ok_or_else(|| {
+                    missing_candidate_error("External tool decision is no longer available")
+                })?;
+            if enabled {
+                ensure_source_capability_active(&snapshot, source, EXTERNAL_CAPABILITY_TOOL)?;
+            }
+        }
+        let preferences = persist_capability_bulk_decisions(
+            ExternalCapabilityBulkDecisionSet::Tool(decisions),
+            enabled,
+            expected_preference_revision,
+        )
+        .await?;
+        propagate_tool_preferences(&preferences);
+        let command_snapshot = lock_coordinator(&self.control_plane).snapshot();
+        self.rebuild_product_snapshot(command_snapshot).await
+    }
+
+    async fn set_subagents_enabled(
+        &self,
+        decisions: Vec<(String, String)>,
+        enabled: bool,
+        expected_subagent_generation: u64,
+        expected_preference_revision: u64,
+    ) -> Result<ExternalSourceCatalogSnapshot, String> {
+        let _refresh_guard = self.refresh_gate.lock().await;
+        let snapshot = self.snapshot();
+        if snapshot.subagent_generation != expected_subagent_generation
+            || snapshot.preference_revision != expected_preference_revision
+        {
+            return Err(stale_operation_error(
+                "External subagent catalog changed; refresh before retrying",
+            ));
+        }
+        for (candidate_id, decision_key) in &decisions {
+            let summary = snapshot
+                .subagents
+                .iter()
+                .find(|summary| {
+                    summary.candidate_id.as_str() == candidate_id
+                        && summary.decision_key == *decision_key
+                })
+                .ok_or_else(|| {
+                    missing_candidate_error("External subagent decision is no longer available")
+                })?;
+            if enabled {
+                ensure_source_set_capability_active(
+                    &snapshot,
+                    &summary.source_keys,
+                    EXTERNAL_CAPABILITY_SUBAGENT,
+                )?;
+            }
+        }
+        let preferences = persist_capability_bulk_decisions(
+            ExternalCapabilityBulkDecisionSet::Subagent(
+                decisions
+                    .into_iter()
+                    .map(|(_, decision_key)| decision_key)
+                    .collect(),
+            ),
+            enabled,
+            expected_preference_revision,
+        )
+        .await?;
+        propagate_subagent_preferences(&preferences);
+        let command_snapshot = lock_coordinator(&self.control_plane).snapshot();
+        self.rebuild_product_snapshot(command_snapshot).await
+    }
+
+    async fn set_mcp_servers_enabled(
+        &self,
+        decisions: Vec<(String, String)>,
+        enabled: bool,
+        expected_mcp_generation: u64,
+        expected_preference_revision: u64,
+    ) -> Result<ExternalSourceCatalogSnapshot, String> {
+        let _refresh_guard = self.refresh_gate.lock().await;
+        let snapshot = self.snapshot();
+        if snapshot.mcp_generation != expected_mcp_generation
+            || snapshot.preference_revision != expected_preference_revision
+        {
+            return Err(stale_operation_error(
+                "External MCP catalog changed; refresh before retrying",
+            ));
+        }
+        for (candidate_id, decision_key) in &decisions {
+            let server = snapshot
+                .mcp_servers
+                .iter()
+                .find(|server| {
+                    server.candidate_id == *candidate_id && server.decision_key == *decision_key
+                })
+                .ok_or_else(|| {
+                    missing_candidate_error("External MCP decision is no longer available")
+                })?;
+            if enabled {
+                ensure_source_capability_active(
+                    &snapshot,
+                    &server.definition.id.source,
+                    EXTERNAL_CAPABILITY_MCP,
+                )?;
+            }
+        }
+        let preferences = persist_capability_bulk_decisions(
+            ExternalCapabilityBulkDecisionSet::Mcp(
+                decisions
+                    .into_iter()
+                    .map(|(_, decision_key)| decision_key)
+                    .collect(),
+            ),
+            enabled,
+            expected_preference_revision,
+        )
+        .await?;
+        propagate_mcp_preferences(&preferences);
+        let command_snapshot = lock_coordinator(&self.control_plane).snapshot();
+        self.rebuild_product_snapshot(command_snapshot).await
+    }
+
     async fn set_tool_conflict_choice(
         &self,
         conflict_key: &str,
@@ -3999,7 +4202,7 @@ pub(crate) fn normalize_workspace_root(
         return Err("external source workspace root must be absolute".to_string());
     }
     Ok(Some(
-        dunce::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf()),
+        crate::agentic::workspace::canonical_local_workspace_path(workspace_root),
     ))
 }
 
@@ -4415,6 +4618,7 @@ fn mark_external_mcp_runtime_unavailable(
     candidate: &crate::external_mcp::ActiveExternalMcpCandidate,
     reason: String,
 ) {
+    let reason = stable_external_mcp_runtime_reason(&reason).to_string();
     if let Some(entry) = state
         .entries
         .iter_mut()
@@ -4432,6 +4636,31 @@ fn mark_external_mcp_runtime_unavailable(
         )
         .with_asset_kind(ExternalSourceAssetKind::Mcp),
     );
+}
+
+fn stable_external_mcp_runtime_reason(reason: &str) -> &str {
+    match reason {
+        "external_mcp.start.authentication"
+        | "external_mcp.start.timeout"
+        | "external_mcp.start.command_unavailable"
+        | "external_mcp.start.working_directory_unavailable"
+        | "external_mcp.start.connection_failed"
+        | "external_mcp.start.protocol_failed"
+        | "external_mcp.start.other"
+        | "external_mcp.native_configuration_unavailable"
+        | "external_mcp.runtime.host_read_only"
+        | "external_mcp.runtime.configuration_changed"
+        | "external_mcp.runtime.configuration_invalid"
+        | "external_mcp.runtime.host_unavailable"
+        | "external_mcp.runtime.install_failed"
+        | "external_mcp.runtime.preparation_failed"
+        | "external_mcp.runtime.retire_failed"
+        | "external_mcp.runtime.server_missing"
+        | "external_mcp.runtime.failed"
+        | "external_mcp.runtime.stopped"
+        | "external_mcp.runtime.status_unavailable" => reason,
+        _ => EXTERNAL_MCP_RUNTIME_FAILED,
+    }
 }
 
 fn merge_mcp_state(
@@ -4576,6 +4805,88 @@ fn epoch_seconds() -> u64 {
 
 async fn read_external_sources_config() -> Result<ExternalSourcesConfig, String> {
     ExternalSourcePreferenceStore::global()?.read().await
+}
+
+fn acknowledged_ecosystem_key(execution_domain_id: &str, ecosystem_id: &str) -> String {
+    format!("{execution_domain_id}\u{1f}{ecosystem_id}")
+}
+
+/// Ecosystems that have configuration on this host but have never been
+/// announced to the user.
+///
+/// Both the desktop settings navigation and the TUI read this same result, so
+/// neither surface derives "is there something new" on its own and they cannot
+/// drift apart. An ecosystem only qualifies once discovery actually found a
+/// source for it: a registered adapter with nothing to offer is not news.
+pub async fn unacknowledged_external_ecosystems(
+    workspace_root: Option<&Path>,
+) -> Result<Vec<String>, String> {
+    let service = read_only_service_for(workspace_root).await?;
+    let execution_domain_id = service.execution_domain_id.clone();
+    let discovered = service
+        .snapshot()
+        .sources
+        .iter()
+        .map(|source| source.record.ecosystem_id.to_string())
+        .collect::<BTreeSet<_>>();
+    if discovered.is_empty() {
+        return Ok(Vec::new());
+    }
+    let config = read_external_sources_config().await?;
+    Ok(discovered
+        .into_iter()
+        .filter(|ecosystem_id| {
+            !config
+                .acknowledged_ecosystems
+                .contains(&acknowledged_ecosystem_key(
+                    execution_domain_id.as_str(),
+                    ecosystem_id,
+                ))
+        })
+        .collect())
+}
+
+/// Records that the user has seen the given ecosystems.
+///
+/// Awareness is not part of the preference-revision contract. The set only
+/// grows, insertion is idempotent, and no policy or approval decision reads it,
+/// so concurrent writers cannot lose each other's decisions here. Taking an
+/// expected revision would therefore add fencing failures without protecting
+/// anything, and bumping the revision would invalidate unrelated in-flight
+/// mutations every time a user opens the settings page.
+///
+/// The execution domain is resolved from the workspace's own service so hosts
+/// never pass an identity that disagrees with the one discovery recorded.
+pub async fn acknowledge_external_ecosystems(
+    workspace_root: Option<&Path>,
+    ecosystem_ids: Vec<String>,
+) -> Result<(), String> {
+    if ecosystem_ids.is_empty() {
+        return Ok(());
+    }
+    let execution_domain_id = read_only_service_for(workspace_root)
+        .await?
+        .execution_domain_id
+        .clone();
+    let keys = ecosystem_ids
+        .iter()
+        .map(|ecosystem_id| acknowledged_ecosystem_key(execution_domain_id.as_str(), ecosystem_id))
+        .collect::<Vec<_>>();
+    ExternalSourcePreferenceStore::global()?
+        .update(move |config| {
+            for key in &keys {
+                if config.acknowledged_ecosystems.contains(key) {
+                    continue;
+                }
+                if config.acknowledged_ecosystems.len() >= MAX_ACKNOWLEDGED_ECOSYSTEMS {
+                    break;
+                }
+                config.acknowledged_ecosystems.insert(key.clone());
+            }
+            true
+        })
+        .await
+        .map(|_| ())
 }
 
 async fn persist_prompt_command_shell_plan_approval(
@@ -4920,6 +5231,88 @@ async fn persist_tool_target_decision(
         .and_then(|(applied, config)| {
             applied.then_some(config).ok_or_else(|| {
                 stale_operation_error("External tool preferences changed; refresh before retrying")
+            })
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExternalCapabilityBulkDecisionSet {
+    Tool(Vec<(String, String)>),
+    Subagent(Vec<String>),
+    Mcp(Vec<String>),
+}
+
+fn apply_capability_bulk_decisions(
+    config: &mut ExternalSourcesConfig,
+    decisions: ExternalCapabilityBulkDecisionSet,
+    enabled: bool,
+) -> bool {
+    let changed = match decisions {
+        ExternalCapabilityBulkDecisionSet::Tool(decisions) => {
+            let previous_approved = config.approved_tool_targets.clone();
+            let previous_declined = config.declined_tool_decisions.clone();
+            for (approval_key, decision_key) in decisions {
+                reconcile_tool_target_decision(config, approval_key, decision_key, enabled);
+            }
+            config.approved_tool_targets != previous_approved
+                || config.declined_tool_decisions != previous_declined
+        }
+        ExternalCapabilityBulkDecisionSet::Subagent(decisions) => {
+            let previous_approved = config.approved_subagent_envelopes.clone();
+            let previous_declined = config.declined_subagent_decisions.clone();
+            for decision_key in decisions {
+                if enabled {
+                    config
+                        .approved_subagent_envelopes
+                        .insert(decision_key.clone());
+                    config.declined_subagent_decisions.remove(&decision_key);
+                } else {
+                    config.approved_subagent_envelopes.remove(&decision_key);
+                    config
+                        .declined_subagent_decisions
+                        .insert(decision_key.clone(), decision_key);
+                }
+            }
+            config.approved_subagent_envelopes != previous_approved
+                || config.declined_subagent_decisions != previous_declined
+        }
+        ExternalCapabilityBulkDecisionSet::Mcp(decisions) => {
+            let previous = config.mcp_server_decisions.clone();
+            for decision_key in decisions {
+                reconcile_versioned_mcp_server_decision(
+                    &mut config.mcp_server_decisions,
+                    decision_key,
+                    enabled,
+                );
+            }
+            config.mcp_server_decisions != previous
+        }
+    };
+    if changed {
+        config.preference_revision = config.preference_revision.saturating_add(1);
+    }
+    changed
+}
+
+async fn persist_capability_bulk_decisions(
+    decisions: ExternalCapabilityBulkDecisionSet,
+    enabled: bool,
+    expected_preference_revision: u64,
+) -> Result<ExternalSourcesConfig, String> {
+    ExternalSourcePreferenceStore::global()?
+        .update(move |config| {
+            if config.preference_revision != expected_preference_revision {
+                return false;
+            }
+            apply_capability_bulk_decisions(config, decisions, enabled);
+            true
+        })
+        .await
+        .and_then(|(applied, config)| {
+            applied.then_some(config).ok_or_else(|| {
+                stale_operation_error(
+                    "External capability preferences changed; refresh before retrying",
+                )
             })
         })
 }
@@ -6315,6 +6708,24 @@ pub async fn set_external_tool_target_decision(
         .await
 }
 
+pub async fn set_external_tool_targets_enabled(
+    workspace_root: Option<&Path>,
+    decisions: Vec<(String, String)>,
+    enabled: bool,
+    expected_catalog_generation: u64,
+    expected_preference_revision: u64,
+) -> Result<ExternalSourceCatalogSnapshot, String> {
+    service_for(workspace_root)
+        .await?
+        .set_tool_targets_enabled(
+            decisions,
+            enabled,
+            expected_catalog_generation,
+            expected_preference_revision,
+        )
+        .await
+}
+
 pub async fn set_external_tool_conflict_choice(
     workspace_root: Option<&Path>,
     conflict_key: &str,
@@ -6341,6 +6752,24 @@ pub async fn set_external_mcp_server_decision(
             candidate_id,
             decision_key,
             approved,
+            expected_mcp_generation,
+            expected_preference_revision,
+        )
+        .await
+}
+
+pub async fn set_external_mcp_servers_enabled(
+    workspace_root: Option<&Path>,
+    decisions: Vec<(String, String)>,
+    enabled: bool,
+    expected_mcp_generation: u64,
+    expected_preference_revision: u64,
+) -> Result<ExternalSourceCatalogSnapshot, String> {
+    service_for(workspace_root)
+        .await?
+        .set_mcp_servers_enabled(
+            decisions,
+            enabled,
             expected_mcp_generation,
             expected_preference_revision,
         )
@@ -6383,6 +6812,24 @@ pub async fn set_external_subagent_activation(
             expected_subagent_generation,
             expected_preference_revision,
             decision_key,
+        )
+        .await
+}
+
+pub async fn set_external_subagents_enabled(
+    workspace_root: Option<&Path>,
+    decisions: Vec<(String, String)>,
+    enabled: bool,
+    expected_subagent_generation: u64,
+    expected_preference_revision: u64,
+) -> Result<ExternalSourceCatalogSnapshot, String> {
+    service_for(workspace_root)
+        .await?
+        .set_subagents_enabled(
+            decisions,
+            enabled,
+            expected_subagent_generation,
+            expected_preference_revision,
         )
         .await
 }
@@ -6790,10 +7237,29 @@ fn incompatible_policy_error(detail: impl Into<String>) -> String {
     )
 }
 
-fn external_integration_error_code(error: &str) -> String {
+pub(crate) fn external_integration_error_code(error: &str) -> String {
     ExternalSourceOperationError::decode(error)
         .map(|error| error.code.as_str().to_string())
         .unwrap_or_else(|| "internal".to_string())
+}
+
+/// Ensure the workspace-scoped static source snapshot has been published once.
+/// This is the shared discovery gate for selectors and execution routing; it
+/// does not start or recover any executable extension runtime.
+pub async fn ensure_external_source_workspace_snapshot(
+    workspace_root: Option<&Path>,
+) -> Result<(), String> {
+    ensure_initial_external_source_workspace_service(workspace_root)
+        .await
+        .map(|_| ())
+}
+
+async fn ensure_initial_external_source_workspace_service(
+    workspace_root: Option<&Path>,
+) -> Result<Arc<WorkspaceExternalSourceService>, String> {
+    let service = service_for(workspace_root).await?;
+    service.ensure_initial_refresh().await?;
+    Ok(service)
 }
 
 /// Keep the external-source runtime aligned with an actively assembled product
@@ -6802,25 +7268,17 @@ fn external_integration_error_code(error: &str) -> String {
 /// exposed to the model. Existing services are only touched; file watchers and
 /// explicit refreshes remain responsible for later source changes.
 pub(crate) async fn ensure_external_source_workspace_runtime(workspace_root: Option<&Path>) {
-    let service = match service_for(workspace_root).await {
+    let service = match ensure_initial_external_source_workspace_service(workspace_root).await {
         Ok(service) => service,
         Err(error) => {
             log::warn!(
-                "Could not retain external source workspace runtime scope={} error_category={}",
+                "Could not initialize external source workspace runtime scope={} error_category={}",
                 external_log_scope(workspace_root),
                 external_log_error_category(&error),
             );
             return;
         }
     };
-    if let Err(error) = service.ensure_initial_refresh().await {
-        log::warn!(
-            "Could not initialize external source workspace runtime scope={} error_category={}",
-            external_log_scope(workspace_root),
-            external_log_error_category(&error),
-        );
-        return;
-    }
     if external_tool_workspace_requires_recovery(workspace_root).await {
         if let Err(error) = service.refresh_worker_loss_once().await {
             log::warn!(
@@ -6888,6 +7346,12 @@ pub struct ExternalSourceSubscription {
 }
 
 impl ExternalSourceSubscription {
+    pub async fn recv(
+        &mut self,
+    ) -> Result<ExternalSourceCatalogSnapshot, broadcast::error::RecvError> {
+        self.receiver.recv().await
+    }
+
     pub fn try_recv(
         &mut self,
     ) -> Result<ExternalSourceCatalogSnapshot, broadcast::error::TryRecvError> {
@@ -6911,6 +7375,24 @@ mod tests {
     };
     use bitfun_product_domains::workspace_references::ExternalWorkspaceReferenceDefinition;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn runtime_reason_projection_preserves_known_codes_and_hides_raw_errors() {
+        for reason in [
+            "external_mcp.start.authentication",
+            "external_mcp.start.timeout",
+            "external_mcp.runtime.host_unavailable",
+            "external_mcp.runtime.server_missing",
+            "external_mcp.runtime.failed",
+            "external_mcp.runtime.stopped",
+        ] {
+            assert_eq!(stable_external_mcp_runtime_reason(reason), reason);
+        }
+        assert_eq!(
+            stable_external_mcp_runtime_reason("failed to read D:/private/mcp.json: access denied"),
+            EXTERNAL_MCP_RUNTIME_FAILED
+        );
+    }
 
     fn native_mcp_config_with_pin(pin: &str) -> MCPServerConfig {
         MCPServerConfig {
@@ -8268,7 +8750,17 @@ mod tests {
         let snapshot =
             lock_coordinator(&service.control_plane).apply_discovery_results(batch.immediate);
         for deferred in batch.deferred {
-            service.schedule_deferred_command_discovery(deferred);
+            let control_plane = Arc::clone(&service.control_plane);
+            tokio::spawn(async move {
+                let Some((completed, _observer)) = control_plane.complete_command(deferred).await
+                else {
+                    return;
+                };
+                let Some(result) = control_plane.finalize_command(completed).await else {
+                    return;
+                };
+                lock_coordinator(&control_plane).apply_discovery_result(result);
+            });
         }
         snapshot
     }
@@ -8711,6 +9203,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn acknowledging_an_ecosystem_survives_a_reload_and_stays_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("external-sources.json");
+        let store = ExternalSourcePreferenceStore::new(path.clone());
+        let key = acknowledged_ecosystem_key(LEGACY_LOCAL_EXECUTION_DOMAIN_ID, "opencode");
+
+        store
+            .update(|config| {
+                config.acknowledged_ecosystems.insert(key.clone());
+            })
+            .await
+            .unwrap();
+        store
+            .update(|config| {
+                config.acknowledged_ecosystems.insert(key.clone());
+            })
+            .await
+            .unwrap();
+
+        // A fresh store proves the record came back from disk, not from memory.
+        let reloaded = ExternalSourcePreferenceStore::new(path)
+            .read()
+            .await
+            .unwrap();
+        assert_eq!(reloaded.acknowledged_ecosystems, BTreeSet::from([key]));
+        // Awareness is not a policy decision, so it must not consume a revision.
+        assert_eq!(reloaded.preference_revision, 0);
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_is_scoped_to_its_execution_domain() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ExternalSourcePreferenceStore::new(temp.path().join("external-sources.json"));
+        let local = acknowledged_ecosystem_key(LEGACY_LOCAL_EXECUTION_DOMAIN_ID, "opencode");
+        let remote = acknowledged_ecosystem_key("remote-host", "opencode");
+
+        store
+            .update(|config| {
+                config.acknowledged_ecosystems.insert(local.clone());
+            })
+            .await
+            .unwrap();
+
+        let persisted = store.read().await.unwrap();
+        assert!(persisted.acknowledged_ecosystems.contains(&local));
+        assert!(!persisted.acknowledged_ecosystems.contains(&remote));
+    }
+
+    #[test]
+    fn acknowledgement_keys_never_collide_across_domains_or_ecosystems() {
+        assert_ne!(
+            acknowledged_ecosystem_key("local-user", "opencode"),
+            acknowledged_ecosystem_key("local-user", "codex")
+        );
+        assert_ne!(
+            acknowledged_ecosystem_key("local-user", "opencode"),
+            acknowledged_ecosystem_key("remote-host", "opencode")
+        );
+    }
+
     #[test]
     fn opencode_registry_owns_low_friction_defaults_and_safety_ceilings() {
         let mut config = ExternalSourcesConfig::default();
@@ -9012,6 +9565,189 @@ mod tests {
             2
         );
         assert_eq!(encoded["futurePreferenceField"][0], "keep");
+    }
+
+    fn retired_application_default_fixture() -> ExternalSourcesConfig {
+        let mut config = ExternalSourcesConfig::default();
+        let policy = config
+            .integration_policy
+            .known_mut()
+            .expect("the built-in integration policy is known");
+        policy.user_defaults.enabled = true;
+        for (ecosystem, mode) in [
+            (OPENCODE_ECOSYSTEM_ID, ExternalIntegrationMode::Recommended),
+            (
+                CLAUDE_CODE_ECOSYSTEM_ID,
+                ExternalIntegrationMode::DiscoverOnly,
+            ),
+            (CODEX_ECOSYSTEM_ID, ExternalIntegrationMode::DiscoverOnly),
+        ] {
+            policy
+                .user_defaults
+                .ecosystems
+                .entry(EcosystemId::new(ecosystem).unwrap())
+                .or_default()
+                .mode = mode;
+        }
+        config
+    }
+
+    fn retired_application_document(
+        config: ExternalSourcesConfig,
+        decisions: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut raw = serde_json::to_value(config).unwrap();
+        raw["configOrigin"] = serde_json::json!("fresh_v2");
+        raw["connectionSchemaMigrationVersion"] = serde_json::json!(1);
+        raw["applicationConnections"] = decisions;
+        raw
+    }
+
+    #[tokio::test]
+    async fn retired_automatic_application_default_is_not_user_consent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("external-sources.json");
+        let raw = retired_application_document(
+            retired_application_default_fixture(),
+            serde_json::json!({}),
+        );
+        std::fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+        let store = ExternalSourcePreferenceStore::new(path);
+
+        let read = store.read().await.unwrap();
+        let read_policy = read.integration_policy.known().unwrap();
+        assert!(!read_policy.user_defaults.enabled);
+        assert!(read_policy.user_defaults.ecosystems.is_empty());
+        assert!(read.extensions.contains_key("applicationConnections"));
+
+        let (was_enabled, updated) = store
+            .update(|config| {
+                config
+                    .integration_policy
+                    .known()
+                    .unwrap()
+                    .user_defaults
+                    .enabled
+            })
+            .await
+            .unwrap();
+        assert!(!was_enabled);
+        assert!(
+            !updated
+                .integration_policy
+                .known()
+                .unwrap()
+                .user_defaults
+                .enabled
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_migration_is_consumed_before_later_user_policy_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("external-sources.json");
+        let mut config = retired_application_default_fixture();
+        config
+            .integration_policy
+            .known_mut()
+            .unwrap()
+            .user_defaults
+            .ecosystems
+            .get_mut(&EcosystemId::new(CLAUDE_CODE_ECOSYSTEM_ID).unwrap())
+            .unwrap()
+            .mode = ExternalIntegrationMode::Disabled;
+        let raw = retired_application_document(config, serde_json::json!({}));
+        std::fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+        let store = ExternalSourcePreferenceStore::new(path);
+
+        let (_, migrated) = store.update(|_| {}).await.unwrap();
+        assert!(!migrated.extensions.contains_key("configOrigin"));
+        assert_eq!(
+            migrated
+                .integration_policy
+                .known()
+                .unwrap()
+                .user_defaults
+                .ecosystems[&EcosystemId::new(CLAUDE_CODE_ECOSYSTEM_ID).unwrap()]
+                .mode,
+            ExternalIntegrationMode::Disabled
+        );
+
+        store
+            .update(|config| {
+                config.integration_policy =
+                    StoredExternalIntegrationPolicy::Known(retired_automatic_application_policy());
+            })
+            .await
+            .unwrap();
+
+        let read = store.read().await.unwrap();
+        assert_eq!(
+            read.integration_policy.known(),
+            Some(&retired_automatic_application_policy())
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_application_metadata_preserves_a_policy_user_deviation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("external-sources.json");
+        let mut config = retired_application_default_fixture();
+        config
+            .integration_policy
+            .known_mut()
+            .unwrap()
+            .user_defaults
+            .ecosystems
+            .get_mut(&EcosystemId::new(CLAUDE_CODE_ECOSYSTEM_ID).unwrap())
+            .unwrap()
+            .mode = ExternalIntegrationMode::Disabled;
+        let raw = retired_application_document(config, serde_json::json!({}));
+        std::fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+        let config = ExternalSourcePreferenceStore::new(path)
+            .read()
+            .await
+            .unwrap();
+        let policy = config.integration_policy.known().unwrap();
+
+        assert!(policy.user_defaults.enabled);
+        assert_eq!(
+            policy.user_defaults.ecosystems[&EcosystemId::new(CLAUDE_CODE_ECOSYSTEM_ID).unwrap()]
+                .mode,
+            ExternalIntegrationMode::Disabled
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_application_metadata_preserves_an_explicit_application_choice() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("external-sources.json");
+        let raw = retired_application_document(
+            retired_application_default_fixture(),
+            serde_json::json!({
+                "local-user\u{1f}opencode\u{1f}user_default": {
+                    "desiredConnection": "connected",
+                    "decisionOrigin": "user"
+                }
+            }),
+        );
+        std::fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+        let config = ExternalSourcePreferenceStore::new(path)
+            .read()
+            .await
+            .unwrap();
+
+        assert!(
+            config
+                .integration_policy
+                .known()
+                .unwrap()
+                .user_defaults
+                .enabled
+        );
+        assert!(config.extensions.contains_key("applicationConnections"));
     }
 
     #[test]
@@ -9341,6 +10077,115 @@ mod tests {
         );
     }
 
+    #[test]
+    fn capability_bulk_decisions_update_multiple_items_with_one_revision() {
+        let mut config = ExternalSourcesConfig {
+            preference_revision: 7,
+            ..Default::default()
+        };
+
+        assert!(apply_capability_bulk_decisions(
+            &mut config,
+            ExternalCapabilityBulkDecisionSet::Tool(vec![
+                ("tool-approval-a".to_string(), "tool-decision-a".to_string()),
+                ("tool-approval-b".to_string(), "tool-decision-b".to_string()),
+            ]),
+            true,
+        ));
+        assert_eq!(config.preference_revision, 8);
+        assert_eq!(
+            config.approved_tool_targets,
+            BTreeSet::from(["tool-approval-a".to_string(), "tool-approval-b".to_string(),])
+        );
+
+        assert!(!apply_capability_bulk_decisions(
+            &mut config,
+            ExternalCapabilityBulkDecisionSet::Tool(vec![
+                ("tool-approval-a".to_string(), "tool-decision-a".to_string()),
+                ("tool-approval-b".to_string(), "tool-decision-b".to_string()),
+            ]),
+            true,
+        ));
+        assert_eq!(config.preference_revision, 8);
+
+        assert!(apply_capability_bulk_decisions(
+            &mut config,
+            ExternalCapabilityBulkDecisionSet::Mcp(vec![
+                "external_mcp_approval:local-user:workspace:docs:v1".to_string(),
+                "external_mcp_approval:local-user:workspace:search:v1".to_string(),
+            ]),
+            false,
+        ));
+        assert_eq!(config.preference_revision, 9);
+        assert!(config
+            .mcp_server_decisions
+            .values()
+            .all(|decision| !decision.approved));
+
+        assert!(apply_capability_bulk_decisions(
+            &mut config,
+            ExternalCapabilityBulkDecisionSet::Subagent(vec![
+                "agent-decision-a".to_string(),
+                "agent-decision-b".to_string(),
+            ]),
+            true,
+        ));
+        assert_eq!(config.preference_revision, 10);
+        assert_eq!(
+            config.approved_subagent_envelopes,
+            BTreeSet::from([
+                "agent-decision-a".to_string(),
+                "agent-decision-b".to_string(),
+            ])
+        );
+        assert!(apply_capability_bulk_decisions(
+            &mut config,
+            ExternalCapabilityBulkDecisionSet::Subagent(vec![
+                "agent-decision-a".to_string(),
+                "agent-decision-b".to_string(),
+            ]),
+            false,
+        ));
+        assert_eq!(config.preference_revision, 11);
+        assert!(config.approved_subagent_envelopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capability_bulk_actions_reject_catalog_drift_without_expanding_the_decision_set() {
+        let service = test_service(Vec::new());
+        {
+            let mut snapshot = lock_snapshot(&service.snapshot);
+            snapshot.generation = 12;
+            snapshot.subagent_generation = 13;
+            snapshot.mcp_generation = 14;
+            snapshot.preference_revision = 7;
+        }
+
+        let errors = [
+            service
+                .set_tool_targets_enabled(Vec::new(), true, 11, 7)
+                .await
+                .expect_err("tool catalog drift must require a new review"),
+            service
+                .set_subagents_enabled(Vec::new(), true, 12, 7)
+                .await
+                .expect_err("subagent catalog drift must require a new review"),
+            service
+                .set_mcp_servers_enabled(Vec::new(), true, 13, 7)
+                .await
+                .expect_err("MCP catalog drift must require a new review"),
+        ];
+
+        for error in errors {
+            assert_eq!(
+                ExternalSourceOperationError::decode(&error)
+                    .expect("bulk catalog drift uses the typed error contract")
+                    .code,
+                ExternalSourceOperationErrorCode::StaleRevision
+            );
+        }
+    }
+
     #[tokio::test]
     async fn tool_approval_waits_for_refresh_and_rejects_a_changed_decision() {
         let service = test_service(Vec::new());
@@ -9487,19 +10332,16 @@ mod tests {
             slow_provider,
             delayed_provider(
                 "healthy",
-                std::time::Duration::ZERO,
+                std::time::Duration::from_millis(50),
                 Arc::clone(&healthy_calls),
             ),
         ]);
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                let snapshot = refresh_test_commands(&service).await;
+                let _ = refresh_test_commands(&service).await;
                 if slow_calls.load(Ordering::SeqCst) == 1
-                    && snapshot
-                        .commands
-                        .iter()
-                        .any(|command| command.definition.name == "healthy")
+                    && healthy_calls.load(Ordering::SeqCst) >= 1
                 {
                     break;
                 }
@@ -9508,6 +10350,22 @@ mod tests {
         })
         .await
         .expect("slow and healthy providers must both start");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let snapshot = lock_coordinator(&service.control_plane).snapshot();
+                if snapshot
+                    .commands
+                    .iter()
+                    .any(|command| command.definition.name == "healthy")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the healthy provider result must be published");
 
         let healthy_calls_before_refresh = healthy_calls.load(Ordering::SeqCst);
         let snapshot = tokio::time::timeout(std::time::Duration::from_secs(2), async {

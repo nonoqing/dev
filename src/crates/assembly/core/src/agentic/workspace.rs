@@ -1,4 +1,4 @@
-use crate::service::remote_ssh::workspace_state::WorkspaceSessionIdentity;
+use crate::agentic::core::SessionConfig;
 use crate::service::workspace_runtime::WorkspaceRuntimeService;
 use bitfun_core_types::SessionExecutionTarget;
 pub use bitfun_runtime_ports::{
@@ -8,10 +8,50 @@ pub use bitfun_runtime_ports::{
 pub use bitfun_services_core::workspace::{
     local_workspace_services, LocalWorkspaceFs, LocalWorkspaceShell,
 };
+use bitfun_services_core::workspace_identity::{
+    workspace_session_identity, WorkspaceSessionIdentity, LOCAL_WORKSPACE_SSH_HOST,
+};
+#[cfg(feature = "remote-workspace")]
 pub use bitfun_services_integrations::remote_ssh::{
     remote_workspace_services, RemoteWorkspaceFs, RemoteWorkspaceShell,
 };
 use std::path::{Path, PathBuf};
+
+/// Return the stable identity path used by local workspace-scoped registries.
+///
+/// Callers may arrive through lexical aliases (`.` / `..`) or filesystem
+/// aliases. Keep normalization at the shared workspace boundary so producers
+/// and consumers cannot publish and query the same workspace under different
+/// keys. A missing path is retained for creation-safe discovery.
+pub(crate) fn canonical_local_workspace_path(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Stable local workspace identity shared by external-source and MCP routers.
+#[cfg(any(feature = "external-sources", feature = "mcp-runtime"))]
+pub(crate) fn workspace_route_key(workspace_root: Option<&Path>) -> String {
+    workspace_root
+        .map(|path| {
+            canonical_local_workspace_path(path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| "<global>".to_string())
+}
+
+/// Return the Session root that owns execution-scoped discovery and routing.
+///
+/// A managed worktree executes from `workspace_path` while Session persistence
+/// remains anchored at `project_workspace_path`. Extension sources and agent
+/// routes must follow the former so UI discovery and turn execution share one
+/// workspace identity.
+pub(crate) fn session_execution_workspace_root(config: &SessionConfig) -> Option<&Path> {
+    config
+        .workspace_path
+        .as_deref()
+        .or(config.project_workspace_path.as_deref())
+        .map(Path::new)
+}
 
 /// Describes whether the workspace is local or remote via SSH.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,15 +84,9 @@ pub struct WorkspaceBinding {
 impl WorkspaceBinding {
     pub fn new(workspace_id: Option<String>, root_path: PathBuf) -> Self {
         let logical_workspace_path = root_path.to_string_lossy().to_string();
-        let session_identity =
-            crate::service::remote_ssh::workspace_state::workspace_session_identity(
-                &logical_workspace_path,
-                None,
-                None,
-            )
+        let session_identity = workspace_session_identity(&logical_workspace_path, None, None)
             .unwrap_or(WorkspaceSessionIdentity {
-                hostname: crate::service::remote_ssh::workspace_state::LOCAL_WORKSPACE_SSH_HOST
-                    .to_string(),
+                hostname: LOCAL_WORKSPACE_SSH_HOST.to_string(),
                 logical_workspace_path,
                 remote_connection_id: None,
             });
@@ -149,7 +183,8 @@ impl WorkspaceBinding {
         if self.is_remote() {
             if self.session_identity.hostname == "_unresolved" {
                 if let Some(connection_id) = self.session_identity.remote_connection_id.as_deref() {
-                    return crate::service::remote_ssh::workspace_state::unresolved_remote_session_storage_dir(
+                    return bitfun_services_core::workspace_identity::unresolved_remote_session_storage_dir(
+                        crate::infrastructure::get_path_manager_arc().remote_ssh_mirror_root_dir(),
                         connection_id,
                         self.session_identity.logical_workspace_path(),
                     );
@@ -171,15 +206,39 @@ impl WorkspaceBinding {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkspaceBackend, WorkspaceBinding};
-    use crate::service::remote_ssh::workspace_state::{
-        remote_workspace_session_mirror_dir, workspace_session_identity,
-    };
+    use super::{session_execution_workspace_root, WorkspaceBackend, WorkspaceBinding};
+    use crate::agentic::core::SessionConfig;
     use crate::service::workspace_runtime::WorkspaceRuntimeService;
     use bitfun_core_types::{
         SessionExecutionTarget, SessionExecutionTargetKind, WorktreeLifecycle,
     };
+    use bitfun_services_core::workspace_identity::{
+        remote_workspace_session_mirror_dir, workspace_session_identity,
+    };
     use std::path::PathBuf;
+
+    #[test]
+    fn session_execution_root_prefers_worktree_over_persistence_root() {
+        let config = SessionConfig {
+            workspace_path: Some("D:/worktrees/feature".to_string()),
+            project_workspace_path: Some("D:/projects/main".to_string()),
+            ..SessionConfig::default()
+        };
+
+        assert_eq!(
+            session_execution_workspace_root(&config),
+            Some(std::path::Path::new("D:/worktrees/feature"))
+        );
+
+        let legacy = SessionConfig {
+            project_workspace_path: Some("D:/projects/main".to_string()),
+            ..SessionConfig::default()
+        };
+        assert_eq!(
+            session_execution_workspace_root(&legacy),
+            Some(std::path::Path::new("D:/projects/main"))
+        );
+    }
 
     #[test]
     fn remote_workspace_binding_uses_session_identity_storage_dir() {
@@ -200,7 +259,11 @@ mod tests {
         assert!(matches!(binding.backend, WorkspaceBackend::Remote { .. }));
         assert_eq!(
             binding.session_storage_dir(),
-            remote_workspace_session_mirror_dir("127.0.0.1", "/home/wsp/projects/test")
+            remote_workspace_session_mirror_dir(
+                crate::infrastructure::get_path_manager_arc().remote_ssh_mirror_root_dir(),
+                "127.0.0.1",
+                "/home/wsp/projects/test"
+            )
         );
     }
 

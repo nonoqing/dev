@@ -19,6 +19,7 @@ pub(crate) struct PermissionPrompt {
     pub(crate) selected_option: usize,
     reject_feedback: String,
     editing_reject_feedback: bool,
+    fullscreen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +35,7 @@ impl PermissionPrompt {
             selected_option: 0,
             reject_feedback: String::new(),
             editing_reject_feedback: false,
+            fullscreen: false,
         }
     }
 
@@ -67,6 +69,11 @@ impl PermissionPrompt {
             };
         }
         match key.code {
+            // Ctrl+F: toggle fullscreen display of the permission prompt.
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.fullscreen = !self.fullscreen;
+                PermissionAction::None
+            }
             KeyCode::Left | KeyCode::Char('h') => {
                 self.selected_option = self.selected_option.saturating_sub(1);
                 PermissionAction::None
@@ -126,18 +133,22 @@ pub(super) fn render_permission_overlay(
     theme: &Theme,
     area: Rect,
 ) {
-    let overlay_height = 11u16.min(area.height.saturating_sub(2));
-    let overlay_height = if prompt.request.delegation.is_some() {
-        overlay_height.saturating_add(2)
+    let overlay_area = if prompt.fullscreen {
+        area
     } else {
-        overlay_height
-    }
-    .min(area.height.saturating_sub(2));
-    let overlay_area = Rect {
-        x: area.x,
-        y: area.y + area.height.saturating_sub(overlay_height),
-        width: area.width,
-        height: overlay_height,
+        let overlay_height = 11u16.min(area.height.saturating_sub(2));
+        let overlay_height = if prompt.request.delegation.is_some() {
+            overlay_height.saturating_add(2)
+        } else {
+            overlay_height
+        }
+        .min(area.height.saturating_sub(2));
+        Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(overlay_height),
+            width: area.width,
+            height: overlay_height,
+        }
     };
     frame.render_widget(Clear, overlay_area);
     let chunks = Layout::default()
@@ -221,7 +232,7 @@ pub(super) fn render_permission_overlay(
         if prompt.editing_reject_feedback {
             "Enter submit  Esc back"
         } else {
-            "\u{21c6} select  Enter confirm  Esc reject"
+            "\u{21c6} select  Enter confirm  Esc reject  Ctrl+F fullscreen"
         },
     );
 }

@@ -144,6 +144,7 @@ SHELL composer
 - `stream-json` stdout 每行是一个完整 Agent event。
 - 日志与诊断进入 stderr 或日志文件。
 - 默认拒绝需要人工确认的操作；只有显式调用级策略可以自动批准。
+- 非交互入口不等待人工确认，也不从全局外部来源状态推断特殊任务结果。能力不可用时返回普通失败；能够可靠归属到 Tool、Agent 或 MCP owner 时，错误只给出对应管理入口。
 - 取消、事件失步、失败完成和 Patch 失败不能报告成功。
 
 ## 5. TUI 内部边界
@@ -156,6 +157,10 @@ TUI 增量保持四个可测试边界：
 4. 渲染：只读取状态，不访问文件系统、网络或 Agent owner。
 
 Slash、Palette、Help、快捷键和 availability 从同一 Action Registry 派生。竞品已有等价入口时不自创命令；局部 UI 状态不进入 Agent Runtime contract。
+
+Emacs 风格编辑键（Ctrl+A/E 行首行尾、Ctrl+K/U 行删除、Alt+D / Ctrl+D 向前删词、Ctrl+- 撤销等）在 fallback 层统一处理，由 `TextInput::handle_emacs_edit_key` 为 ChatMode 与 StartupPage 的 composer 提供共享实现；`Home`/`End` 改为消息滚动。Ctrl+D 在 composer 非空且输入框聚焦时与 Alt+D 语义相同，从光标处删除下一个单词；composer 为空时，StartupPage 直接退出，ChatMode 仅在没有 turn 正在处理时退出。终端挂起（Unix Ctrl+Z via SIGTSTP/SIGCONT）在事件循环层拦截，`fg` 恢复后重初始化终端。Ctrl+C 保留 clear-input / quit fallback，并在处理中优先取消当前轮次。
+
+会话选择器支持分组显示（Pinned / Today / 按日期分组）、内联重命名（Ctrl+R）和置顶切换（Ctrl+F），置顶 ID 持久化到 CLI 配置文件。模型选择器支持收藏切换（Ctrl+F），收藏状态持久化到后端 `AIModelConfig`。提示词暂存（prompt stash）在 ChatMode 与 StartupPage 共用同一组 stash、pop、list、restore 和 delete 操作；命令面板根据当前输入与 stash 是否非空决定 action availability，列表选择器支持恢复和删除。暂存条目以 JSONL 文件持久化并按 LIFO 排序（50 条上限）；恢复到不同工作区时移除工作区引用并明确提示。该能力是 CLI-local composer 草稿管理，不进入 Agent Runtime、Session 或 turn contract。
 
 终端恢复是强约束：正常退出、取消、初始化失败、错误返回和 panic 都要尽力恢复 raw mode、alternate screen、mouse/paste capture 与 cursor。
 
@@ -171,6 +176,10 @@ CLI-local 配置只保存终端形态偏好与调用入口设置。共享权限�
 
 CLI 通过 `DeliveryProfile::Cli` 消费经过校验的产品 Runtime parts。产品定义、Delivery Profile、Runtime Configuration 和 Capability Availability 是不同概念：
 
+- 编译期由 CLI 显式选择 `agent-runtime` 生命周期基线、实际 service owner、
+  `external-sources` / `plugin-runtime` / `ssh-remote` 和九组 `tools-*`；这保持现有
+  CLI capability plan，但不再从 Core 基线暗带具体能力，也不继承 Desktop 后续加入
+  `product-full` 的能力。
 - 隐藏入口不证明后端依赖被移除。
 - CLI 不读取 authoring product definition 作为运行时业务配置。
 - 品牌、资源、数据 namespace、更新渠道和内置扩展由产品定制 owner 生成，CLI 只消费结果。
@@ -179,6 +188,8 @@ CLI 通过 `DeliveryProfile::Cli` 消费经过校验的产品 Runtime parts。�
 
 CLI 只消费 typed summary 与 typed action：
 
+- `/extensions` 只提供外部应用/来源的简短状态、启停和刷新，不拥有审批、冲突或批量决策。
+- `/tools`、`/agent`、`/mcp` 和 `/hooks` 是对应能力的直接管理入口；需要用户允许时由真实 owner 在该入口处理，不再增加跨能力复审流程。
 - 静态发现不等于代码执行或服务健康。
 - 配置导入不授予插件执行权限。
 - ACP、MCP import、Hook import、可执行插件和 TUI contribution 使用独立状态与生命周期。

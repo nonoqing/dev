@@ -31,7 +31,7 @@ use futures::io::{AsyncRead as FuturesAsyncRead, AsyncWrite as FuturesAsyncWrite
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -755,7 +755,8 @@ impl AcpClientService {
             let _ = tx.send(());
         }
         if let Some(child) = client.child.lock().await.take() {
-            terminate_child_process_tree(connection_id, child).await;
+            bitfun_core::util::process_manager::terminate_child_process_tree(connection_id, child)
+                .await;
         }
         *client.connection.write().await = None;
         *client.agent_capabilities.write().await = None;
@@ -1725,7 +1726,7 @@ impl AcpClientService {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         apply_command_environment(&mut command, Some(&config.env));
-        configure_process_group(&mut command);
+        bitfun_core::util::process_manager::configure_process_group(&mut command);
 
         let mut child = command.spawn().map_err(|error| {
             BitFunError::service(format!(
@@ -1737,7 +1738,11 @@ impl AcpClientService {
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
-                terminate_child_process_tree(connection_id, child).await;
+                bitfun_core::util::process_manager::terminate_child_process_tree(
+                    connection_id,
+                    child,
+                )
+                .await;
                 return Err(BitFunError::service(format!(
                     "ACP client '{}' stdout is unavailable",
                     client_id
@@ -1747,7 +1752,11 @@ impl AcpClientService {
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
-                terminate_child_process_tree(connection_id, child).await;
+                bitfun_core::util::process_manager::terminate_child_process_tree(
+                    connection_id,
+                    child,
+                )
+                .await;
                 return Err(BitFunError::service(format!(
                     "ACP client '{}' stdin is unavailable",
                     client_id
@@ -2050,108 +2059,6 @@ fn aggregate_client_status(statuses: &[AcpClientStatus]) -> AcpClientStatus {
         return AcpClientStatus::Failed;
     }
     AcpClientStatus::Stopped
-}
-
-fn configure_process_group(command: &mut Command) {
-    #[cfg(unix)]
-    {
-        command.process_group(0);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = command;
-    }
-}
-
-async fn terminate_child_process_tree(client_id: &str, mut child: Child) {
-    let pid = child.id();
-
-    #[cfg(unix)]
-    if let Some(pid) = pid {
-        let process_group = format!("-{}", pid);
-        match bitfun_core::util::process_manager::create_tokio_command("kill")
-            .arg("-TERM")
-            .arg(&process_group)
-            .status()
-            .await
-        {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                warn!(
-                    "ACP client process group terminate exited unsuccessfully: id={} pid={} status={}",
-                    client_id, pid, status
-                );
-            }
-            Err(error) => {
-                warn!(
-                    "Failed to terminate ACP client process group: id={} pid={} error={}",
-                    client_id, pid, error
-                );
-            }
-        }
-
-        match tokio::time::timeout(Duration::from_millis(750), child.wait()).await {
-            Ok(Ok(_)) => return,
-            Ok(Err(error)) => {
-                warn!(
-                    "Failed to wait for ACP client process after terminate: id={} pid={} error={}",
-                    client_id, pid, error
-                );
-            }
-            Err(_) => {}
-        }
-
-        if let Err(error) = bitfun_core::util::process_manager::create_tokio_command("kill")
-            .arg("-KILL")
-            .arg(&process_group)
-            .status()
-            .await
-        {
-            warn!(
-                "Failed to kill ACP client process group: id={} pid={} error={}",
-                client_id, pid, error
-            );
-        }
-        let _ = child.wait().await;
-        return;
-    }
-
-    #[cfg(windows)]
-    if let Some(pid) = pid {
-        match bitfun_core::util::process_manager::create_tokio_command("taskkill")
-            .arg("/PID")
-            .arg(pid.to_string())
-            .arg("/T")
-            .arg("/F")
-            .status()
-            .await
-        {
-            Ok(status) if status.success() => {
-                let _ = child.wait().await;
-                return;
-            }
-            Ok(status) => {
-                warn!(
-                    "ACP client process tree kill exited unsuccessfully: id={} pid={} status={}",
-                    client_id, pid, status
-                );
-            }
-            Err(error) => {
-                warn!(
-                    "Failed to kill ACP client process tree: id={} pid={} error={}",
-                    client_id, pid, error
-                );
-            }
-        }
-    }
-
-    if let Err(error) = child.start_kill() {
-        warn!(
-            "Failed to kill ACP client process: id={} error={}",
-            client_id, error
-        );
-    }
-    let _ = child.wait().await;
 }
 
 async fn close_or_cancel_remote_session(

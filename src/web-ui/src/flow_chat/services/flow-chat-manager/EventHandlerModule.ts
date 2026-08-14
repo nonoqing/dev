@@ -35,12 +35,14 @@ import type {
   OpenBuiltInBrowserEvent,
   AcpContextUsageUpdatedEvent,
   SessionModelAutoMigratedEvent,
+  SessionReasoningPresetAutoClearedEvent,
   SubagentSessionLinkedEvent,
 } from '@/infrastructure/api/service-api/AgentAPI';
 import { MCPAPI } from '@/infrastructure/api/service-api/MCPAPI';
 import { ACPClientAPI, type AcpPermissionRequestEvent } from '@/infrastructure/api/service-api/ACPClientAPI';
 import { globalEventBus } from '@/infrastructure/event-bus';
 import type { FlowChatContext, DialogTurn, ModelRound, FlowToolItem } from './types';
+import type { SteeringImage } from '../../types/flow-chat';
 import {
   normalizeAiErrorDetail,
   type AiErrorDetail,
@@ -162,6 +164,8 @@ export const __test_only__ = {
   handleDialogTurnFailed,
   handleSubagentSessionLinked,
   handleModelRoundStart,
+  handleTokenUsageUpdate,
+  handleCompressionCompleted,
 };
 
 function shouldMarkUnreadCompletion(sessionId: string): boolean {
@@ -818,6 +822,9 @@ export async function initializeEventListeners(
     onSessionModelAutoMigrated: (event) => {
       handleSessionModelAutoMigrated(event);
     },
+    onSessionReasoningPresetAutoCleared: (event) => {
+      handleSessionReasoningPresetAutoCleared(event);
+    },
     onUserSteeringInjected: (event) => {
       handleUserSteeringInjected(context, event);
     }
@@ -1200,6 +1207,24 @@ function handleSessionModelAutoMigrated(event: SessionModelAutoMigratedEvent): v
   }
 }
 
+function handleSessionReasoningPresetAutoCleared(
+  event: SessionReasoningPresetAutoClearedEvent,
+): void {
+  const { sessionId, previousPresetId, reason } = event;
+  if (!sessionId || !previousPresetId) return;
+
+  const store = FlowChatStore.getInstance();
+  const applied = store.applySessionReasoningPresetAutoClear(sessionId, previousPresetId);
+  if (!applied) {
+    log.debug('Ignoring stale session reasoning preset auto-clear', {
+      sessionId,
+      previousPresetId,
+      reason,
+      currentPresetId: store.getState().sessions.get(sessionId)?.config.reasoningPreset,
+    });
+  }
+}
+
 /**
  * Upsert a `user-steering` flow item into the latest model round of the given
  * dialog turn. Used both by the optimistic client-side path (right after
@@ -1217,10 +1242,12 @@ export function insertSteeringItemIfAbsent(params: {
   turnId: string;
   steeringId: string;
   content: string;
+  /** Images sent with the steering message, rendered under its text. */
+  images?: SteeringImage[];
   roundIndex?: number;
   status?: 'pending' | 'completed';
 }): boolean {
-  const { sessionId, turnId, steeringId, content } = params;
+  const { sessionId, turnId, steeringId, content, images } = params;
   const roundIndex = typeof params.roundIndex === 'number' ? params.roundIndex : 0;
   const status = params.status ?? 'completed';
 
@@ -1254,6 +1281,7 @@ export function insertSteeringItemIfAbsent(params: {
     status,
     steeringId,
     content,
+    images: images?.length ? images : undefined,
     roundIndex,
   };
 
@@ -1518,7 +1546,6 @@ function handleDialogTurnStarted(context: FlowChatContext, event: any): void {
   const tempTurnId = pendingImageAnalysisTurns.get(sessionId);
   const hadTempTurn = !!tempTurnId;
   if (tempTurnId) {
-    store.deleteDialogTurn(sessionId, tempTurnId);
     pendingImageAnalysisTurns.delete(sessionId);
 
     // State machine was already transitioned to PROCESSING by ImageAnalysisStarted.
@@ -1529,7 +1556,7 @@ function handleDialogTurnStarted(context: FlowChatContext, event: any): void {
       ctx.currentDialogTurnId = turnId;
     }
 
-    log.info('Replaced temp image analysis turn with real turn', {
+    log.info('Adopting temp image analysis turn as real turn', {
       sessionId,
       tempTurnId,
       realTurnId: turnId,
@@ -1597,33 +1624,39 @@ function handleDialogTurnStarted(context: FlowChatContext, event: any): void {
         )
       : undefined;
     if (optimisticTurn) {
-      store.updateDialogTurn(sessionId, optimisticTurn.id, turn => {
-        const optimisticMetadata = stripOptimisticTurnAdoption(
-          turn.userMessage.metadata,
-        );
-        const mergedMetadata =
-          optimisticMetadata || userMessageMetadata
-            ? { ...optimisticMetadata, ...userMessageMetadata }
-            : undefined;
-        return {
-          ...turn,
-          id: turnId,
-          kind: turn.kind || turnKind,
-          userMessage: {
-            ...turn.userMessage,
-            content: turn.userMessage.content || displayContent,
-            hasImages,
-            metadata: mergedMetadata,
-            images,
-          },
-          status: 'pending',
-          backendTurnIndex: typeof turnIndex === 'number' ? turnIndex : undefined,
-        };
+      const optimisticMetadata = stripOptimisticTurnAdoption(
+        optimisticTurn.userMessage.metadata,
+      );
+      const mergedMetadata =
+        optimisticMetadata || userMessageMetadata
+          ? { ...optimisticMetadata, ...userMessageMetadata }
+          : undefined;
+      store.replaceOptimisticDialogTurn(sessionId, optimisticTurn.id, {
+        ...optimisticTurn,
+        id: turnId,
+        kind: optimisticTurn.kind || turnKind,
+        userMessage: {
+          ...optimisticTurn.userMessage,
+          content: optimisticTurn.userMessage.content || displayContent,
+          hasImages,
+          metadata: mergedMetadata,
+          images,
+        },
+        status: 'pending',
+        storageTurnIndex: typeof turnIndex === 'number' ? turnIndex : undefined,
+        backendTurnIndex: typeof turnIndex === 'number' ? turnIndex : undefined,
       });
       dialogTurn = store.getState().sessions
         .get(sessionId)
         ?.dialogTurns.find((turn: DialogTurn) => turn.id === turnId);
       projectedNewTurn = !!dialogTurn;
+      const deferredOldKey = `${sessionId}:${optimisticTurn.id}`;
+      const deferredNewKey = `${sessionId}:${turnId}`;
+      const hadDeferredOldSave = context.deferredStorageIdentitySaves?.delete(deferredOldKey) === true;
+      const hadDeferredNewSave = context.deferredStorageIdentitySaves?.delete(deferredNewKey) === true;
+      if (hadDeferredOldSave || hadDeferredNewSave) {
+        void saveDialogTurnToDisk(context, sessionId, turnId);
+      }
     }
   }
 
@@ -1643,9 +1676,15 @@ function handleDialogTurnStarted(context: FlowChatContext, event: any): void {
       modelRounds: [],
       status: 'pending',
       startTime: Date.now(),
+      storageTurnIndex: typeof turnIndex === 'number' ? turnIndex : undefined,
       backendTurnIndex: typeof turnIndex === 'number' ? turnIndex : undefined,
     };
-    store.addDialogTurn(sessionId, newTurn);
+    const replacedTempTurn = tempTurnId
+      ? store.replaceOptimisticDialogTurn(sessionId, tempTurnId, newTurn)
+      : false;
+    if (!replacedTempTurn) {
+      store.addDialogTurn(sessionId, newTurn);
+    }
     projectedNewTurn = true;
   }
 
@@ -1670,7 +1709,11 @@ function handleDialogTurnStarted(context: FlowChatContext, event: any): void {
     return;
   }
 
-  if (typeof turnIndex === 'number' && dialogTurn.backendTurnIndex === undefined) {
+  if (
+    typeof turnIndex === 'number'
+    && dialogTurn.storageTurnIndex === undefined
+    && dialogTurn.backendTurnIndex === undefined
+  ) {
     store.updateDialogTurn(sessionId, turnId, turn => ({
       ...turn,
       kind: turn.kind || turnKind,
@@ -1678,8 +1721,13 @@ function handleDialogTurnStarted(context: FlowChatContext, event: any): void {
         ...turn.userMessage,
         metadata: turn.userMessage.metadata || userMessageMetadata,
       },
+      storageTurnIndex: turnIndex,
       backendTurnIndex: turnIndex,
     }));
+    const deferredKey = `${sessionId}:${turnId}`;
+    if (context.deferredStorageIdentitySaves?.delete(deferredKey)) {
+      void saveDialogTurnToDisk(context, sessionId, turnId);
+    }
   }
   reconcileBackgroundSubagentSession(sessionId);
 
@@ -2083,6 +2131,13 @@ function handleTokenUsageUpdate(context: FlowChatContext, event: any): void {
     log.debug('Session not found (token usage update)', { sessionId });
     return;
   }
+  if (
+    typeof turnId !== 'string'
+    || !session.dialogTurns.some(turn => turn.id === turnId)
+  ) {
+    log.debug('Dropped token usage update for non-visible turn', { sessionId, turnId });
+    return;
+  }
   if (typeof inputTokens !== 'number' || typeof totalTokens !== 'number') {
     log.debug('Dropped invalid token usage update', { event });
     return;
@@ -2091,7 +2146,9 @@ function handleTokenUsageUpdate(context: FlowChatContext, event: any): void {
   store.updateTokenUsage(sessionId, {
     inputTokens,
     outputTokens: typeof outputTokens === 'number' ? outputTokens : undefined,
-    totalTokens
+    totalTokens,
+    turnId,
+    source: 'model_request',
   }, turnId);
 
   if (maxContextTokens !== undefined && maxContextTokens !== null) {
@@ -2199,16 +2256,24 @@ function handleCompressionStarted(_context: FlowChatContext, event: any): void {
  */
 function handleCompressionCompleted(context: FlowChatContext, event: any): void {
   const { 
-    sessionId, turnId, compressionId, compressionCount, 
+    sessionId, turnId, compressionId, compressionCount, applied,
     tokensBefore, tokensAfter, compressionRatio, durationMs, hasSummary, summarySource
   } = event;
   
   log.info('Context compression completed', {
-    sessionId, turnId, compressionId, compressionCount, 
+    sessionId, turnId, compressionId, compressionCount, applied,
     tokensBefore, tokensAfter, compressionRatio, durationMs
   });
   
   const store = FlowChatStore.getInstance();
+  const session = store.getState().sessions.get(sessionId);
+  if (
+    typeof turnId !== 'string'
+    || !session?.dialogTurns.some(turn => turn.id === turnId)
+  ) {
+    log.debug('Dropped compression completion for non-visible turn', { sessionId, turnId });
+    return;
+  }
   
   store.updateModelRoundItem(sessionId, turnId, compressionId, {
     toolResult: {
@@ -2227,6 +2292,22 @@ function handleCompressionCompleted(context: FlowChatContext, event: any): void 
     status: 'completed',
     endTime: Date.now()
   } as any);
+
+  // Keep the input-box context usage display in sync: a completed compression
+  // shrinks the context immediately, but no TokenUsageUpdated event follows it
+  // (that event is only emitted after a model response). Reflect the compacted
+  // size here so the percentage and "last request input context" refresh right
+  // away. Do not pass a dialogTurnId: compression is not a model invocation, so
+  // it must not accumulate into the turn's token usage.
+  if (applied === true && typeof tokensAfter === 'number' && tokensAfter >= 0) {
+    store.updateTokenUsage(sessionId, {
+      inputTokens: tokensAfter,
+      totalTokens: tokensAfter,
+      outputTokens: undefined,
+      turnId,
+      source: 'context_compression',
+    });
+  }
   
   immediateSaveDialogTurn(context, sessionId, turnId);
 }

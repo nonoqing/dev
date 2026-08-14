@@ -3,13 +3,13 @@ import {
   ChatMessage,
   RecentWorkspaceEntry,
   RemoteModelCatalog,
-  RemoteModelConfig,
   RemoteSession,
   SelectedImageAttachment,
   SessionSummary
 } from '../../model/RemoteModels';
-import { ChatTimelineItem, ChatTimelineRevisionTracker } from '../../services/ChatTimelineProjector';
+import { ChatTimelineItem } from '../../services/ChatTimelineProjector';
 import { RemoteUiState } from '../../services/RemoteUiState';
+import { ConversationCoreState } from './ConversationCoreState';
 
 /**
  * Observable projection for the Remote home page.
@@ -17,6 +17,7 @@ import { RemoteUiState } from '../../services/RemoteUiState';
  */
 @ObservedV2
 export class RemotePageState {
+  @Trace conversation: ConversationCoreState = new ConversationCoreState('code');
   @Trace desktopName: string = '';
   @Trace desktopId: string = '';
   @Trace remoteUrl: string = '';
@@ -28,10 +29,8 @@ export class RemotePageState {
   @Trace controlTargetType: string = 'none';
   @Trace controlTargetDeviceId: string = '';
   @Trace controlTargetDeviceName: string = '';
-  @Trace statusText: string = '';
   @Trace connectionState: string = 'idle';
   @Trace connectionFailureKind: string = '';
-  @Trace isBusy: boolean = false;
   @Trace isLoadingHome: boolean = false;
   @Trace showRemoteUrlInput: boolean = false;
   @Trace workspaceName: string = '';
@@ -43,28 +42,37 @@ export class RemotePageState {
   @Trace assistants: AssistantEntry[] = [];
   @Trace showWorkspacePicker: boolean = false;
   @Trace showAssistantPicker: boolean = false;
-  @Trace sessions: RemoteSession[] = [];
-  @Trace activeSession: SessionSummary = RemotePageState.emptySession();
-  @Trace persistedMessages: ChatMessage[] = [];
-  @Trace optimisticMessages: ChatMessage[] = [];
-  @Trace activeTurnMessage: ChatMessage = RemoteUiState.emptyActiveTurn();
-  @Trace hasMoreMessages: boolean = false;
-  @Trace timelineItems: ChatTimelineItem[] = [];
-  @Trace timelineRevision: number = 0;
-  @Trace modelCatalog: RemoteModelCatalog = RemoteUiState.emptyModelCatalog();
-  @Trace selectedModelId: string = '';
   @Trace downloadingFilePath: string = '';
   @Trace downloadedFilePath: string = '';
   @Trace fileDownloadStatus: string = '';
-  @Trace chatInput: string = '';
-  @Trace selectedImages: SelectedImageAttachment[] = [];
-  @Trace isVoiceListening: boolean = false;
   @Trace sessionQuery: string = '';
   @Trace sessionFilter: string = 'all';
   @Trace hasMoreSessions: boolean = false;
   @Trace isLoadingSessions: boolean = false;
+  @Trace isLoadingConversation: boolean = false;
+  @Trace pendingSessionId: string = '';
+  @Trace isConversationDismissed: boolean = false;
   @Trace sessionErrorText: string = '';
-  private readonly timelineRevisionTracker: ChatTimelineRevisionTracker = new ChatTimelineRevisionTracker();
+  // Deliberately untraced: the memo behind visibleSessions(), not state anything
+  // renders. Tracing it would make reading the list a write to the list.
+  private visibleSessionsCache: RemoteSession[] = [];
+  private visibleSessionsSource: RemoteSession[] | undefined = undefined;
+  private visibleSessionsQuery: string = ' ';
+  get activeSession(): SessionSummary { return this.conversation.activeSession; }
+  get sessions(): RemoteSession[] { return this.conversation.sessions; }
+  get persistedMessages(): ChatMessage[] { return this.conversation.persistedMessages; }
+  get optimisticMessages(): ChatMessage[] { return this.conversation.optimisticMessages; }
+  get activeTurnMessage(): ChatMessage { return this.conversation.activeTurnMessage; }
+  get hasMoreMessages(): boolean { return this.conversation.hasMoreMessages; }
+  get timelineItems(): ChatTimelineItem[] { return this.conversation.timelineItems; }
+  get timelineRevision(): number { return this.conversation.timelineRevision; }
+  get isBusy(): boolean { return this.conversation.isBusy; }
+  get modelCatalog(): RemoteModelCatalog { return this.conversation.modelCatalog; }
+  get selectedModelId(): string { return this.conversation.selectedModelId; }
+  get statusText(): string { return this.conversation.statusText; }
+  get chatInput(): string { return this.conversation.chatInput; }
+  get selectedImages(): SelectedImageAttachment[] { return this.conversation.selectedImages; }
+  get isVoiceListening(): boolean { return this.conversation.isVoiceListening; }
 
   setQuery(query: string): void {
     this.sessionQuery = query;
@@ -125,7 +133,7 @@ export class RemotePageState {
   }
 
   setStatusText(statusText: string): void {
-    this.statusText = statusText;
+    this.conversation.setStatusText(statusText);
   }
 
   setConnectionState(connectionState: string): void {
@@ -137,7 +145,7 @@ export class RemotePageState {
   }
 
   setBusy(isBusy: boolean): void {
-    this.isBusy = isBusy;
+    this.conversation.setBusy(isBusy);
   }
 
   setLoadingHome(isLoadingHome: boolean): void {
@@ -184,24 +192,20 @@ export class RemotePageState {
   }
 
   setSessions(sessions: RemoteSession[], hasMore: boolean): void {
-    this.sessions = sessions.slice();
+    this.conversation.setSessions(sessions);
     this.hasMoreSessions = hasMore;
     this.sessionErrorText = '';
   }
 
   setActiveSession(session: SessionSummary): void {
-    this.activeSession = {
-      sessionId: session.sessionId,
-      title: session.title,
-      workspacePath: session.workspacePath,
-      agentType: session.agentType,
-      initialTurnId: session.initialTurnId
-    };
+    this.conversation.setActiveSession(session);
   }
 
   clearActiveSession(): void {
-    this.activeSession = RemotePageState.emptySession();
-    this.clearTimeline();
+    this.conversation.clearActiveSession();
+    this.isLoadingConversation = false;
+    this.pendingSessionId = '';
+    this.isConversationDismissed = false;
     this.setModelCatalog(RemoteUiState.emptyModelCatalog(), '');
   }
 
@@ -212,32 +216,25 @@ export class RemotePageState {
     hasMoreMessages: boolean,
     timelineItems: ChatTimelineItem[]
   ): void {
-    this.timelineRevision = this.timelineRevisionTracker.update(timelineItems);
-    this.persistedMessages = persistedMessages.slice();
-    this.optimisticMessages = optimisticMessages.slice();
-    this.activeTurnMessage = activeTurnMessage.id.length > 0 ?
-      RemotePageState.copyMessage(activeTurnMessage) :
-      RemoteUiState.emptyActiveTurn();
-    this.hasMoreMessages = hasMoreMessages;
-    this.timelineItems = timelineItems.slice();
+    this.conversation.setTimelineProjection(
+      persistedMessages,
+      optimisticMessages,
+      activeTurnMessage,
+      hasMoreMessages,
+      timelineItems
+    );
   }
 
   setHasMoreMessages(hasMoreMessages: boolean): void {
-    this.hasMoreMessages = hasMoreMessages;
+    this.conversation.setHasMoreMessages(hasMoreMessages);
   }
 
   clearTimeline(): void {
-    this.persistedMessages = [];
-    this.optimisticMessages = [];
-    this.activeTurnMessage = RemoteUiState.emptyActiveTurn();
-    this.hasMoreMessages = false;
-    this.timelineItems = [];
-    this.timelineRevision = this.timelineRevisionTracker.reset();
+    this.conversation.clearTimeline();
   }
 
   setModelCatalog(modelCatalog: RemoteModelCatalog, selectedModelId: string): void {
-    this.modelCatalog = RemotePageState.copyModelCatalog(modelCatalog);
-    this.selectedModelId = selectedModelId;
+    this.conversation.setModelCatalog(modelCatalog, selectedModelId);
   }
 
   setDownloadStatus(downloadingFilePath: string, downloadedFilePath: string, fileDownloadStatus: string): void {
@@ -257,32 +254,43 @@ export class RemotePageState {
   }
 
   setChatInput(chatInput: string): void {
-    this.chatInput = chatInput;
+    this.conversation.setChatInput(chatInput);
   }
 
   setSelectedImages(selectedImages: SelectedImageAttachment[]): void {
-    this.selectedImages = selectedImages.slice();
+    this.conversation.setSelectedImages(selectedImages);
   }
 
   addSelectedImages(selectedImages: SelectedImageAttachment[]): void {
-    this.selectedImages = this.selectedImages.concat(selectedImages);
+    this.conversation.addSelectedImages(selectedImages);
   }
 
   removeSelectedImage(imageId: string): void {
-    this.selectedImages = this.selectedImages.filter((image: SelectedImageAttachment) => image.id !== imageId);
+    this.conversation.removeSelectedImage(imageId);
   }
 
   clearComposer(): void {
-    this.chatInput = '';
-    this.selectedImages = [];
+    this.conversation.clearComposer();
   }
 
   setVoiceListening(isVoiceListening: boolean): void {
-    this.isVoiceListening = isVoiceListening;
+    this.conversation.setVoiceListening(isVoiceListening);
   }
 
   setLoading(loading: boolean): void {
     this.isLoadingSessions = loading;
+  }
+
+  setConversationLoading(loading: boolean): void {
+    this.isLoadingConversation = loading;
+  }
+
+  setPendingSessionId(sessionId: string): void {
+    this.pendingSessionId = sessionId;
+  }
+
+  setConversationDismissed(dismissed: boolean): void {
+    this.isConversationDismissed = dismissed;
   }
 
   setError(errorText: string): void {
@@ -291,9 +299,12 @@ export class RemotePageState {
   }
 
   clear(): void {
-    this.sessions = [];
+    this.conversation.setSessions([]);
     this.hasMoreSessions = false;
     this.isLoadingSessions = false;
+    this.isLoadingConversation = false;
+    this.pendingSessionId = '';
+    this.isConversationDismissed = false;
     this.isLoadingHome = false;
     this.sessionErrorText = '';
   }
@@ -304,72 +315,33 @@ export class RemotePageState {
     this.closePickers();
   }
 
+  /**
+   * The sessions the sidebar may show, as a stable array.
+   *
+   * This is read straight into a `@Param`, so returning a fresh array each call
+   * marked the session list dirty on every rebuild of its parent — including
+   * the rebuild that a selection change causes, which is the one case where
+   * nothing about the list has moved. Handing back the same instance until the
+   * source or the query changes lets the list keep what it already computed.
+   */
   visibleSessions(): RemoteSession[] {
+    const source = this.conversation.sessions;
     const query = this.sessionQuery.trim().toLowerCase();
-    return this.sessions.filter((item: RemoteSession) => {
+    if (source === this.visibleSessionsSource && query === this.visibleSessionsQuery) {
+      return this.visibleSessionsCache;
+    }
+    this.visibleSessionsSource = source;
+    this.visibleSessionsQuery = query;
+    this.visibleSessionsCache = source.filter((item: RemoteSession) => {
       if (item.id.length === 0 || item.status === 'archived') {
         return false;
       }
       return query.length === 0 || item.title.toLowerCase().indexOf(query) >= 0;
     });
+    return this.visibleSessionsCache;
   }
 
   hasRunningActiveTurn(): boolean {
-    return this.activeTurnMessage.id.length > 0 &&
-      (this.activeTurnMessage.status || '').toLowerCase() === 'active';
-  }
-
-  private static emptySession(): SessionSummary {
-    return {
-      sessionId: '',
-      title: '',
-      workspacePath: '',
-      agentType: 'code'
-    };
-  }
-
-  private static copyMessage(message: ChatMessage): ChatMessage {
-    return {
-      id: message.id,
-      role: message.role,
-      text: message.text,
-      status: message.status,
-      renderVersion: message.renderVersion,
-      turnId: message.turnId,
-      detail: message.detail,
-      timestamp: message.timestamp,
-      thinking: message.thinking,
-      tools: message.tools ? message.tools.slice() : undefined,
-      items: message.items ? message.items.slice() : undefined,
-      images: message.images ? message.images.slice() : undefined
-    };
-  }
-
-  private static copyModelCatalog(modelCatalog: RemoteModelCatalog): RemoteModelCatalog {
-    return {
-      version: modelCatalog.version,
-      models: modelCatalog.models.map((model): RemoteModelConfig => {
-        return {
-          id: model.id,
-          name: model.name,
-          provider: model.provider,
-          base_url: model.base_url,
-          model_name: model.model_name,
-          context_window: model.context_window,
-          enabled: model.enabled,
-          capabilities: model.capabilities.slice(),
-          enable_thinking_process: model.enable_thinking_process,
-          reasoning_mode: model.reasoning_mode,
-          reasoning_effort: model.reasoning_effort
-        };
-      }),
-      default_models: {
-        primary: modelCatalog.default_models.primary,
-        fast: modelCatalog.default_models.fast,
-        search: modelCatalog.default_models.search,
-        image_understanding: modelCatalog.default_models.image_understanding
-      },
-      session_model_id: modelCatalog.session_model_id
-    };
+    return this.conversation.hasRunningActiveTurn();
   }
 }

@@ -2,6 +2,7 @@
 
 use crate::api::session_storage_path::desktop_effective_session_storage_path;
 use crate::embedded_relay_host::DesktopEmbeddedRelayHost;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bitfun_core::agentic::coordination::{
     get_global_coordinator, get_global_scheduler, ConversationCoordinator,
 };
@@ -10,6 +11,10 @@ use bitfun_core::agentic::tools::account_login_capability::set_account_login_ava
 use bitfun_core::agentic::tools::page_deploy_host::set_page_deploy_handler;
 use bitfun_core::agentic::tools::page_publish_host::set_page_publish_handler;
 use bitfun_core::product_runtime::CoreAgentRuntimeCompatibility;
+use bitfun_core::service::dispatch::{
+    DispatchAccountDaemonIdentity, DispatchAccountDaemonProvisionRequest,
+    DISPATCH_ACCOUNT_DAEMON_PROVISIONING_SCHEMA_VERSION,
+};
 use bitfun_core::service::remote_connect::session_store::{
     clear_credential_hint, load_credential_hint, save_credential_hint, AccountHint,
 };
@@ -17,11 +22,12 @@ use bitfun_core::service::remote_connect::{
     bot::{self, weixin, BotConfig},
     lan, session_store, sync_state, AccountClient, AccountPairingVerification, AccountSession,
     ConnectionMethod, ConnectionResult, DelegatedIdentityAuthorization, DeviceIdentity,
-    PairingState, RemoteConnectConfig, RemoteConnectService,
+    PairingState, ProvisionedDeviceAuthorization, RemoteConnectConfig, RemoteConnectService,
 };
 use bitfun_core::service::session::{DialogTurnData, SessionMetadata};
 use bitfun_core::service::workspace::{get_global_workspace_service, WorkspaceKind};
 use bitfun_core::service::workspace_runtime::WorkspaceRuntimeService;
+use bitfun_events::AI_MODEL_CATALOG_UPDATED_EVENT;
 use bitfun_services_integrations::remote_connect::account::{
     ensure_relay_session_history_exportable, error_indicates_expired_token,
     mark_relay_session_history_import_complete, mark_relay_session_history_import_pending,
@@ -75,6 +81,17 @@ static ACCOUNT_CONTEXT_TRANSITIONS: AtomicUsize = AtomicUsize::new(0);
 /// prevents a retiring event loop from dispatching through a newer socket.
 static DEVICE_ROUTING_LIFECYCLE_LOCK: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 static DEVICE_ROUTING_CONNECTION_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Ceiling on device RPCs executing at once.
+///
+/// RPCs run off the routing loop rather than on it, so without a bound a phone
+/// that fans out a screenful of `list_sessions` would put all of them on the
+/// webview bridge at once. The bound exists to keep that burst from crowding
+/// out the next device's first request, not because concurrency is unsafe:
+/// each RPC holds its own routing lease and answers its own correlation id.
+const MAX_CONCURRENT_DEVICE_RPCS: usize = 8;
+static DEVICE_RPC_SLOTS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(MAX_CONCURRENT_DEVICE_RPCS);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DeviceRoutingOwner {
@@ -537,6 +554,7 @@ fn should_fanout_peer_ui_event(event: &str) -> bool {
             | "backend-event-toolawaitinguserinput"
             | "backend-event-toolcallconfirmation"
             | "permission://event"
+            | AI_MODEL_CATALOG_UPDATED_EVENT
     )
 }
 
@@ -853,6 +871,114 @@ pub(crate) async fn read_account_context_for_generation(
     Ok(context)
 }
 
+/// Secret-bearing, Rust-only handoff for one SSH target bootstrap. It is never
+/// serialized through Tauri; only its redacted outcome reaches the Web UI.
+pub(crate) struct DispatchAccountDeviceProvisioning {
+    pub(crate) request: DispatchAccountDaemonProvisionRequest,
+    target_session: AccountSession,
+    relay_url: String,
+}
+
+impl DispatchAccountDeviceProvisioning {
+    pub(crate) fn device_id(&self) -> &str {
+        &self.request.device_id
+    }
+
+    pub(crate) fn user_id(&self) -> &str {
+        &self.request.user_id
+    }
+}
+
+/// Mint a distinct full device credential for an SSH host. A finalized local
+/// login is optional: callers receive `None` and skip account/daemon setup when
+/// this Desktop is logged out or still awaiting the cloud/local sync choice.
+pub(crate) async fn provision_dispatch_account_device(
+    identity: &DispatchAccountDaemonIdentity,
+) -> Result<Option<DispatchAccountDeviceProvisioning>, String> {
+    if PENDING_SYNC_CHOICE.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let generation = account_context_generation();
+    let Ok(_account_guard) = lock_account_sync(generation).await else {
+        return Ok(None);
+    };
+    let (session, relay_url) = match read_account_context_for_generation(generation).await {
+        Ok(context) => context,
+        Err(error) if error == "not logged in" => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let issued = AccountClient::new()
+        .provision_device_token(
+            &relay_url,
+            &session,
+            &identity.device_id,
+            &identity.device_name,
+            "desktop",
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .map_err(|error| format!("provision remote account device: {error}"))?;
+    let target_session = AccountSession {
+        token: issued.token.clone(),
+        user_id: issued.user_id.clone(),
+        master_key: session.master_key,
+    };
+    let provisioning = DispatchAccountDeviceProvisioning {
+        request: DispatchAccountDaemonProvisionRequest {
+            schema_version: DISPATCH_ACCOUNT_DAEMON_PROVISIONING_SCHEMA_VERSION,
+            token: issued.token,
+            user_id: issued.user_id,
+            master_key_base64: BASE64.encode(session.master_key),
+            relay_url: relay_url.clone(),
+            device_id: issued.device_id,
+        },
+        target_session,
+        relay_url,
+    };
+    if !account_context_matches(generation, &session.token).await {
+        let _ = remove_dispatch_account_device(&provisioning).await;
+        return Err("account context changed while provisioning the SSH target".to_string());
+    }
+    Ok(Some(provisioning))
+}
+
+pub(crate) async fn wait_for_dispatch_account_device_online(
+    provisioning: &DispatchAccountDeviceProvisioning,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let devices = AccountClient::new()
+            .list_devices(&provisioning.relay_url, &provisioning.target_session)
+            .await
+            .map_err(|error| format!("verify remote daemon connection: {error}"))?;
+        if devices
+            .iter()
+            .any(|device| device.device_id == provisioning.request.device_id && device.online)
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(
+                "remote BitFun daemon did not connect to the relay within 30 seconds".to_string(),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+pub(crate) async fn remove_dispatch_account_device(
+    provisioning: &DispatchAccountDeviceProvisioning,
+) -> Result<(), String> {
+    AccountClient::new()
+        .delete_device(
+            &provisioning.relay_url,
+            &provisioning.target_session,
+            &provisioning.request.device_id,
+        )
+        .await
+        .map_err(|error| format!("remove provisioned account device: {error}"))
+}
+
 async fn account_context_matches(generation: u64, token: &str) -> bool {
     if !account_context_is_current(generation) {
         return false;
@@ -1102,6 +1228,62 @@ async fn register_delegated_identity_providers() {
                             None
                         }
                     }
+                })
+            })
+            .await;
+
+        // Room-channel provider that adds a keyboard-less device (a watch) to
+        // this account. Same lease discipline as delegation above; the errors
+        // are returned rather than swallowed because a provisioning failure is
+        // shown to someone standing there waiting for it.
+        let account_context = get_account_context().clone();
+        service
+            .set_peer_device_provisioner(move |device_id, device_name, request_id| {
+                let account_context = account_context.clone();
+                Box::pin(async move {
+                    // Minted by the device being provisioned so a retry anywhere
+                    // along the chain replays one idempotent relay request.
+                    let request_id = uuid::Uuid::parse_str(&request_id)
+                        .map_err(|_| "Request id must be a UUID".to_string())?;
+                    let generation = account_context_generation();
+                    if !account_context_is_current(generation) {
+                        return Err("Desktop account changed; try again".to_string());
+                    }
+                    let account_lease = lock_account_sync(generation)
+                        .await
+                        .map_err(|_| "Desktop account changed; try again".to_string())?;
+                    let context = account_context
+                        .read()
+                        .await
+                        .clone()
+                        .ok_or_else(|| "Desktop is not logged into a BitFun account".to_string())?;
+                    if !account_context_matches(generation, &context.session.token).await {
+                        return Err("Desktop account changed; try again".to_string());
+                    }
+                    let provisioned = AccountClient::new()
+                        .provision_device_token(
+                            &context.relay_url,
+                            &context.session,
+                            &device_id,
+                            &device_name,
+                            "watch",
+                            request_id,
+                        )
+                        .await
+                        .map_err(|e| {
+                            log::warn!("Provision device token failed: {e}");
+                            format!("Could not add the device to your account: {e}")
+                        })?;
+                    if !account_context_matches(generation, &context.session.token).await {
+                        return Err("Desktop account changed; try again".to_string());
+                    }
+                    Ok(ProvisionedDeviceAuthorization::with_host_lease(
+                        provisioned.token,
+                        provisioned.user_id,
+                        context.session.master_key,
+                        provisioned.device_id,
+                        account_lease,
+                    ))
                 })
             })
             .await;
@@ -2712,7 +2894,10 @@ pub async fn account_connect_devices() -> Result<Vec<OnlineDeviceInfo>, String> 
                                     }
                                 }
                                 Ok(cmd) if source_device_id == "rpc" => {
-                                    let Some(_routing_effect) =
+                                    // The lease is taken here, on the loop, so a
+                                    // retiring loop still notices it has been
+                                    // replaced and stops reading events at once.
+                                    let Some(routing_effect) =
                                         lock_current_device_routing(&event_owner).await
                                     else {
                                         break 'routing_events;
@@ -2723,34 +2908,56 @@ pub async fn account_connect_devices() -> Result<Vec<OnlineDeviceInfo>, String> 
                                     log::info!(
                                         "RPC request received from relay: corr={correlation_id}"
                                     );
-                                    let execution = execute_local_remote_command(&cmd).await;
-                                    if !device_routing_owner_is_current(&event_owner).await {
-                                        break 'routing_events;
-                                    }
-                                    match execution {
-                                        Ok(resp_value) => {
-                                            send_rpc_envelope(
-                                                &event_owner,
-                                                &event_session,
-                                                &correlation_id,
-                                                resp_value,
-                                            )
-                                            .await;
+                                    // Spawned rather than awaited. Most commands
+                                    // are answered by the webview, which can take
+                                    // up to DEFAULT_INVOKE_TIMEOUT (120s) to reply;
+                                    // awaiting here meant one slow command stalled
+                                    // every device behind it, so a `ping` from the
+                                    // watch could take 40s to come back for no
+                                    // reason of its own. Each RPC carries its own
+                                    // correlation id, so nothing about the reply
+                                    // path depends on them finishing in order.
+                                    let rpc_owner = event_owner.clone();
+                                    let rpc_session = event_session.clone();
+                                    tokio::spawn(async move {
+                                        // Held for the whole call: teardown takes
+                                        // the write lease, so an in-flight RPC now
+                                        // keeps the connection from being replaced
+                                        // out from under its own reply.
+                                        let _routing_effect = routing_effect;
+                                        let Ok(_slot) = DEVICE_RPC_SLOTS.acquire().await else {
+                                            return;
+                                        };
+                                        let execution = execute_local_remote_command(&cmd).await;
+                                        // Returning drops this reply only. The loop
+                                        // re-checks ownership at the top of every
+                                        // iteration, so a stale connection is still
+                                        // retired there — just not from in here.
+                                        if !device_routing_owner_is_current(&rpc_owner).await {
+                                            return;
                                         }
-                                        Err(e) => {
-                                            log::warn!("RPC: execute command failed: {e}");
-                                            send_rpc_error(
-                                                &event_owner,
-                                                &event_session,
-                                                &correlation_id,
-                                                format!("RPC execute failed: {e}"),
-                                            )
-                                            .await;
+                                        match execution {
+                                            Ok(resp_value) => {
+                                                send_rpc_envelope(
+                                                    &rpc_owner,
+                                                    &rpc_session,
+                                                    &correlation_id,
+                                                    resp_value,
+                                                )
+                                                .await;
+                                            }
+                                            Err(e) => {
+                                                log::warn!("RPC: execute command failed: {e}");
+                                                send_rpc_error(
+                                                    &rpc_owner,
+                                                    &rpc_session,
+                                                    &correlation_id,
+                                                    format!("RPC execute failed: {e}"),
+                                                )
+                                                .await;
+                                            }
                                         }
-                                    }
-                                    if !device_routing_owner_is_current(&event_owner).await {
-                                        break 'routing_events;
-                                    }
+                                    });
                                 }
                                 Ok(cmd) => {
                                     let _ = cmd;
@@ -4792,5 +4999,10 @@ mod peer_event_tests {
     fn permission_events_are_fanned_out_to_peer_controllers() {
         assert!(should_fanout_peer_ui_event("permission://event"));
         assert!(!should_fanout_peer_ui_event("permission://internal"));
+    }
+
+    #[test]
+    fn model_catalog_updates_are_fanned_out_to_peer_controllers() {
+        assert!(should_fanout_peer_ui_event("ai://model-catalog-updated"));
     }
 }

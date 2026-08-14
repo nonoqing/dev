@@ -31,6 +31,7 @@ pub mod runtime;
 pub mod sleep_prevention;
 pub mod startup_trace;
 pub mod tray;
+mod webview_recovery;
 
 use bitfun_core::agentic::tools::computer_use_capability::set_computer_use_desktop_available;
 use bitfun_core::agentic::tools::computer_use_host::ComputerUseHostRef;
@@ -39,11 +40,16 @@ use bitfun_core::infrastructure::{get_path_manager_arc, try_get_path_manager_arc
 use bitfun_core::service::search::get_global_workspace_search_service;
 use bitfun_core::service::workspace::get_global_workspace_service;
 use bitfun_core::util::{elapsed_ms, TimingCollector};
+use bitfun_events::AgenticEvent;
+use bitfun_observability_otel::{
+    SystemKeyringTelemetrySecrets, TelemetryDeploymentConfig, TelemetryRuntimeHandle,
+    TelemetryRuntimeMetadata,
+};
 use bitfun_transport::{TauriTransportAdapter, TransportAdapter};
 use serde::Deserialize;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
@@ -112,7 +118,36 @@ static MAIN_WINDOW_CLOSE_PENDING_ON_MACOS: AtomicBool = AtomicBool::new(false);
 
 const MAIN_WINDOW_CLOSE_REQUESTED_EVENT: &str = "bitfun_main_window_close_requested";
 const BROWSER_WEBVIEW_PAGE_LOAD_EVENT: &str = "browser-webview-page-load";
+
+#[cfg(target_os = "windows")]
+fn show_fatal_startup_error(message: &str) {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    let title = "BitFun startup error"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let message = message
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(message.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_fatal_startup_error(message: &str) {
+    eprintln!("BitFun startup error: {message}");
+}
 const CRON_DESKTOP_START_FALLBACK_DELAY: Duration = Duration::from_secs(120);
+static DESKTOP_TELEMETRY_RUNTIME: OnceLock<TelemetryRuntimeHandle> = OnceLock::new();
 pub(crate) const MAIN_WINDOW_DEFAULT_WIDTH: f64 = 1200.0;
 pub(crate) const MAIN_WINDOW_DEFAULT_HEIGHT: f64 = 800.0;
 pub(crate) const MAIN_WINDOW_MIN_WIDTH: f64 = 800.0;
@@ -430,13 +465,30 @@ pub async fn run() {
         .duration_since(UNIX_EPOCH)
         .map(|duration| format!("desktop-{}", duration.as_millis()))
         .unwrap_or_else(|_| "desktop-unknown".to_string());
-    let startup_trace = DesktopStartupTrace::new(startup_trace_id.clone(), startup_started);
-    startup_trace.record_phase("native_process_start", "native");
     let mut startup_timings = TimingCollector::default();
     let in_debug = cfg!(debug_assertions) || std::env::var("DEBUG").unwrap_or_default() == "1";
     let log_config = logging::LogConfig::new(in_debug);
     let log_targets = logging::build_log_targets(&log_config);
     let session_log_dir = log_config.session_log_dir.clone();
+    if let Err(error) = logging::install_early_file_logging(&session_log_dir) {
+        eprintln!(
+            "Warning: Failed to install early startup logging: {}",
+            error
+        );
+    }
+    let native_startup_trace_path = logging::native_startup_trace_path(&session_log_dir);
+    let startup_trace = match DesktopStartupTrace::new_persisted(
+        startup_trace_id.clone(),
+        startup_started,
+        &native_startup_trace_path,
+    ) {
+        Ok(trace) => trace,
+        Err(error) => {
+            log::warn!("Native startup trace persistence is unavailable: {}", error);
+            DesktopStartupTrace::new(startup_trace_id.clone(), startup_started)
+        }
+    };
+    startup_trace.record_phase("native_process_start", "native");
     crash_diagnostics::initialize_run_state(session_log_dir.clone(), &startup_trace_id);
     setup_panic_hook();
 
@@ -447,13 +499,72 @@ pub async fn run() {
 
     eprintln!("=== BitFun Desktop Starting ===");
 
+    if let Err(error) = bitfun_core::agentic::system::select_agentic_system_profile(
+        bitfun_core::agentic::system::DeliveryProfile::Desktop,
+    ) {
+        log::error!("Failed to select Desktop agent profile: {}", error);
+        show_fatal_startup_error(&format!(
+            "BitFun could not select its Desktop agent profile and cannot continue.\n\n{error}\n\nSee early-startup.log for details."
+        ));
+        return;
+    }
+
     let step_started = Instant::now();
     if let Err(e) = bitfun_core::service::config::initialize_global_config().await {
         log::error!("Failed to initialize global config service: {}", e);
+        show_fatal_startup_error(&format!(
+            "BitFun could not initialize its configuration and cannot continue.\n\n{e}\n\nSee early-startup.log for details."
+        ));
         return;
+    }
+    if let Ok(config_service) = bitfun_core::service::config::get_global_config_service().await {
+        for diagnostic in config_service.load_diagnostics().await {
+            log::warn!(
+                "Startup configuration diagnostic: code={}, path={}, recoverability={:?}",
+                diagnostic.code,
+                diagnostic.path,
+                diagnostic.recoverability
+            );
+        }
     }
     startup_timings.record_elapsed("initialize_global_config", step_started);
     startup_trace.record_elapsed_step("native_pre_tauri", "initialize_global_config", step_started);
+
+    let path_manager = get_path_manager_arc();
+    let telemetry_runtime = TelemetryRuntimeHandle::new(
+        TelemetryRuntimeMetadata::new(
+            bitfun_observability::TelemetryEntrypoint::Desktop,
+            path_manager.user_data_dir(),
+        ),
+        Arc::new(SystemKeyringTelemetrySecrets),
+    );
+    let telemetry_deployment = TelemetryDeploymentConfig::from_product_build();
+    if let Err(error) =
+        apply_desktop_telemetry_config(&telemetry_runtime, &telemetry_deployment).await
+    {
+        log::warn!(
+            "Telemetry is unavailable; effective level is off: {}",
+            error
+        );
+    }
+    if DESKTOP_TELEMETRY_RUNTIME
+        .set(telemetry_runtime.clone())
+        .is_err()
+    {
+        log::error!(
+            "Failed to register desktop telemetry runtime: \
+             operation=register_desktop_telemetry_runtime, error_type=already_initialized"
+        );
+        telemetry_runtime.cancel_and_discard();
+        return;
+    }
+    let startup_observation = Arc::new(std::sync::Mutex::new(Some(
+        telemetry_runtime.startup_guard(),
+    )));
+    spawn_desktop_telemetry_config_listener(
+        telemetry_runtime.clone(),
+        telemetry_deployment.clone(),
+    );
 
     // The three steps below only depend on the global config service (initialized
     // above) and write to disjoint global singletons, so they can run concurrently:
@@ -529,7 +640,7 @@ pub async fn run() {
 
     let step_started = Instant::now();
     let (coordinator, scheduler, event_queue, event_router, ai_client_factory, token_usage_service) =
-        match init_agentic_system().await {
+        match init_agentic_system(telemetry_runtime.telemetry()).await {
             Ok(state) => state,
             Err(e) => {
                 log::error!("Failed to initialize agentic system: {}", e);
@@ -606,8 +717,6 @@ pub async fn run() {
 
     let terminal_state = api::terminal_api::TerminalState::new();
 
-    let path_manager = get_path_manager_arc();
-
     let mut builder = tauri::Builder::default();
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -623,7 +732,8 @@ pub async fn run() {
     }
 
     let app = builder
-        .plugin(logging::build_log_plugin(log_targets))
+        .plugin(logging::build_log_command_plugin())
+        .plugin(logging::build_log_handoff_plugin(log_targets))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -655,6 +765,7 @@ pub async fn run() {
         .manage(scheduler)
         .manage(terminal_state)
         .manage(startup_trace.clone())
+        .manage(telemetry_runtime.clone())
         .on_page_load(|webview, payload| {
             let label = webview.label();
             if label.starts_with("embedded-browser-view-")
@@ -675,7 +786,9 @@ pub async fn run() {
                 );
             }
         })
-        .setup(move |app| {
+        .setup({
+            let startup_observation = startup_observation.clone();
+            move |app| {
             let setup_started = Instant::now();
             startup_trace.record_phase("tauri_setup_start", "native_setup");
             #[cfg(target_os = "macos")]
@@ -698,6 +811,7 @@ pub async fn run() {
                 "register_runtime_log_state_and_crash_diagnostics",
                 step_started,
             );
+            startup_trace.record_logging_ready_and_stop_persistence();
 
             // Ensure the Tauri NSIS registry install-location key points to the
             // actual install directory, so that auto-updates respect the custom
@@ -998,6 +1112,16 @@ pub async fn run() {
                 step_started,
             );
 
+            // Reattach to a browser that is already running with remote
+            // debugging on, so a BitFun restart does not drop the connection.
+            let step_started = Instant::now();
+            api::browser_control_api::init_on_startup();
+            startup_trace.record_elapsed_step(
+                "native_setup",
+                "browser_control_init_on_startup",
+                step_started,
+            );
+
             {
                 let step_started = Instant::now();
                 let _terminal_state: tauri::State<'_, api::terminal_api::TerminalState> =
@@ -1052,8 +1176,15 @@ pub async fn run() {
                 since_process_start_ms
             );
             log::info!("BitFun Desktop started successfully");
+            if let Some(observation) = startup_observation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                observation.complete();
+            }
             Ok(())
-        })
+        }})
         .on_window_event({
             move |window, event| {
                 if window.label() == "main"
@@ -1120,7 +1251,10 @@ pub async fn run() {
             appearance::show_main_window,
             hide_main_window_after_close_request,
             api::agentic_api::create_session,
+            api::agentic_api::update_session_mode,
             api::agentic_api::update_session_model,
+            api::agentic_api::update_session_permission_mode,
+            api::agentic_api::get_session_permission_mode,
             api::agentic_api::reload_session_context,
             api::agentic_api::update_session_title,
             api::agentic_api::ensure_coordinator_session,
@@ -1183,6 +1317,8 @@ pub async fn run() {
             reveal_external_source_location,
             get_external_source_control_snapshot,
             apply_external_source_control_action_command,
+            get_external_ecosystem_awareness_command,
+            acknowledge_external_ecosystems_command,
             update_external_integration_policy_command,
             set_external_source_enabled_command,
             set_external_source_conflict_choice_command,
@@ -1190,11 +1326,14 @@ pub async fn run() {
             set_native_prompt_command_conflict_choice_command,
             expand_external_prompt_command_command,
             set_external_tool_target_decision_command,
+            set_external_tool_targets_enabled_command,
             set_external_tool_conflict_choice_command,
             set_external_subagent_activation_command,
+            set_external_subagents_enabled_command,
             set_external_subagent_model_binding_command,
             choose_external_subagent_conflict_command,
             set_external_mcp_server_decision_command,
+            set_external_mcp_servers_enabled_command,
             choose_external_mcp_conflict_command,
             api::context_upload_api::upload_image_contexts,
             get_all_tools_info,
@@ -1266,10 +1405,13 @@ pub async fn run() {
             paste_files,
             get_config,
             get_configs,
+            api::telemetry_api::telemetry_state,
             computer_use_get_status,
             computer_use_request_permissions,
             computer_use_open_system_settings,
             set_config,
+            api::telemetry_api::set_telemetry_level,
+            save_cloud_speech_config,
             reset_config,
             export_config,
             import_config,
@@ -1417,7 +1559,6 @@ pub async fn run() {
             load_session_turns,
             get_session_usage_report,
             save_session_turn,
-            record_local_command_turn,
             save_session_metadata,
             export_session_transcript,
             delete_persisted_session,
@@ -1515,6 +1656,11 @@ pub async fn run() {
             get_global_config_status,
             subscribe_config_updates,
             get_model_configs,
+            get_ai_model_catalog,
+            project_ai_model_reasoning_catalog,
+            get_models_dev_catalog_status,
+            refresh_models_dev_catalog_now,
+            reveal_models_dev_cache_directory,
             get_recent_workspaces,
             remove_recent_workspace,
             cleanup_invalid_workspaces,
@@ -1522,6 +1668,8 @@ pub async fn run() {
             open_workspace,
             open_remote_workspace,
             create_assistant_workspace,
+            get_primary_assistant_workspace,
+            set_primary_assistant_workspace,
             delete_assistant_workspace,
             reset_assistant_workspace,
             close_workspace,
@@ -1693,6 +1841,7 @@ pub async fn run() {
             api::appearance_market_api::appearance_market_get_listing,
             api::appearance_market_api::appearance_market_download_release,
             api::appearance_market_api::appearance_market_list_submissions,
+            api::appearance_market_api::appearance_market_submit_package,
             api::appearance_market_api::appearance_market_withdraw_submission,
             api::appearance_market_api::appearance_market_list_review_submissions,
             api::appearance_market_api::appearance_market_get_review_submission,
@@ -1718,8 +1867,8 @@ pub async fn run() {
             api::browser_control_api::browser_control_list_browsers,
             api::browser_control_api::browser_control_get_status,
             api::browser_control_api::browser_control_launch,
+            api::browser_control_api::browser_control_enable_default_cdp,
             api::browser_control_api::browser_control_restart_with_cdp,
-            api::browser_control_api::browser_control_create_launcher,
             // Insights API
             api::insights_api::generate_insights,
             api::insights_api::get_latest_insights,
@@ -1762,6 +1911,7 @@ pub async fn run() {
             api::dispatch_api::dispatch_install_cli_start,
             api::dispatch_api::dispatch_install_cli_poll,
             api::dispatch_api::dispatch_install_cli_cancel,
+            api::dispatch_api::dispatch_provision_target,
             api::dispatch_api::dispatch_sync_model_config,
             api::dispatch_api::dispatch_submit,
             api::dispatch_api::dispatch_status,
@@ -1826,7 +1976,9 @@ pub async fn run() {
     }
 }
 
-async fn init_agentic_system() -> anyhow::Result<(
+async fn init_agentic_system(
+    telemetry: bitfun_observability::Telemetry,
+) -> anyhow::Result<(
     Arc<bitfun_core::agentic::coordination::ConversationCoordinator>,
     Arc<bitfun_core::agentic::coordination::DialogScheduler>,
     Arc<bitfun_core::agentic::events::EventQueue>,
@@ -1869,15 +2021,15 @@ async fn init_agentic_system() -> anyhow::Result<(
             tool_state_manager,
             Some(computer_use_host),
         )
+        .with_telemetry(telemetry.clone())
         .with_permission_request_manager(permission_request_manager),
     );
 
     let stream_processor = Arc::new(execution::StreamProcessor::new(event_queue.clone()));
-    let round_executor = Arc::new(execution::RoundExecutor::new(
-        stream_processor,
-        event_queue.clone(),
-        tool_pipeline.clone(),
-    ));
+    let round_executor = Arc::new(
+        execution::RoundExecutor::new(stream_processor, event_queue.clone(), tool_pipeline.clone())
+            .with_telemetry(telemetry.clone()),
+    );
 
     // Get execution config from global settings
     let exec_config = match bitfun_core::service::config::get_global_config_service().await {
@@ -1896,13 +2048,16 @@ async fn init_agentic_system() -> anyhow::Result<(
         Err(_) => Default::default(),
     };
 
-    let execution_engine = Arc::new(execution::ExecutionEngine::new(
-        round_executor,
-        event_queue.clone(),
-        session_manager.clone(),
-        context_compressor,
-        exec_config,
-    ));
+    let execution_engine = Arc::new(
+        execution::ExecutionEngine::new(
+            round_executor,
+            event_queue.clone(),
+            session_manager.clone(),
+            context_compressor,
+            exec_config,
+        )
+        .with_telemetry(telemetry.clone()),
+    );
 
     let runtime_ownership = Arc::new(
         bitfun_core::runtime_ownership::CoreRuntimeOwnership::embedded(
@@ -1910,14 +2065,17 @@ async fn init_agentic_system() -> anyhow::Result<(
             "desktop",
         ),
     );
-    let coordinator = Arc::new(coordination::ConversationCoordinator::new(
-        session_manager.clone(),
-        execution_engine,
-        tool_pipeline,
-        event_queue.clone(),
-        event_router.clone(),
-        runtime_ownership,
-    ));
+    let coordinator = Arc::new(
+        coordination::ConversationCoordinator::new(
+            session_manager.clone(),
+            execution_engine,
+            tool_pipeline,
+            event_queue.clone(),
+            event_router.clone(),
+            runtime_ownership,
+        )
+        .with_telemetry(telemetry.clone()),
+    );
     coordinator.set_terminal_port(
         bitfun_core::product_runtime::CoreRuntimeServicesProvider::terminal_port(),
     );
@@ -1938,10 +2096,17 @@ async fn init_agentic_system() -> anyhow::Result<(
     );
     event_router.subscribe_internal("token_usage".to_string(), token_usage_subscriber);
     event_router.subscribe_internal(
+        "session_context_usage".to_string(),
+        Arc::new(
+            bitfun_core::agentic::session::SessionContextUsageSubscriber::new(
+                session_manager.clone(),
+            ),
+        ),
+    );
+    event_router.subscribe_internal(
         "thread_goal_tokens".to_string(),
         Arc::new(bitfun_core::agentic::goal_mode::ThreadGoalTokenSubscriber),
     );
-
     log::info!("Token usage service initialized and subscriber registered");
 
     // Create the DialogScheduler and wire up the outcome notification channel
@@ -2108,9 +2273,68 @@ pub(crate) fn perform_process_exit_cleanup() -> bool {
     if let Some(search_service) = get_global_workspace_search_service() {
         search_service.shutdown_blocking();
     }
+    if let Some(telemetry) = DESKTOP_TELEMETRY_RUNTIME.get() {
+        if std::thread::panicking() {
+            telemetry.cancel_and_discard();
+        } else {
+            let _ = telemetry.shutdown();
+        }
+    }
     bitfun_core::util::process_manager::cleanup_all_processes();
     api::remote_connect_api::cleanup_on_exit();
     true
+}
+
+async fn apply_desktop_telemetry_config(
+    runtime: &TelemetryRuntimeHandle,
+    deployment: &TelemetryDeploymentConfig,
+) -> anyhow::Result<()> {
+    let service = bitfun_core::service::config::get_global_config_service().await?;
+    let config = service
+        .get_config::<bitfun_core::service::config::GlobalConfig>(None)
+        .await?;
+    runtime
+        .apply_config(&config.app.telemetry, deployment)
+        .map(|_| ())
+        .map_err(anyhow::Error::new)
+}
+
+fn spawn_desktop_telemetry_config_listener(
+    runtime: TelemetryRuntimeHandle,
+    deployment: TelemetryDeploymentConfig,
+) {
+    use bitfun_core::service::config::{subscribe_config_updates, ConfigUpdateEvent};
+    use tokio::sync::broadcast::error::RecvError;
+
+    let Some(mut receiver) = subscribe_config_updates() else {
+        return;
+    };
+    tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(ConfigUpdateEvent::AppUpdated | ConfigUpdateEvent::ConfigReloaded) => {
+                    if let Err(error) = apply_desktop_telemetry_config(&runtime, &deployment).await
+                    {
+                        log::warn!(
+                            "Telemetry reconfiguration failed; effective level is off: {}",
+                            error
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(RecvError::Closed) => break,
+                Err(RecvError::Lagged(_)) => {
+                    if let Err(error) = apply_desktop_telemetry_config(&runtime, &deployment).await
+                    {
+                        log::warn!(
+                            "Telemetry reconfiguration after lag failed; effective level is off: {}",
+                            error
+                        );
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn configure_workspace_search_daemon_env() -> Option<std::path::PathBuf> {
@@ -2121,45 +2345,228 @@ fn configure_workspace_search_daemon_env() -> Option<std::path::PathBuf> {
     path
 }
 
+/// Deliver one event to the WebView and, when peer controllers are attached,
+/// fan it out to paired devices. Text chunks arrive here already coalesced by
+/// `TextChunkCoalescer`.
+async fn deliver_event_to_webview(transport: &TauriTransportAdapter, event: AgenticEvent) {
+    if let Err(e) = transport.emit_event(event.clone()).await {
+        log::error!("Failed to emit event: {:?}", e);
+    }
+
+    if !api::peer_host_invoke::attached_controllers().is_empty() {
+        if let Some(projected) = bitfun_events::project_agentic_frontend_event(event) {
+            api::remote_connect_api::fanout_peer_device_event(
+                projected.event_name,
+                projected.payload,
+            );
+        }
+    }
+}
+
+/// Update the rate EMA from a flush that produced `flushed_chars` characters.
+///
+/// `arm_time` is when the flushed window was armed (the first buffered chunk).
+/// When there is a recorded previous flush, the elapsed interval is measured
+/// from that point so that an idle gap longer than `RATE_EMA_RESET_MS` resets
+/// the estimate instead of blending the old stream's rate into the new one.
+fn update_rate_after_flush(
+    rate_ema: &mut f64,
+    flushed_chars: usize,
+    arm_time: tokio::time::Instant,
+    last_flush_time: &mut Option<tokio::time::Instant>,
+) {
+    let now = tokio::time::Instant::now();
+    let elapsed = last_flush_time
+        .map(|t| now - t)
+        .unwrap_or_else(|| arm_time.elapsed());
+    *rate_ema = crate::api::event_coalescer::update_rate_ema(*rate_ema, flushed_chars, elapsed);
+    *last_flush_time = Some(now);
+}
+
+/// Flush all buffered chunks as merged events and feed the flushed content
+/// volume back into the rate estimate that sizes the next window.
+async fn flush_coalesced<D, F>(
+    deliver: &mut D,
+    coalescer: &mut crate::api::event_coalescer::TextChunkCoalescer,
+    rate_ema: &mut f64,
+    arm_time: tokio::time::Instant,
+    last_flush_time: &mut Option<tokio::time::Instant>,
+) where
+    D: FnMut(AgenticEvent) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    let flushed_chars = coalescer.buffered_chars();
+    update_rate_after_flush(rate_ema, flushed_chars, arm_time, last_flush_time);
+    for event in coalescer.flush() {
+        deliver(event).await;
+    }
+}
+
+/// Drive the agentic event queue: route raw events to internal subscribers,
+/// coalesce streamed text chunks, and deliver merged events through `deliver`.
+///
+/// Scheduling contract:
+/// - The coalescing window is armed as soon as the first chunk is buffered
+///   (even while the queue is still being drained), so the window counts from
+///   the first chunk, not from the end of the drain.
+/// - The window timer is only polled at the outer `select!`. Under sustained
+///   load the queue may stay non-empty and the drain loop never exits, so an
+///   expired deadline is also honored inside the drain: the buffered text is
+///   flushed in place before processing continues. Text therefore waits at
+///   most one window regardless of queue pressure.
+async fn event_loop_driver<D, F>(
+    event_queue: Arc<bitfun_core::agentic::events::EventQueue>,
+    event_router: Arc<bitfun_core::agentic::events::EventRouter>,
+    mut deliver: D,
+) where
+    D: FnMut(AgenticEvent) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    use crate::api::event_coalescer::{
+        next_flush_deadline, next_window, TextChunkCoalescer, INITIAL_RATE_EMA_CPS,
+    };
+    use tokio::time::{sleep_until, Instant};
+
+    let mut coalescer = TextChunkCoalescer::new();
+    let mut flush_deadline: Option<Instant> = None;
+    // Instant at which the current `flush_deadline` was armed. Kept in sync
+    // with the deadline so flushes can measure the actual window elapsed.
+    let mut flush_arm_time: Option<Instant> = None;
+    // Instant of the previous flush. Used to detect idle gaps that should
+    // reset the stream-rate EMA.
+    let mut last_flush_time: Option<Instant> = None;
+    // Measured stream rate (chars/sec), blended per window flush. Starts at
+    // the reference rate so the first window matches the previous fixed
+    // 50ms behavior.
+    let mut rate_ema = INITIAL_RATE_EMA_CPS;
+    let mut last_window = next_window(rate_ema);
+
+    loop {
+        let window_timer = async {
+            match flush_deadline {
+                Some(deadline) => sleep_until(deadline).await,
+                // No buffered chunks: wait for the queue without a timer.
+                None => std::future::pending::<()>().await,
+            }
+        };
+
+        tokio::select! {
+            _ = event_queue.wait_for_events() => {
+                loop {
+                    let batch = event_queue.dequeue_configured_batch().await;
+                    if batch.is_empty() {
+                        break;
+                    }
+
+                    for envelope in batch {
+                        // Route to internal subscribers (e.g. RemoteSessionStateTracker)
+                        // sequentially so that text chunks are appended in order.
+                        // Internal routing stays on the raw events; only the
+                        // WebView / peer delivery below is coalesced.
+                        if let Err(e) = event_router.route(envelope.clone()).await {
+                            log::warn!("Internal event routing failed: {:?}", e);
+                        }
+
+                        // A non-chunk event flushes pending text immediately.
+                        // Capture the flushed volume and the arm time before the
+                        // coalescer drains, then feed it into the rate estimate
+                        // through the same path as a timer-driven flush.
+                        let pre_flush_chars = coalescer.buffered_chars();
+                        let arm_time = flush_arm_time;
+                        let pushed = coalescer.push(envelope.event);
+                        let did_flush = !pushed.is_empty();
+
+                        for event in pushed {
+                            deliver(event).await;
+                        }
+
+                        if did_flush && pre_flush_chars > 0 {
+                            if let Some(arm) = arm_time {
+                                update_rate_after_flush(
+                                    &mut rate_ema,
+                                    pre_flush_chars,
+                                    arm,
+                                    &mut last_flush_time,
+                                );
+                            }
+                        }
+
+                        // Arm the coalescing window as soon as the first chunk
+                        // is buffered so the window counts while the drain is
+                        // still running; clear a stale deadline when a flush
+                        // (e.g. a non-chunk event) drained the buffer.
+                        if coalescer.is_pending() && flush_deadline.is_none() {
+                            last_window = next_window(rate_ema);
+                        }
+                        let now = Instant::now();
+                        let new_deadline = next_flush_deadline(
+                            coalescer.is_pending(),
+                            flush_deadline,
+                            now,
+                            last_window,
+                        );
+                        // Keep the arm time in sync with the deadline: record
+                        // it when the window is armed, clear it when drained.
+                        match (flush_deadline, new_deadline) {
+                            (None, Some(_)) => flush_arm_time = Some(now),
+                            (Some(_), None) => flush_arm_time = None,
+                            _ => {}
+                        }
+                        flush_deadline = new_deadline;
+                    }
+
+                    // The window timer is only polled at the outer select, but
+                    // the queue may stay non-empty under sustained load. Honor
+                    // an expired deadline here so the throttle semantics hold
+                    // (text waits at most one window) no matter how busy the
+                    // queue is.
+                    if flush_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        let arm_time = flush_arm_time
+                            .expect("arm_time must be set when a deadline is armed");
+                        flush_deadline = None;
+                        flush_arm_time = None;
+                        flush_coalesced(
+                            &mut deliver,
+                            &mut coalescer,
+                            &mut rate_ema,
+                            arm_time,
+                            &mut last_flush_time,
+                        )
+                        .await;
+                    }
+                }
+            }
+            _ = window_timer => {
+                let arm_time = flush_arm_time
+                    .expect("arm_time must be set when a deadline is armed");
+                flush_deadline = None;
+                flush_arm_time = None;
+                flush_coalesced(
+                    &mut deliver,
+                    &mut coalescer,
+                    &mut rate_ema,
+                    arm_time,
+                    &mut last_flush_time,
+                )
+                .await;
+            }
+        }
+    }
+}
+
 fn start_event_loop_with_transport(
     event_queue: Arc<bitfun_core::agentic::events::EventQueue>,
     event_router: Arc<bitfun_core::agentic::events::EventRouter>,
     transport: Arc<TauriTransportAdapter>,
 ) {
     tokio::spawn(async move {
-        loop {
-            event_queue.wait_for_events().await;
-            loop {
-                let batch = event_queue.dequeue_configured_batch().await;
-                if batch.is_empty() {
-                    break;
-                }
-
-                for envelope in batch {
-                    // Route to internal subscribers (e.g. RemoteSessionStateTracker)
-                    // sequentially so that text chunks are appended in order.
-                    if let Err(e) = event_router.route(envelope.clone()).await {
-                        log::warn!("Internal event routing failed: {:?}", e);
-                    }
-
-                    let event_for_fanout = envelope.event.clone();
-                    if let Err(e) = transport.emit_event(envelope.event).await {
-                        log::error!("Failed to emit event: {:?}", e);
-                    }
-
-                    if !api::peer_host_invoke::attached_controllers().is_empty() {
-                        if let Some(projected) =
-                            bitfun_events::project_agentic_frontend_event(event_for_fanout)
-                        {
-                            api::remote_connect_api::fanout_peer_device_event(
-                                projected.event_name,
-                                projected.payload,
-                            );
-                        }
-                    }
-                }
+        event_loop_driver(event_queue, event_router, |event| {
+            let transport = transport.clone();
+            async move {
+                deliver_event_to_webview(&transport, event).await;
             }
-        }
+        })
+        .await;
     });
 }
 
@@ -2263,7 +2670,7 @@ fn spawn_runtime_log_level_listener(default_level: log::LevelFilter) {
 fn create_event_emitter(
     transport: Arc<TauriTransportAdapter>,
 ) -> Arc<dyn bitfun_core::infrastructure::events::EventEmitter> {
-    use bitfun_core::infrastructure::events::TransportEmitter;
+    use bitfun_transport::TransportEmitter;
     let inner: Arc<dyn bitfun_core::infrastructure::events::EventEmitter> =
         Arc::new(TransportEmitter::new(transport));
     api::remote_connect_api::wrap_peer_aware_emitter(inner)
@@ -2474,3 +2881,178 @@ fn spawn_ingest_server_with_config_listener() {
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(test)]
+mod event_loop_driver_tests {
+    use super::*;
+    use bitfun_core::agentic::events::{EventQueue, EventQueueConfig, EventRouter};
+
+    fn text_chunk(text: &str) -> AgenticEvent {
+        AgenticEvent::TextChunk {
+            session_id: "s".to_string(),
+            turn_id: "t".to_string(),
+            round_id: "r".to_string(),
+            attempt_id: None,
+            attempt_index: None,
+            text: text.to_string(),
+        }
+    }
+
+    /// Regression test for the P1 scheduling issue: the window timer is only
+    /// polled at the outer `select!`, so a drain loop that never finds an
+    /// empty queue (sustained producer load) must still honor the deadline
+    /// in place. The first flush must happen ~one window after the first
+    /// chunk, and further windows must keep firing while the queue stays
+    /// non-empty.
+    ///
+    /// Setup: the producer enqueues one chunk per millisecond and delivery
+    /// stalls one millisecond per event, so the drain loop never sees an
+    /// empty queue. The paused clock steps 1ms at a time so producer and
+    /// driver advance deterministically.
+    #[tokio::test(start_paused = true)]
+    async fn flush_timer_fires_while_queue_stays_non_empty() {
+        let queue = Arc::new(EventQueue::new(EventQueueConfig {
+            max_queue_size: 10000,
+            batch_size: 10,
+        }));
+        let router = Arc::new(EventRouter::new());
+        let received: Arc<tokio::sync::Mutex<Vec<AgenticEvent>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        let producer_queue = queue.clone();
+        let producer = tokio::spawn(async move {
+            for i in 0..1000 {
+                producer_queue
+                    .enqueue(text_chunk(&format!("chunk{i} ")), None)
+                    .await
+                    .expect("enqueue should succeed");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        let driver_queue = queue.clone();
+        let driver_received = received.clone();
+        let driver = tokio::spawn(async move {
+            event_loop_driver(driver_queue, router, |event| {
+                let received = driver_received.clone();
+                async move {
+                    received.lock().await.push(event);
+                    // Slow delivery down so the drain never finds the queue
+                    // empty while the producer keeps enqueueing.
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await;
+        });
+
+        let mut first_flush_at_ms: Option<u128> = None;
+        for step in 0..300 {
+            tokio::time::advance(Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            if first_flush_at_ms.is_none() && !received.lock().await.is_empty() {
+                first_flush_at_ms = Some(step as u128 + 1);
+            }
+        }
+
+        let first = first_flush_at_ms.expect(
+            "expected a flush within the first window; with the drain loop never \
+             exiting, the deadline must still be honored in place",
+        );
+        // First chunk lands at ~1ms; the initial window is 50ms, so the first
+        // flush must land around 51ms. 40..=120 is a generous bound that still
+        // fails if the deadline only starts after the drain loop exits.
+        assert!(
+            (40..=120).contains(&first),
+            "first flush at {first}ms, expected ~50ms after the first chunk"
+        );
+
+        let total = received.lock().await.len();
+        assert!(
+            total >= 3,
+            "expected multiple window flushes during sustained drain, got {total}"
+        );
+
+        driver.abort();
+        producer.abort();
+    }
+
+    /// Under sustained drain, merged text must stay a growing prefix of the
+    /// produced stream: no chunk is dropped and none is duplicated.
+    #[tokio::test(start_paused = true)]
+    async fn sustained_drain_does_not_lose_or_duplicate_text() {
+        let queue = Arc::new(EventQueue::new(EventQueueConfig {
+            max_queue_size: 10000,
+            batch_size: 10,
+        }));
+        let router = Arc::new(EventRouter::new());
+        let received: Arc<tokio::sync::Mutex<Vec<AgenticEvent>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        let producer_queue = queue.clone();
+        let producer = tokio::spawn(async move {
+            for i in 0..1000 {
+                producer_queue
+                    .enqueue(text_chunk(&format!("x{i} ")), None)
+                    .await
+                    .expect("enqueue should succeed");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        let driver_queue = queue.clone();
+        let driver_received = received.clone();
+        let driver = tokio::spawn(async move {
+            event_loop_driver(driver_queue, router, |event| {
+                let received = driver_received.clone();
+                async move {
+                    received.lock().await.push(event);
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await;
+        });
+
+        for _ in 0..300 {
+            tokio::time::advance(Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+        }
+
+        let events = received.lock().await;
+        assert!(
+            events.len() >= 3,
+            "expected multiple flushes, got {}",
+            events.len()
+        );
+        // Each merged event carries only the chunks of its own window; the
+        // frontend appends them to the same text item. Concatenated, they must
+        // reproduce the producer's chunk sequence exactly: contiguous, no
+        // loss, no duplication, no reordering.
+        let mut joined = String::new();
+        for event in events.iter() {
+            if let AgenticEvent::TextChunk { text, .. } = event {
+                joined.push_str(text);
+            }
+        }
+        let numbers: Vec<u32> = joined
+            .split_whitespace()
+            .map(|word| {
+                word.strip_prefix('x')
+                    .and_then(|n| n.parse::<u32>().ok())
+                    .unwrap_or_else(|| panic!("unexpected chunk payload: {word:?}"))
+            })
+            .collect();
+        for (index, number) in numbers.iter().enumerate() {
+            assert_eq!(
+                *number as usize, index,
+                "chunk sequence must be contiguous: got x{number} at position {index}"
+            );
+        }
+
+        driver.abort();
+        producer.abort();
+    }
+}

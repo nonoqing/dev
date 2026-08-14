@@ -4,7 +4,7 @@
 > the “what to run after a change” selector. After edits, use
 > [`verification.md`](verification.md).
 >
-> [中文](common-commands-CN.md)
+> [中文](common-commands.zh-CN.md)
 
 ```bash
 # Install
@@ -25,6 +25,8 @@ pnpm --dir src/mobile-web run type-check
 pnpm run i18n:contract:test          # i18n contract / resources only
 pnpm run i18n:audit                  # i18n contract / resources only
 pnpm run product:check               # default product definition
+pnpm run docs:architecture:check
+pnpm run docs:links:check
 pnpm run check:repo-hygiene
 pnpm run check:github-config
 cargo check --workspace

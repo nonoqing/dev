@@ -110,7 +110,7 @@ v4 将活动 Turn 的文本 steer 纳入 `AgentDialogTurnPort`，复用同一个
 
 ### 1.3 运行时、能力服务、扩展与主机接口面
 
-接口边界以 [`product-architecture.md`](product-architecture.md#2-接口边界) 为准。本文件不维护第二套能力服务状态词、插件接口字段或生态兼容矩阵，只补充运行时和 crate 归属：
+接口边界以 [`product-architecture.md`](product-architecture.md#3-接口边界) 为准。本文件不维护第二套能力服务状态词、插件接口字段或生态兼容矩阵，只补充运行时和 crate 归属：
 
 | 接口边界 | 本文件补充的内容 | 不在本文件重复定义 |
 |---|---|---|
@@ -441,6 +441,11 @@ model-round cancellation token、结构化 AgentInput 或更复杂的事件游�
 兼容边界：
 
 - `bitfun-agent-runtime` 只能依赖稳定接口、工具运行时、运行时服务接口和注入的提供方。
+- 权限规划按纯决策与产品编排分层：
+  - Agent Runtime 持有 `PermissionIntent` 的策略、约束层与记忆授权判定；
+  - Core 产品管线持有 workspace/remote scope 投影、平台大小写事实、grant store IO、native Hook 顺序、
+    交互请求投影、等待/取消和具体 Tool 执行；
+  - 该边界不建立第二套 Permission DTO、公开 SDK 接口或产品 feature。
 - 具体调度器生命周期、会话元数据存储、token 订阅器、事件投递、产品 `Tool`
   handler、具体提示组装、workspace / remote / config IO、自定义子智能体文件 IO 和平台适配器
   在行为等价未证明前不得下沉到运行时内核。
@@ -743,10 +748,14 @@ Rust Runtime SDK，不注册未实现的 `RuntimeServices` 能力，也不宣称
 本地工作区快照 owner port；Peer Host 只用它完成本地工作区准备、会话文件清单、类型化统计和工作区文件回滚。
 账号同步、富历史读取及 Peer Host/ACP 的其余维护等产品操作仍由 `assembly/core` 的单一兼容接口转发。
 `doctor` 与 `health` 校验真实组装结果及必需注册完整性；
-Core 的 Network、Git 和 MCP Catalog 当前仍含兼容 marker，因此该诊断不等于对这些外部服务做实时探活。
+Core 只为当前 feature closure 真正组装的 Network、Git、MCP Catalog 和
+Remote Workspace 注册 capability marker；该诊断仍不等于对外部服务做实时探活。
 
-该切换仍是 `product-full` 兼容组装，不是 owner 迁移。协调器、调度器、持久化、工具管线和 Agentic Event Queue
-仍由 Core 唯一持有；CLI 与 ACP 不复制这些状态。ACP 服务端通过 Rust Runtime SDK 处理会话创建/列举、轮次、取消、交互响应和事件订阅，
+该切换仍是 `product-full` 兼容组装，不是完整 ToolPipeline owner 迁移。
+协调器、调度器、持久化、工具管线和 Agentic Event Queue 仍由 Core 唯一持有。
+唯一已迁移的部分是无 IO 的权限意图策略规划；scope、Hook、请求生命周期和实际执行继续归 Core。
+
+CLI 与 ACP 不复制这些状态。ACP 服务端通过 Rust Runtime SDK 处理会话创建/列举、轮次、取消、交互响应和事件订阅，
 但完整持久化历史回放、模型/模式目录与提供方配置和 MCP 仍走单一 Core 兼容接口；会话模型/模式写入通过 Agent Runtime API 回到同一 Core 归属模块。ACP stdio、连接和协议转换仍在
 `interfaces/acp`。Desktop 复用同一 Core owner 构造一个窄口径 Rust Runtime SDK，主界面的轮次提交/取消、工具确认/拒绝和
 用户问题回答与会话模型更新已通过 Rust Runtime SDK；会话 CRUD/恢复视图、MCP、MiniApp、Cron、远程连接、Tauri 窗口与平台资源
@@ -805,7 +814,7 @@ Desktop 与 CLI Peer Host 还各自注入同一个 Core-backed `LocalWorkspaceSn
 - Tauri 句柄、窗口、命令宏和桌面 app 状态只能存在于 Desktop 提供方或
   传输/接口适配器；运行时部件只接收类型化服务端口、DTO、事件事实和能力可用性。
 - 宿主通信的抽取门槛、Tauri 薄适配职责和逐能力迁移顺序以
-  [`product-architecture.md`](product-architecture.md#22-宿主通信契约与-tauri-薄适配) 为准；不得用通用 API 转发层
+  [`product-architecture.md`](product-architecture.md#32-宿主通信契约与-tauri-薄适配) 为准；不得用通用 API 转发层
   包装所有 Agent Runtime API 方法。
 - 插件运行时客户端只能作为内核可调用的类型化边界注入；智能体内核、工具运行时和工作流不直接加载
   OpenCode 插件代码。

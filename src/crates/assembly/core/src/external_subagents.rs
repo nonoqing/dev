@@ -7,16 +7,21 @@
 
 use crate::agentic::agents::{
     external_subagent_runtime_key, get_agent_registry, AgentInfo, AgentSource,
-    ExternalProvidedSubagent, ExternalSubagentModelBinding, ExternalSubagentRegistration,
+    ExternalProvidedAgent, ExternalSubagentModelBinding, ExternalSubagentRegistration,
     ExternalSubagentRoute,
 };
 use crate::agentic::tools::registry::get_all_registered_tools;
+use crate::agentic::workspace::workspace_route_key;
 use crate::external_sources::safe_external_source_location;
-use crate::external_tools::{resolve_external_tool_for_workspace, workspace_route_key};
+use crate::external_tools::resolve_external_tool_for_workspace;
+use crate::infrastructure::ai::reasoning_catalog::{
+    load_models_dev_reasoning_catalog_without_refresh, project_model_reasoning_catalog,
+    resolve_default_reasoning_preset,
+};
 use crate::service::config::global::GlobalConfigManager;
 use crate::service::config::types::{model_runtime_binding_fingerprint, AIConfig, AIModelConfig};
-use crate::service::config::SubagentModelSelection;
 use crate::util::BitFunError;
+use bitfun_ai_adapters::models_dev::ModelsDevCatalog;
 use bitfun_external_sources::ExternalSubagentCoordinatorSnapshot;
 use bitfun_product_domains::external_sources::EcosystemId;
 use bitfun_product_domains::external_sources::{ExternalSourceScope, ProviderId, SourceKey};
@@ -28,6 +33,7 @@ use bitfun_product_domains::external_subagents::{
     ExternalSubagentDiagnosticSummary, ExternalSubagentModelBindingGroup,
     ExternalSubagentModelBindingMethod, ExternalSubagentModelBindingOption,
     ExternalSubagentModelBindingTarget, ExternalSubagentModelRequest, ExternalSubagentSummary,
+    ExternalSubagentToolCapability,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,6 +84,7 @@ struct LocalCandidateFact {
 #[derive(Default)]
 struct ProductFacts {
     ai_config: Option<AIConfig>,
+    models_dev: Option<Arc<ModelsDevCatalog>>,
     tools: BTreeMap<String, ResolvedToolFact>,
     locals: BTreeMap<String, LocalCandidateFact>,
 }
@@ -230,17 +237,23 @@ async fn gather_product_facts(
             None
         }
     };
+    let models_dev = if ai_config.is_some() {
+        load_models_dev_reasoning_catalog_without_refresh()
+            .await
+            .catalog
+    } else {
+        None
+    };
 
     let requested_names = definitions
         .iter()
         .flat_map(|definition| &definition.requested_tools.selectors)
         .filter(|selector| selector.allowed)
-        .map(|selector| {
+        .filter_map(|selector| {
             selector
-                .canonical_host_name
-                .as_deref()
-                .unwrap_or(&selector.source_name)
-                .to_string()
+                .canonical_capability
+                .map(host_tool_name)
+                .map(str::to_string)
         })
         .collect::<BTreeSet<_>>();
     let mut tools = BTreeMap::new();
@@ -282,7 +295,7 @@ async fn gather_product_facts(
     let registry = get_agent_registry();
     let mut locals = BTreeMap::new();
     for info in registry
-        .get_local_subagents_for_external_resolution(workspace_root)
+        .get_local_agents_for_external_resolution(workspace_root)
         .await
     {
         let logical_key = normalize_logical_id(&info.id);
@@ -292,8 +305,12 @@ async fn gather_product_facts(
             // offering a candidate that the Local route could not execute.
             continue;
         }
-        let model = match ai_config.as_ref() {
-            Some(ai_config) => {
+        let model = match (info.subagent_source, ai_config.as_ref()) {
+            // Main-agent profiles do not own the mutable session model. Their
+            // conflict identity is the profile itself; the user's current
+            // model selection must not invalidate an external-source choice.
+            (None, _) => "main-agent-profile".to_string(),
+            (Some(_), Some(ai_config)) => {
                 let model_selection = registry
                     .get_explicit_subagent_model_selection(&info.id, workspace_root)
                     .unwrap_or_else(|| {
@@ -304,15 +321,28 @@ async fn gather_product_facts(
                 serde_json::to_string(&model_selection)
                     .unwrap_or_else(|_| "unavailable".to_string())
             }
-            None => "configuration-unavailable".to_string(),
+            (Some(_), None) => "configuration-unavailable".to_string(),
         };
         locals.insert(logical_key, local_candidate_fact(&info, &model));
     }
 
     ProductFacts {
         ai_config,
+        models_dev,
         tools,
         locals,
+    }
+}
+
+fn host_tool_name(capability: ExternalSubagentToolCapability) -> &'static str {
+    match capability {
+        ExternalSubagentToolCapability::DirectoryList => "LS",
+        ExternalSubagentToolCapability::ReadFile => "Read",
+        ExternalSubagentToolCapability::GlobFiles => "Glob",
+        ExternalSubagentToolCapability::SearchText => "Grep",
+        ExternalSubagentToolCapability::ExecuteCommand => "ExecCommand",
+        ExternalSubagentToolCapability::EditFile => "Edit",
+        ExternalSubagentToolCapability::WriteFile => "Write",
     }
 }
 
@@ -479,13 +509,19 @@ fn resolved_model_fact(model: &AIModelConfig) -> ResolvedModelFact {
     }
 }
 
-fn configured_reasoning_effort(model: &AIModelConfig) -> Option<String> {
-    model
-        .reasoning_effort
-        .as_deref()
-        .map(str::trim)
+fn configured_reasoning_effort(
+    model: &AIModelConfig,
+    models_dev: Option<&ModelsDevCatalog>,
+) -> Option<String> {
+    resolve_default_reasoning_preset(&project_model_reasoning_catalog(model, models_dev))
+        .and_then(|preset| {
+            preset.actions.iter().rev().find_map(|action| match action {
+                bitfun_core_types::ReasoningPresetAction::Effort { value } => Some(value.clone()),
+                _ => None,
+            })
+        })
+        .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
 }
 
 fn resolve_model_binding_target(
@@ -508,7 +544,10 @@ fn resolve_model_binding_target(
         .map(resolved_model_fact)
 }
 
-fn external_model_binding_options(ai_config: &AIConfig) -> Vec<ExternalSubagentModelBindingOption> {
+fn external_model_binding_options(
+    ai_config: &AIConfig,
+    models_dev: Option<&ModelsDevCatalog>,
+) -> Vec<ExternalSubagentModelBindingOption> {
     let mut options = Vec::new();
     for target in [
         ExternalSubagentModelBindingTarget::Primary,
@@ -522,7 +561,7 @@ fn external_model_binding_options(ai_config: &AIConfig) -> Vec<ExternalSubagentM
                     .models
                     .iter()
                     .find(|candidate| candidate.enabled && candidate.id == model.runtime_id)
-                    .and_then(configured_reasoning_effort),
+                    .and_then(|model| configured_reasoning_effort(model, models_dev)),
             });
         }
     }
@@ -535,7 +574,7 @@ fn external_model_binding_options(ai_config: &AIConfig) -> Vec<ExternalSubagentM
                 model_id: model.id.clone(),
             },
             effective_model_label: model_display_label(model),
-            configured_reasoning_effort: configured_reasoning_effort(model),
+            configured_reasoning_effort: configured_reasoning_effort(model, models_dev),
         })
         .collect::<Vec<_>>();
     let label_counts =
@@ -569,30 +608,6 @@ fn external_model_binding_options(ai_config: &AIConfig) -> Vec<ExternalSubagentM
     options
 }
 
-fn resolve_bitfun_subagent_model(
-    logical_id: &str,
-    ai_config: &AIConfig,
-) -> Option<ResolvedModelFact> {
-    match ai_config
-        .agent_model_defaults
-        .builtin_subagent_selection(logical_id)
-    {
-        SubagentModelSelection::Inherit => None,
-        SubagentModelSelection::Fixed { model_id } => {
-            let requested = model_id.trim();
-            if requested.is_empty() {
-                return None;
-            }
-            let runtime_id = ai_config.resolve_model_selection(requested)?;
-            let model = ai_config
-                .models
-                .iter()
-                .find(|model| model.enabled && model.id == runtime_id)?;
-            Some(resolved_model_fact(model))
-        }
-    }
-}
-
 fn resolve_model_request(
     definition: &ExternalSubagentDefinition,
     ecosystem_id: Option<&EcosystemId>,
@@ -603,11 +618,16 @@ fn resolve_model_request(
     model_bindings: &BTreeMap<String, ExternalSubagentModelBindingTarget>,
 ) -> ResolvedModelRequest {
     let (automatic_model, automatic_method) = match &definition.requested_model {
+        // An omitted external model means "use the caller's current model" in
+        // both OpenCode and Claude Code. It must not be guessed from a
+        // same-name BitFun subagent default: that couples an external profile
+        // to an unrelated local definition and changes behavior on collisions.
         ExternalSubagentModelRequest::Default => (
-            ai_config
-                .and_then(|config| resolve_bitfun_subagent_model(&definition.logical_id, config))
-                .map(ResolvedCandidateModel::Fixed)
-                .unwrap_or(ResolvedCandidateModel::Unavailable),
+            if ai_config.is_some() {
+                ResolvedCandidateModel::InheritParent
+            } else {
+                ResolvedCandidateModel::Unavailable
+            },
             ExternalSubagentModelBindingMethod::Default,
         ),
         ExternalSubagentModelRequest::Inherit => (
@@ -779,7 +799,12 @@ fn reconcile_with_facts(
                 .cmp(&right.logical_id)
                 .then(left.candidate_id.cmp(&right.candidate_id))
         });
-        finalize_model_binding_catalog(&mut state, model_binding_groups, facts.ai_config.as_ref());
+        finalize_model_binding_catalog(
+            &mut state,
+            model_binding_groups,
+            facts.ai_config.as_ref(),
+            facts.models_dev.as_deref(),
+        );
         return state;
     }
 
@@ -857,7 +882,12 @@ fn reconcile_with_facts(
     });
     state.pending_approvals.sort();
     state.pending_approvals.dedup();
-    finalize_model_binding_catalog(&mut state, model_binding_groups, facts.ai_config.as_ref());
+    finalize_model_binding_catalog(
+        &mut state,
+        model_binding_groups,
+        facts.ai_config.as_ref(),
+        facts.models_dev.as_deref(),
+    );
     state
 }
 
@@ -865,6 +895,7 @@ fn finalize_model_binding_catalog(
     state: &mut ExternalSubagentProductState,
     groups: BTreeMap<String, ExternalSubagentModelBindingGroup>,
     ai_config: Option<&AIConfig>,
+    models_dev: Option<&ModelsDevCatalog>,
 ) {
     state.model_binding_groups = finalized_model_binding_groups(groups);
     if state.model_binding_groups.iter().any(|group| {
@@ -876,7 +907,7 @@ fn finalize_model_binding_catalog(
         )
     }) {
         state.model_binding_options = ai_config
-            .map(external_model_binding_options)
+            .map(|config| external_model_binding_options(config, models_dev))
             .unwrap_or_default();
     }
 }
@@ -1012,10 +1043,18 @@ fn resolve_external_candidate(
         .iter()
         .filter(|selector| selector.allowed)
     {
-        let name = selector
-            .canonical_host_name
-            .as_deref()
-            .unwrap_or(&selector.source_name);
+        let Some(capability) = selector.canonical_capability else {
+            if matches!(compatibility, ExternalSubagentCompatibilityState::Ready) {
+                compatibility = ExternalSubagentCompatibilityState::ReadyWithDegradation;
+            }
+            unavailable_tool_labels.push(selector.source_name.clone());
+            diagnostics.push(ExternalSubagentDiagnosticSummary {
+                code: "external_subagent.tool_unavailable".to_string(),
+                blocks_activation: false,
+            });
+            continue;
+        };
+        let name = host_tool_name(capability);
         match facts.tools.get(name) {
             Some(tool) => tools.push(tool.clone()),
             None => {
@@ -1279,10 +1318,10 @@ fn install_active_candidate(
     // behavior approval. Keep that projection host-owned and stable while the
     // review surface continues to show the source description.
     let runtime_description = format!(
-        "Approved external subagent from {}. Runs as a fresh single-run task.",
+        "Approved external agent profile from {}.",
         candidate.provider_label
     );
-    let agent = Arc::new(ExternalProvidedSubagent::new(
+    let agent = Arc::new(ExternalProvidedAgent::new(
         runtime_key.clone(),
         candidate.definition.display_name.clone(),
         runtime_description,
@@ -1307,6 +1346,7 @@ fn install_active_candidate(
         provider_label: candidate.provider_label.clone(),
         model_binding,
         hidden: candidate.definition.hidden,
+        mode: candidate.definition.mode,
         agent,
     });
     state.routes.insert(
@@ -1329,6 +1369,7 @@ fn summary_for(
         source_keys: candidate.source_keys.clone(),
         source_location_labels: candidate.source_location_labels.clone(),
         source_count: candidate.definition.provenance.len(),
+        mode: candidate.definition.mode,
         requested_model: candidate.definition.requested_model.clone(),
         requested_model_profile: candidate.definition.requested_model_profile.clone(),
         model_binding_method: candidate.model_binding_method,
@@ -1377,11 +1418,7 @@ fn has_runtime_unavailable_diagnostic(candidate: &ResolvedExternalCandidate) -> 
 
 fn workspace_scope_key(workspace_root: Option<&Path>) -> String {
     let normalized = workspace_route_key(workspace_root).replace('\\', "/");
-    if cfg!(windows) {
-        normalized.to_ascii_lowercase()
-    } else {
-        normalized
-    }
+    bitfun_services_core::path_utils::normalize_path_case(&normalized)
 }
 
 fn normalize_logical_id(value: &str) -> String {
@@ -1438,6 +1475,7 @@ fn stable_digest(parts: impl IntoIterator<Item = impl AsRef<str>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::config::SubagentModelSelection;
 
     fn test_active_ecosystems() -> &'static BTreeSet<EcosystemId> {
         static ECOSYSTEMS: std::sync::OnceLock<BTreeSet<EcosystemId>> = std::sync::OnceLock::new();
@@ -1460,8 +1498,8 @@ mod tests {
         ExternalSubagentContributionId, ExternalSubagentContributionRole, ExternalSubagentLocalId,
         ExternalSubagentMode, ExternalSubagentModelBindingMethod,
         ExternalSubagentModelBindingTarget, ExternalSubagentModelProfileRequest,
-        ExternalSubagentProvenanceRef, ExternalSubagentToolRequest, ExternalSubagentToolSelector,
-        SecretText,
+        ExternalSubagentProvenanceRef, ExternalSubagentToolCapability, ExternalSubagentToolRequest,
+        ExternalSubagentToolSelector, SecretText,
     };
     use bitfun_product_domains::tool_permissions::{
         PermissionConstraintLayer, PermissionEffect, PermissionRule,
@@ -1495,7 +1533,7 @@ mod tests {
                 requested_tools: ExternalSubagentToolRequest {
                     selectors: vec![ExternalSubagentToolSelector {
                         source_name: "read".to_string(),
-                        canonical_host_name: Some("Read".to_string()),
+                        canonical_capability: Some(ExternalSubagentToolCapability::ReadFile),
                         allowed: true,
                     }],
                     uses_conservative_default: false,
@@ -1555,6 +1593,7 @@ mod tests {
         ai_config.default_models.fast = Some("model_fast".to_string());
         ProductFacts {
             ai_config: Some(ai_config),
+            models_dev: None,
             tools: BTreeMap::from([(
                 "Read".to_string(),
                 ResolvedToolFact {
@@ -1618,7 +1657,7 @@ mod tests {
         };
 
         assert!(resolve_exact_external_model(None, "anthropic/claude-sonnet-4", &config).is_none());
-        let options = external_model_binding_options(&config)
+        let options = external_model_binding_options(&config, None)
             .into_iter()
             .filter(|option| {
                 matches!(
@@ -1664,8 +1703,19 @@ mod tests {
             });
         let mut product_facts = facts();
         let model = &mut product_facts.ai_config.as_mut().unwrap().models[0];
-        model.reasoning_effort = Some("high".to_string());
-        model.reasoning_mode = Some(crate::service::config::types::ReasoningMode::Enabled);
+        model.reasoning = Some(crate::service::config::types::ReasoningConfig {
+            default_preset: Some("high".to_string()),
+            presets: vec![crate::service::config::types::ReasoningPreset {
+                id: "high".to_string(),
+                actions: vec![
+                    crate::service::config::types::ReasoningPresetAction::Effort {
+                        value: "high".to_string(),
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
         let empty_set = BTreeSet::new();
         let empty_decisions = BTreeMap::new();
         let empty_bindings = BTreeMap::new();
@@ -1745,6 +1795,41 @@ mod tests {
     }
 
     #[test]
+    fn generated_default_reasoning_effort_is_projected_from_models_dev() {
+        let catalog = ModelsDevCatalog::parse_str(
+            r#"{
+                "fake": {"models": {
+                    "fast-model": {
+                        "id": "fast-model",
+                        "reasoning": true,
+                        "reasoning_options": {"type": "effort", "values": ["low", "high"]}
+                    }
+                }}
+            }"#,
+        )
+        .expect("models.dev fixture");
+        let model = AIModelConfig {
+            provider: "responses".to_string(),
+            model_name: "fast-model".to_string(),
+            base_url: "https://api.fake.example/v1".to_string(),
+            reasoning: Some(crate::service::config::types::ReasoningConfig {
+                catalog: bitfun_core_types::ReasoningCatalogBinding::ModelsDev {
+                    provider: "fake".to_string(),
+                    model: "fast-model".to_string(),
+                },
+                default_preset: Some("high".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            configured_reasoning_effort(&model, Some(&catalog)).as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
     fn named_variant_requires_an_explicit_binding_without_guessing_source_options() {
         let mut definition_snapshot = snapshot("behavior-v1", "catalog-v1");
         definition_snapshot.definitions[0].requested_model =
@@ -1805,35 +1890,42 @@ mod tests {
     }
 
     #[test]
-    fn default_external_model_materializes_an_enabled_authoritative_selection() {
-        let mut config = AIConfig {
-            models: vec![active_model(
-                "model_review",
-                "Anthropic",
-                "anthropic",
-                "claude-sonnet-4",
-            )],
-            ..AIConfig::default()
-        };
-        config.agent_model_defaults.subagents.default_selection =
-            SubagentModelSelection::fixed("model_review");
+    fn omitted_external_model_inherits_without_consulting_local_subagent_defaults() {
+        let mut product_facts = facts();
+        product_facts
+            .ai_config
+            .as_mut()
+            .expect("test AI config")
+            .agent_model_defaults
+            .subagents
+            .default_selection = SubagentModelSelection::fixed("model_fast");
+        let empty_set = BTreeSet::new();
+        let empty_map = BTreeMap::new();
 
-        let resolved = resolve_bitfun_subagent_model("reviewer", &config)
-            .expect("configured subagent default should resolve");
-        assert_eq!(resolved.runtime_id, "model_review");
-        assert_eq!(resolved.display_label, "Anthropic · claude-sonnet-4");
+        let state = reconcile_with_facts(
+            Some(Path::new("C:/repo")),
+            "local-user",
+            &snapshot("behavior-v1", "catalog-v1"),
+            ExternalSubagentDecisions {
+                active_ecosystems: test_active_ecosystems(),
+                approved_envelopes: &empty_set,
+                declined_decisions: &empty_map,
+                conflict_choices: &empty_map,
+                conflict_lineage_current_keys: &empty_map,
+                model_bindings: empty_model_bindings(),
+            },
+            &product_facts,
+        );
 
-        config.agent_model_defaults.subagents.default_selection = SubagentModelSelection::Inherit;
-        assert!(resolve_bitfun_subagent_model("reviewer", &config).is_none());
-
-        config.agent_model_defaults.subagents.default_selection =
-            SubagentModelSelection::fixed("fast");
-        assert!(resolve_bitfun_subagent_model("reviewer", &config).is_none());
-
-        config.agent_model_defaults.subagents.default_selection =
-            SubagentModelSelection::fixed("model_review");
-        config.models[0].enabled = false;
-        assert!(resolve_bitfun_subagent_model("reviewer", &config).is_none());
+        assert_eq!(
+            state.summaries[0].model_binding_method,
+            ExternalSubagentModelBindingMethod::Default
+        );
+        assert_eq!(state.summaries[0].effective_model_label, None);
+        assert_eq!(
+            state.summaries[0].activation_state,
+            ExternalSubagentActivationState::ApprovalRequired
+        );
     }
 
     #[test]
@@ -2209,18 +2301,16 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_tool_labels_are_preserved_for_product_diagnostics() {
+    fn unknown_source_tool_degrades_without_borrowing_a_same_named_host_tool() {
         let empty_set = BTreeSet::new();
         let empty_map = BTreeMap::new();
         let mut definition_snapshot = snapshot("behavior-v1", "catalog-v1");
-        definition_snapshot.definitions[0]
-            .requested_tools
-            .selectors
-            .push(ExternalSubagentToolSelector {
-                source_name: "shell".to_string(),
-                canonical_host_name: Some("Shell".to_string()),
+        definition_snapshot.definitions[0].requested_tools.selectors[0] =
+            ExternalSubagentToolSelector {
+                source_name: "Read".to_string(),
+                canonical_capability: None,
                 allowed: true,
-            });
+            };
 
         let state = reconcile_with_facts(
             Some(Path::new("C:/repo")),
@@ -2237,10 +2327,31 @@ mod tests {
             &facts(),
         );
 
-        assert_eq!(state.summaries[0].unavailable_tool_labels, ["Shell"]);
+        assert_eq!(state.summaries[0].unavailable_tool_labels, ["Read"]);
+        assert_eq!(
+            state.summaries[0].compatibility_state,
+            ExternalSubagentCompatibilityState::ReadyWithDegradation
+        );
+        assert!(state.summaries[0].effective_tool_labels.is_empty());
         assert!(state.summaries[0].diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "external_subagent.tool_unavailable" && diagnostic.blocks_activation
+            diagnostic.code == "external_subagent.tool_unavailable" && !diagnostic.blocks_activation
         }));
+    }
+
+    #[test]
+    fn executable_and_file_mutation_capabilities_use_bitfun_builtin_tools() {
+        assert_eq!(
+            host_tool_name(ExternalSubagentToolCapability::ExecuteCommand),
+            "ExecCommand"
+        );
+        assert_eq!(
+            host_tool_name(ExternalSubagentToolCapability::EditFile),
+            "Edit"
+        );
+        assert_eq!(
+            host_tool_name(ExternalSubagentToolCapability::WriteFile),
+            "Write"
+        );
     }
 
     #[test]
@@ -2419,7 +2530,7 @@ mod tests {
     }
 
     #[test]
-    fn default_model_change_requires_a_new_approval_for_future_invocations() {
+    fn inherited_session_model_changes_do_not_invalidate_source_approval() {
         let empty_set = BTreeSet::new();
         let empty_map = BTreeMap::new();
         let first_facts = facts();
@@ -2463,19 +2574,23 @@ mod tests {
             &updated_facts,
         );
 
-        assert_ne!(
+        assert_eq!(
             first.summaries[0].decision_key,
             updated.summaries[0].decision_key
         );
         assert_eq!(
             updated.summaries[0].activation_state,
-            ExternalSubagentActivationState::ApprovalRequired
+            ExternalSubagentActivationState::Active
         );
-        assert!(updated.registrations.is_empty());
+        assert_eq!(updated.registrations.len(), 1);
+        assert!(matches!(
+            updated.registrations[0].model_binding,
+            ExternalSubagentModelBinding::InheritParent
+        ));
     }
 
     #[test]
-    fn same_model_id_runtime_identity_change_requires_a_new_approval() {
+    fn inherited_model_runtime_identity_changes_do_not_invalidate_source_approval() {
         let empty_set = BTreeSet::new();
         let empty_map = BTreeMap::new();
         let first_facts = facts();
@@ -2515,19 +2630,23 @@ mod tests {
             &updated_facts,
         );
 
-        assert_ne!(
+        assert_eq!(
             first.summaries[0].decision_key,
             updated.summaries[0].decision_key
         );
         assert_eq!(
             updated.summaries[0].activation_state,
-            ExternalSubagentActivationState::ApprovalRequired
+            ExternalSubagentActivationState::Active
         );
-        assert!(updated.registrations.is_empty());
+        assert_eq!(updated.registrations.len(), 1);
+        assert!(matches!(
+            updated.registrations[0].model_binding,
+            ExternalSubagentModelBinding::InheritParent
+        ));
     }
 
     #[test]
-    fn unresolved_default_model_is_blocked_without_exposing_an_internal_placeholder_label() {
+    fn omitted_external_model_remains_inheritable_when_local_subagents_inherit() {
         let empty_set = BTreeSet::new();
         let empty_map = BTreeMap::new();
         let mut unavailable_facts = facts();
@@ -2556,10 +2675,10 @@ mod tests {
 
         assert_eq!(
             state.summaries[0].activation_state,
-            ExternalSubagentActivationState::Blocked
+            ExternalSubagentActivationState::ApprovalRequired
         );
         assert_eq!(state.summaries[0].effective_model_label, None);
-        assert!(state.registrations.is_empty());
+        assert!(state.registrations.is_empty(), "approval is still required");
     }
 
     #[test]

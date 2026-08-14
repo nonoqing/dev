@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use bitfun_agent_runtime::sdk::{
+    AgentSessionModelSelection, AgentSessionModelSelectionUpdateRequest,
     AgentSessionRestoreRequest, AgentSessionRestoreResult, PortErrorKind, RuntimeError,
 };
 use bitfun_core::agentic::core::Session;
@@ -13,7 +14,7 @@ use bitfun_core::agentic::get_agent_registry;
 use bitfun_core::util::errors::BitFunError;
 use bitfun_runtime_ports::{
     AgentSessionArchiveRequest, AgentSessionCreateRequest, AgentSessionDeleteRequest,
-    AgentSessionModelUpdateRequest, AgentSessionRenameRequest, AgentThreadGoalGetRequest,
+    AgentSessionModeUpdateRequest, AgentSessionRenameRequest, AgentThreadGoalGetRequest,
     SessionStoragePathRequest, SessionTurnWindowRequest,
 };
 
@@ -84,6 +85,7 @@ fn session_to_json(session: Session, turn_count: usize) -> Value {
         "sessionName": session.session_name,
         "agentType": session.agent_type,
         "modelName": session.config.model_id,
+        "reasoningPreset": session.config.reasoning_preset,
         "lastUserDialogAgentType": session.last_user_dialog_agent_type,
         "lastSubmittedAgentType": session.last_submitted_agent_type,
         "state": format!("{:?}", session.state),
@@ -108,6 +110,7 @@ fn restored_session_to_json(restored: AgentSessionRestoreResult) -> Value {
         "sessionName": session.session_name,
         "agentType": session.agent_type,
         "modelName": session.model_id,
+        "reasoningPreset": session.reasoning_preset,
         "lastUserDialogAgentType": session.last_user_dialog_agent_type,
         "lastSubmittedAgentType": session.last_submitted_agent_type,
         "state": format!("{:?}", restored.state),
@@ -495,6 +498,9 @@ pub(crate) async fn update_session_model(
     let request = request_value(args);
     let session_id = validated_session_id(request)?;
     let model_name = get_string(request, "modelName")?;
+    let reasoning_preset = optional_string(request, "reasoningPreset")
+        .map(|preset| preset.trim().to_string())
+        .filter(|preset| !preset.is_empty());
     if request
         .get("workspacePath")
         .and_then(Value::as_str)
@@ -504,12 +510,40 @@ pub(crate) async fn update_session_model(
     }
     state
         .agent_runtime
-        .update_session_model(AgentSessionModelUpdateRequest {
+        .update_session_model_selection(AgentSessionModelSelectionUpdateRequest {
             session_id,
-            model_id: model_name,
+            selection: AgentSessionModelSelection {
+                model_id: model_name,
+                reasoning_preset,
+            },
         })
         .await
         .map_err(|error| format!("Failed to update session model: {}", error.into_message()))?;
+    Ok(Value::Null)
+}
+
+pub(crate) async fn update_session_mode(
+    state: &PeerHostState,
+    args: &Value,
+) -> Result<Value, String> {
+    let request = request_value(args);
+    let session_id = validated_session_id(request)?;
+    let mode_id = get_string(request, "modeId")?;
+    if request
+        .get("workspacePath")
+        .and_then(Value::as_str)
+        .is_some_and(|path| !path.trim().is_empty())
+    {
+        ensure_coordinator_session(state, args).await?;
+    }
+    state
+        .agent_runtime
+        .update_session_mode(AgentSessionModeUpdateRequest {
+            session_id,
+            mode_id,
+        })
+        .await
+        .map_err(|error| format!("Failed to update session mode: {}", error.into_message()))?;
     Ok(Value::Null)
 }
 
@@ -538,8 +572,29 @@ pub(crate) async fn ensure_coordinator_session(
         .map_err(|error| peer_core_session_error("Failed to ensure session", error))
 }
 
-pub(crate) async fn get_available_modes() -> Result<Value, String> {
-    let mode_infos = get_agent_registry().get_modes_info().await;
+pub(crate) async fn get_available_modes(
+    state: &PeerHostState,
+    args: &Value,
+) -> Result<Value, String> {
+    let request = request_value(args);
+    let workspace = super::external_sources::workspace_root(state, request)
+        .await
+        .map_err(|error| error.encode())?;
+    if let Some(workspace) = workspace.as_deref() {
+        if let Err(error) =
+            bitfun_core::external_sources::ensure_external_source_workspace_snapshot(Some(
+                workspace,
+            ))
+            .await
+        {
+            tracing::warn!(
+                "Failed to initialize external agent sources for Peer mode catalog: {error}"
+            );
+        }
+    }
+    let mode_infos = get_agent_registry()
+        .get_modes_info_for_workspace(workspace.as_deref(), workspace.is_some())
+        .await;
     let dtos: Vec<Value> = mode_infos
         .into_iter()
         .map(|info| {
@@ -758,6 +813,7 @@ mod tests {
                 session_name: "Main".to_string(),
                 agent_type: "agentic".to_string(),
                 model_id: Some("provider/model".to_string()),
+                reasoning_preset: Some("high".to_string()),
                 last_user_dialog_agent_type: Some("plan".to_string()),
                 last_submitted_agent_type: Some("agentic".to_string()),
                 turn_count: 3,
@@ -771,6 +827,7 @@ mod tests {
         assert_eq!(value["sessionName"], "Main");
         assert_eq!(value["agentType"], "agentic");
         assert_eq!(value["modelName"], "provider/model");
+        assert_eq!(value["reasoningPreset"], "high");
         assert_eq!(value["lastUserDialogAgentType"], "plan");
         assert_eq!(value["lastSubmittedAgentType"], "agentic");
         assert_eq!(value["state"], "Idle");

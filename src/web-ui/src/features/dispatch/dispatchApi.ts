@@ -5,6 +5,7 @@ import type {
   DispatchCliRelease,
   DispatchInstallPoll,
   DispatchInstallStart,
+  DispatchProvisionTargetResult,
   DispatchContinueResponse,
   DispatchJobListEntry,
   DispatchSshProbe,
@@ -59,6 +60,12 @@ export const dispatchApi = {
     });
   },
 
+  async provisionTarget(connectionId: string): Promise<DispatchProvisionTargetResult> {
+    return api.invoke<DispatchProvisionTargetResult>('dispatch_provision_target', {
+      request: { connectionId },
+    });
+  },
+
   /**
    * Bring a job's work back into this controller's baseline worktree.
    *
@@ -72,6 +79,14 @@ export const dispatchApi = {
     });
   },
 
+  /**
+   * Push this device's model configuration, API keys included, to an SSH
+   * target.
+   *
+   * Submission does this on its own whenever the target cannot serve the
+   * chosen model, so this is the explicit form of an otherwise automatic
+   * step — kept for callers that want to re-push without starting a job.
+   */
   async syncModelConfig(connectionId: string): Promise<void> {
     return api.invoke<void>('dispatch_sync_model_config', {
       request: { connectionId },
@@ -88,6 +103,7 @@ export const dispatchApi = {
     prompt: string;
     approvalPolicy: DispatchApprovalPolicy;
     model?: string;
+    reasoningPreset?: string;
     title?: string;
     sourceWorkspacePath?: string;
     sourceWorkspaceId?: string;
@@ -113,6 +129,8 @@ export const dispatchApi = {
     options?: {
       /** Per-turn model override; carries forward as the job's model. */
       model?: string;
+      /** Per-turn target-owned reasoning preset; `auto` clears the override. */
+      reasoningPreset?: string;
       /** Per-turn approval-policy override with the same carry-forward rule. */
       approvalPolicy?: DispatchApprovalPolicy;
       /** Operation kind; defaults to an ordinary prompt turn. */
@@ -127,6 +145,7 @@ export const dispatchApi = {
         prompt,
         displayContent,
         model: options?.model,
+        reasoningPreset: options?.reasoningPreset,
         approvalPolicy: options?.approvalPolicy,
         kind: options?.kind,
         attachments: options?.attachments,
@@ -175,6 +194,7 @@ export const dispatchApi = {
     displayContent?: string,
     messageId: string = globalThis.crypto?.randomUUID?.()
       ?? `dispatch-message-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    attachments?: DispatchInlineAttachment[],
   ): Promise<{ accepted: boolean; messageId: string }> {
     return api.invoke<{ accepted: boolean; messageId: string }>('dispatch_append', {
       request: {
@@ -182,6 +202,7 @@ export const dispatchApi = {
         messageId,
         content,
         ...(displayContent?.trim() ? { displayContent } : {}),
+        ...(attachments?.length ? { attachments } : {}),
       },
     });
   },

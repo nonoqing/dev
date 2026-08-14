@@ -11,7 +11,7 @@ pub(crate) mod bootstrap; // Workspace persona bootstrap helpers
 #[cfg(feature = "canvas-runtime")]
 pub mod canvas; // Canvas service compatibility facade
 pub mod config; // Config management
-#[cfg(feature = "product-full")]
+#[cfg(all(feature = "agent-runtime", feature = "scheduled-jobs"))]
 pub mod cron; // Scheduled jobs
 #[cfg(feature = "dispatch-store")]
 pub mod dispatch; // Outbound dispatch observer index and target contracts
@@ -20,35 +20,38 @@ pub mod filesystem; // FileSystem management
 #[cfg(feature = "git")]
 pub mod git; // Git service
 pub mod i18n; // I18n service
-#[cfg(feature = "product-full")]
+#[cfg(feature = "agent-runtime")]
 pub(crate) mod instruction_context; // Workspace instruction file prompt helpers
 #[cfg(feature = "lsp")]
 pub mod lsp; // LSP (Language Server Protocol) system
-#[cfg(feature = "product-full")]
+#[cfg(feature = "mcp-runtime")]
 pub mod mcp; // MCP (Model Context Protocol) system
-#[cfg(feature = "product-full")]
+#[cfg(feature = "remote-connect")]
 pub mod remote_connect; // Remote Connect (phone → desktop)
 #[cfg(feature = "remote-workspace")]
 pub mod remote_ssh; // Remote SSH (desktop → server)
+#[cfg(all(not(feature = "remote-workspace"), feature = "agent-runtime"))]
+#[path = "remote_ssh_compat.rs"]
+pub mod remote_ssh;
 #[cfg(feature = "review-platform")]
 pub mod review_platform; // Pull request review platform adapters
 #[cfg(feature = "process-runtime")]
 pub mod runtime; // Managed runtime and capability management
-#[cfg(feature = "product-full")]
+#[cfg(feature = "workspace-search")]
 pub mod search; // Workspace search via managed flashgrep daemon
 #[cfg(feature = "local-storage")]
 pub mod session; // Session persistence
-#[cfg(feature = "product-full")]
+#[cfg(feature = "agent-runtime")]
 pub mod session_usage; // Session runtime usage reports
-#[cfg(feature = "product-full")]
+#[cfg(feature = "agent-runtime")]
 pub mod snapshot; // Snapshot-based change tracking
-#[cfg(feature = "product-full")]
+#[cfg(feature = "agent-runtime")]
 pub mod token_usage; // Token usage tracking
 #[cfg(feature = "workspace-runtime")]
 pub mod workspace; // Workspace management // Diff calculation and merge service
 #[cfg(feature = "workspace-runtime")]
 pub mod workspace_runtime; // Workspace runtime layout / migration / initialization
-#[cfg(feature = "product-full")]
+#[cfg(all(feature = "agent-runtime", feature = "git"))]
 pub mod worktree; // Managed Git worktree lifecycle and session bindings
 
 // Terminal is implemented in the workspace-level `terminal-core` crate.
@@ -59,9 +62,12 @@ pub use terminal_core as terminal;
 // Re-export main components.
 #[cfg(feature = "announcement")]
 pub use announcement::{AnnouncementCard, AnnouncementScheduler, AnnouncementSchedulerRef};
+#[cfg(feature = "diagnostics")]
+pub use bitfun_services_core::diagnostics;
+#[cfg(feature = "diff")]
+pub use bitfun_services_core::diff;
 #[cfg(feature = "process-runtime")]
 pub use bitfun_services_core::system;
-pub use bitfun_services_core::{diagnostics, diff};
 #[cfg(feature = "file-watch")]
 pub use bitfun_services_integrations::file_watch;
 #[cfg(feature = "workspace-runtime")]
@@ -69,10 +75,11 @@ pub use bootstrap::reset_workspace_persona_files_to_default;
 #[cfg(feature = "canvas-runtime")]
 pub use canvas::{CanvasMemoryStore, CanvasService};
 pub use config::{ConfigManager, ConfigProvider, ConfigService};
-#[cfg(feature = "product-full")]
+#[cfg(all(feature = "agent-runtime", feature = "scheduled-jobs"))]
 pub use cron::{
     get_global_cron_service, set_global_cron_service, CronEventSubscriber, CronService,
 };
+#[cfg(feature = "diff")]
 pub use diff::{
     DiffConfig, DiffHunk, DiffLine, DiffLineType, DiffOptions, DiffResult, DiffService,
 };
@@ -86,10 +93,12 @@ pub use file_watch::{
 pub use filesystem::{DirectoryStats, FileSystemService, FileSystemServiceFactory};
 #[cfg(feature = "git")]
 pub use git::GitService;
-pub use i18n::{get_global_i18n_service, I18nConfig, I18nService, LocaleId, LocaleMetadata};
+#[cfg(feature = "i18n-runtime")]
+pub use i18n::{get_global_i18n_service, I18nService};
+pub use i18n::{I18nConfig, LocaleId, LocaleMetadata};
 #[cfg(feature = "lsp")]
 pub use lsp::LspManager;
-#[cfg(feature = "product-full")]
+#[cfg(feature = "mcp-runtime")]
 pub use mcp::MCPService;
 #[cfg(feature = "review-platform")]
 pub use review_platform::{
@@ -104,7 +113,7 @@ pub use review_platform::{
 };
 #[cfg(feature = "process-runtime")]
 pub use runtime::{ResolvedCommand, RuntimeCommandCapability, RuntimeManager, RuntimeSource};
-#[cfg(feature = "product-full")]
+#[cfg(feature = "workspace-search")]
 pub use search::{
     get_global_workspace_search_service, set_global_workspace_search_service, ContentSearchRequest,
     ContentSearchResult, GlobSearchRequest, GlobSearchResult, IndexTaskHandle,
@@ -115,14 +124,14 @@ pub use search::{
     WorkspaceSearchTaskKind, WorkspaceSearchTaskPhase, WorkspaceSearchTaskState,
     WorkspaceSearchTaskStatus,
 };
-#[cfg(feature = "product-full")]
+#[cfg(feature = "agent-runtime")]
 pub use snapshot::SnapshotService;
 #[cfg(feature = "process-runtime")]
 pub use system::{
     check_command, check_commands, run_command, run_command_simple, CheckCommandResult,
     CommandOutput, SystemError,
 };
-#[cfg(feature = "product-full")]
+#[cfg(feature = "agent-runtime")]
 pub use token_usage::{
     ModelTokenStats, SessionTokenStats, TimeRange, TokenUsageQuery, TokenUsageRecord,
     TokenUsageService, TokenUsageSummary,
@@ -135,5 +144,5 @@ pub use workspace_runtime::{
     RuntimeMigrationRecord, WorkspaceRuntimeContext, WorkspaceRuntimeEnsureResult,
     WorkspaceRuntimeService, WorkspaceRuntimeTarget,
 };
-#[cfg(feature = "product-full")]
+#[cfg(all(feature = "agent-runtime", feature = "git"))]
 pub use worktree::WorktreeService;

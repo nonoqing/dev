@@ -4,7 +4,7 @@
 > 用途：本目录入口——索引、命名、流程与边界。细则写在各文档与 [`templates/`](templates/)。  
 > 状态：stable（已合并原 `ade-spec` / `features` / `plans` / `superpowers`）  
 > 权威语言：中文（本文件）。英文操作约束见根 `AGENTS` 与 [`docs/development/`](../development/)。  
-> 文档规范：[`docs/development/docs-governance-CN.md`](../development/docs-governance-CN.md)
+> 文档规范：[`docs/development/docs-governance.zh-CN.md`](../development/docs-governance.zh-CN.md)
 
 ## 与其它文档夹的分工
 
@@ -21,9 +21,11 @@
 
 - `draft-<topic>.md`：讨论中，可推翻
 - `<YYYY-MM-DD>-<topic>.md`：已确认可实施
-- `completed-<topic>.md`：已交付，存档回溯
-- 跨模块计划：优先 `plans/<topic>-plan.md` 或沿用现有 `*-plan.md` / `*-completed.md`
+- `<YYYY-MM-DD>-<topic>-design.md`：独立设计稿；已有日期 Spec 可保留无 `-design` 后缀
+- `plans/<YYYY-MM-DD>-<topic>-plan.md` 或 `plans/<topic>-plan.md`：独立实施计划
+- `plans/<topic>-completed.md`：已交付的收尾记录
 - 文件名英文 kebab-case；正文可用中文
+- 双语对使用 `<name>.md` 与 `<name>.zh-CN.md`；根入口特殊命名不在本目录复用
 
 ## 索引
 
@@ -38,8 +40,8 @@
 | Relay deploy log / docker cache | stable | [`2026-07-19-relay-deploy-log-and-docker-cache-design.md`](2026-07-19-relay-deploy-log-and-docker-cache-design.md) | Relay 部署日志与 Docker 缓存 |
 | Desktop streaming typewriter | stable | [`2026-07-20-desktop-streaming-typewriter-design.md`](2026-07-20-desktop-streaming-typewriter-design.md) | 桌面流式打字机效果 |
 | Mobile-web pairing / device refresh | stable | [`2026-07-20-mobile-web-account-pairing-and-device-refresh-design.md`](2026-07-20-mobile-web-account-pairing-and-device-refresh-design.md) | Mobile-web 配对与设备刷新 |
-| Subscription auth as model API | in-progress | [`2026-07-21-subscription-auth-as-model-api-design.md`](2026-07-21-subscription-auth-as-model-api-design.md) / [`plans/2026-07-21-subscription-auth-as-model-api.md`](plans/2026-07-21-subscription-auth-as-model-api.md) | 订阅鉴权作为模型 API |
-| Cargo target latest-only GC | in-progress | [`2026-07-22-cargo-target-latest-only-gc-design.md`](2026-07-22-cargo-target-latest-only-gc-design.md) / [`plans/2026-07-22-cargo-target-latest-only-gc.md`](plans/2026-07-22-cargo-target-latest-only-gc.md) | Cargo target 仅保留最新 GC |
+| Subscription auth as model API | in-progress | [`2026-07-21-subscription-auth-as-model-api-design.md`](2026-07-21-subscription-auth-as-model-api-design.md) / [`plans/2026-07-21-subscription-auth-as-model-api-plan.md`](plans/2026-07-21-subscription-auth-as-model-api-plan.md) | 订阅鉴权作为模型 API |
+| Cargo target latest-only GC | in-progress | [`2026-07-22-cargo-target-latest-only-gc-design.md`](2026-07-22-cargo-target-latest-only-gc-design.md) / [`plans/2026-07-22-cargo-target-latest-only-gc-plan.md`](plans/2026-07-22-cargo-target-latest-only-gc-plan.md) | Cargo target 仅保留最新 GC |
 | Mobile-web resume / autoreconnect | stable | [`2026-07-22-mobile-web-resume-card-and-autoreconnect-design.md`](2026-07-22-mobile-web-resume-card-and-autoreconnect-design.md) | Mobile-web 恢复卡片与自动重连 |
 | Relay deploy CN mirrors | stable | [`2026-07-24-relay-deploy-cn-mirrors-design.md`](2026-07-24-relay-deploy-cn-mirrors-design.md) | Relay 部署国内镜像 |
 | FlowChat collapse smoothness | stable | [`2026-07-28-flowchat-collapse-smoothness-design.md`](2026-07-28-flowchat-collapse-smoothness-design.md) | FlowChat 折叠动画流畅性 |
@@ -50,6 +52,7 @@
 | Desktop window fullscreen | in-progress | [`plans/desktop-window-fullscreen-plan.md`](plans/desktop-window-fullscreen-plan.md) | 桌面主窗口系统全屏 |
 | Edit constraint guard | in-progress | [`plans/edit-constraint-guard-plan.md`](plans/edit-constraint-guard-plan.md) | 编辑约束护栏 |
 | Computer use refactor | in-progress | [`plans/computer-use-refactor-plan.md`](plans/computer-use-refactor-plan.md) | Computer Use 重构计划 |
+| TUI App Server decoupling | in-progress | [`plans/tui-app-server-decoupling-refactor-plan.md`](plans/tui-app-server-decoupling-refactor-plan.md) | TUI 与 App Server 解耦重构计划 |
 
 状态含义：`draft` / `in-progress` = 可改；`stable` = 已交付仍约束实现；`completed` = 仅存档。
 
@@ -66,7 +69,8 @@
 
 产物：`draft-<topic>.md`（可用 [`templates/feature-spec.md`](templates/feature-spec.md)）。
 
-最小字段：背景、目标、范围（含不做）、涉及面（层与产品面）、风险初判（安全/凭据/网络/迁移/发布/远程/i18n/主题）。
+最小字段：背景、目标、范围（含不做）、涉及面（层与产品面），以及逐项风险扫描：安全、凭据/隐私、网络/外部系统、
+数据或状态迁移、发布/打包、远程/多宿主、i18n、主题/交互。不适用项必须写 `N/A` 和理由，不能留空后默认无风险。
 
 退出：目标与范围可一句话复述，且已点出明显风险面。
 
@@ -89,7 +93,8 @@
 
 产物：升级为 `<YYYY-MM-DD>-<topic>.md`，或补充 [`templates/design.md`](templates/design.md)。
 
-建议含：方案（数据流、命令/响应、端口归属）、状态模型、远程兼容、失败/取消/部分成功、i18n 与主题、安全、测试方法。
+建议含：方案（数据流、命令/响应、端口归属）、状态模型、迁移与兼容、远程兼容、失败/取消/部分成功、
+i18n 与主题、安全、发布与 rollout、回滚、测试方法。
 
 退出：方案已确认，且与 `docs/architecture` 无冲突（或已在文中写明经批准的偏离）。
 
@@ -100,10 +105,15 @@
 ```markdown
 ### Milestone 1：<切片名>
 Risk: <Low/Medium/High>。<一句理由>。
-- [ ] <任务>。Risk: <Low/Medium/High>。
+#### Task 1：<可独立交付的任务>
+- [ ] Change: <文件 / 行为 / 边界>。
+- Risk: <Low/Medium/High>。<一句理由>。
+- Verify: <聚焦命令或评审证据>。
+- Rollback: <如何撤销或回退；仅在写明理由时可用 N/A>。
 ```
 
-每任务可独立验证、可独立回滚；验证链 [`docs/development/verification.md`](../development/verification.md)。
+每个任务都必须独立验证、独立回滚；该要求不只适用于高风险任务。跨任务迁移顺序、兼容 fallback 和不可逆步骤
+另写总体 Rollback。验证链 [`docs/development/verification.md`](../development/verification.md)。
 
 退出：第三人/子代理可不追问执行。
 
@@ -113,11 +123,11 @@ Risk: <Low/Medium/High>。<一句理由>。
 
 ### 阶段 5：验证（Verification）
 
-按 [`docs/development/verification.md`](../development/verification.md)（中文：[`verification-CN.md`](../development/verification-CN.md)）选**最小**本地预检；CI 负责宽套件。
+按 [`docs/development/verification.md`](../development/verification.md)（中文：[`verification.zh-CN.md`](../development/verification.zh-CN.md)）选**最小**本地预检；CI 负责宽套件。
 
 ### 阶段 6：收尾（Closeout）
 
-产物：`completed-<topic>.md`（或索引状态改为 `completed`），追加结果、权威文档迁移、遗留。
+产物：`<topic>-completed.md`（或索引状态改为 `completed`），追加结果、权威文档迁移、遗留。
 
 退出：权威已更新或显式「无需迁移」；本夹不留第二权威源。
 
@@ -125,9 +135,10 @@ Risk: <Low/Medium/High>。<一句理由>。
 
 不触碰安全/凭据/网络/数据迁移/发布/远程/i18n/主题时：
 
-1. 一句话目标与范围  
-2. 跳过独立设计稿，方案写在任务行  
-3. 实现 → 对应最小验证 → 一句话收尾  
+1. 一句话目标与范围
+2. 跳过独立设计稿，方案写在任务行
+3. 任务仍写清验证与回滚（无状态改动可写明 `N/A` 理由）
+4. 实现 → 对应最小验证 → 一句话收尾
 
 ## 对齐规则
 

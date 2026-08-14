@@ -114,6 +114,30 @@
       "saved": "Prevent-sleep setting saved"
     }
   },
+  "telemetry": {
+    "title": "Usage Data",
+    "hint": "Control anonymous product telemetry",
+    "levelLabel": "Telemetry level",
+    "levelDescription": "Basic sends aggregate metrics and sampled structured events. Diagnostic also sends sampled execution traces. Debug sends troubleshooting content after explicit consent; account and device identities remain excluded.",
+    "levels": {
+      "off": "Off",
+      "basic": "Basic",
+      "diagnostic": "Diagnostic",
+      "debug": "Debug (sensitive)"
+    },
+    "debugConsent": {
+      "title": "Enable sensitive Debug telemetry?",
+      "message": "Debug telemetry sends prompts, model requests and responses, reasoning, tool inputs and results, file paths, commands, and business correlation IDs to the configured telemetry endpoint. Known secret patterns are redacted, but unknown temporary codes or secrets in free text may still be sent. Account, email, organization, and device identities remain excluded.",
+      "confirm": "Enable Debug",
+      "cancel": "Cancel"
+    },
+    "messages": {
+      "loadFailed": "Failed to read telemetry settings",
+      "saveFailed": "Failed to save telemetry settings",
+      "saved": "Telemetry setting saved",
+      "unavailable": "Preference saved. Telemetry is unavailable in this build, so no data is being sent."
+    }
+  },
   "logging": {
     "sections": {
       "logging": "Logging",
@@ -146,6 +170,10 @@
     "startupRecovery": {
       "title": "Previous session ended unexpectedly",
       "message": "BitFun found a crash report from the previous session. You can export diagnostics if you want to report the issue."
+    },
+    "configRecovery": {
+      "title": "Configuration recovered",
+      "message": "BitFun repaired or isolated {{count}} configuration issue(s) so the app could start. Review your model settings before continuing."
     },
     "levels": {
       "trace": "Trace",

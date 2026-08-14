@@ -256,7 +256,7 @@ BitFun 原生 `bitfun.plugin.json` 包继续使用现有来源校验；OpenCode 
 - 软件包入口优先 `exports["./server"]`，其次只对 server 使用 `main`；存在 `exports` 但没有 server/main 时不回退包根。
 - 文件目录可以回退 `index.ts/tsx/js/mjs/cjs`；npm 插件还必须通过 `engines.opencode` 版本范围检查。
 - 只有未识别为 v1 模块时才枚举旧式函数导出作为兼容回退；“一个模块多个插件函数”不是 v1 主路径。
-- 外部插件顺序直接使用[完整配置来源图](opencode-config-assets-adapter-design.md#31-opencode-来源图)产生的
+- 外部插件顺序直接使用[完整配置来源顺序](opencode-config-assets-adapter-design.md#31-opencode-来源顺序)产生的
   `plugin_origins`：包括各配置来源以及 `ConfigPaths.directories` 中的全局配置目录、项目 `.opencode`、
   `~/.opencode` 和 `OPENCODE_CONFIG_DIR` 目录扫描结果；不能简化成四级 global/project 顺序。
 - Internal auth/provider 插件先于所有 external 插件；`--pure` / `OPENCODE_PURE` 只跳过 external 插件。

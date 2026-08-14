@@ -36,7 +36,7 @@ pub(crate) async fn dispatch(
         "reload_config" => workspace::reload_config().await,
         "get_config" => config::get_config(args).await,
         "get_configs" => config::get_configs(args).await,
-        "set_config" => config::set_config(args).await,
+        "set_config" => config::set_config(state, args).await,
         "get_agent_profile_config" => config::get_agent_profile_config(args).await,
         "get_agent_profile_configs" => config::get_agent_profile_configs().await,
         "get_external_source_snapshot"
@@ -46,11 +46,14 @@ pub(crate) async fn dispatch(
         | "set_external_source_enabled_command"
         | "set_external_source_conflict_choice_command"
         | "set_external_tool_target_decision_command"
+        | "set_external_tool_targets_enabled_command"
         | "set_external_tool_conflict_choice_command"
         | "set_external_subagent_activation_command"
+        | "set_external_subagents_enabled_command"
         | "set_external_subagent_model_binding_command"
         | "choose_external_subagent_conflict_command"
         | "set_external_mcp_server_decision_command"
+        | "set_external_mcp_servers_enabled_command"
         | "choose_external_mcp_conflict_command"
         | "update_external_integration_policy_command" => {
             external_sources::dispatch(command, args, state).await
@@ -83,9 +86,10 @@ pub(crate) async fn dispatch(
         "archive_session" => session::archive_session(state, args).await,
         "touch_session_activity" => session::touch_session_activity(state, args).await,
         "get_session_thread_goal" => session::get_session_thread_goal(state, args).await,
+        "update_session_mode" => session::update_session_mode(state, args).await,
         "update_session_model" => session::update_session_model(state, args).await,
         "ensure_coordinator_session" => session::ensure_coordinator_session(state, args).await,
-        "get_available_modes" => session::get_available_modes().await,
+        "get_available_modes" => session::get_available_modes(state, args).await,
         "get_session_stats" => session::get_session_stats(state, args).await,
         "save_session_turn" => session::save_session_turn(state, args).await,
 

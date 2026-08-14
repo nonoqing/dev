@@ -73,6 +73,8 @@ pub struct DispatchSubmitRequest {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub reasoning_preset: Option<String>,
+    #[serde(default)]
     pub title: Option<String>,
     /// Controller-side workspace that owns the observer session.
     #[serde(default)]
@@ -141,6 +143,8 @@ pub struct DispatchContinueRequest {
     /// Per-turn model override; carries forward as the job's model.
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_preset: Option<String>,
     /// Per-turn approval-policy override with the same carry-forward rule.
     #[serde(default)]
     pub approval_policy: Option<String>,
@@ -159,6 +163,10 @@ pub struct DispatchAppendRequest {
     pub content: String,
     #[serde(default)]
     pub display_content: Option<String>,
+    /// Attachments injected with the message into the running turn, under the
+    /// same structural limits as a turn submission's.
+    #[serde(default)]
+    pub attachments: Vec<DispatchAttachmentPayload>,
 }
 
 /// The wire shape and structural limits come from the shared contract; the
@@ -289,11 +297,15 @@ pub async fn install_cli_cancel(
 
 /// Copy this controller's model configuration (catalog, credentials, and
 /// default-model selections) onto the SSH target so its CLI can resolve a
-/// ready model. Explicit, credential-bearing operation: the UI must confirm
-/// before calling it, mirroring CLI installation.
-pub async fn sync_model_config(
+/// ready model.
+///
+/// Credential-bearing: this writes the controller's API keys into the target
+/// user's BitFun configuration. Callers are the explicit UI command and the
+/// automatic submit-time repair in [`ensure_target_model_config`]; both leave
+/// a durable record of having done it.
+pub(super) async fn push_model_config(
     manager: &SSHConnectionManager,
-    request: DispatchConnectionRequest,
+    connection_id: &str,
 ) -> anyhow::Result<()> {
     crate::service::config::initialize_global_config()
         .await
@@ -321,12 +333,14 @@ pub async fn sync_model_config(
             payload.insert(key.to_string(), value.clone());
         }
     }
-    dispatch_ssh::sync_model_config(
-        manager,
-        request.connection_id.trim(),
-        &Value::Object(payload),
-    )
-    .await
+    dispatch_ssh::sync_model_config(manager, connection_id, &Value::Object(payload)).await
+}
+
+pub async fn sync_model_config(
+    manager: &SSHConnectionManager,
+    request: DispatchConnectionRequest,
+) -> anyhow::Result<()> {
+    push_model_config(manager, request.connection_id.trim()).await
 }
 
 pub async fn submit(
@@ -432,6 +446,30 @@ pub async fn submit(
     })?;
     dispatch_ssh::validate_dispatch_protocol(cli_protocol, Some(&request.approval_policy))?;
 
+    // Prepare the model before the Git baseline: the composer offers this
+    // controller's own model list, so the target is brought up to it here
+    // rather than failing the submission back to the user with a manual step.
+    // Doing it now also means a target that cannot serve the model at all
+    // fails before a worktree is created and released again.
+    let cli_probe = ensure_target_model_config(
+        manager,
+        store,
+        &request.job_id,
+        connection_id,
+        cli_probe,
+        request.model.as_deref(),
+    )
+    .await?;
+    let cli_protocol = cli_probe.protocol.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("BitFun CLI dispatch protocol is unavailable on the SSH target")
+    })?;
+    if !target_serves_model(cli_protocol, request.model.as_deref()) {
+        anyhow::bail!(
+            "{}",
+            unservable_model_message(cli_protocol, request.model.as_deref())
+        );
+    }
+
     let baseline = prepare_baseline(
         store,
         &request.job_id,
@@ -488,8 +526,15 @@ pub async fn submit(
         }
     };
     if let Err(error) =
-        dispatch_ssh::validate_dispatch_protocol(protocol, Some(&request.approval_policy))
-            .and_then(|_| validate_submission_preflight(protocol, request.model.as_deref()))
+        dispatch_ssh::validate_dispatch_protocol(protocol, Some(&request.approval_policy)).and_then(
+            |_| {
+                validate_submission_preflight(
+                    protocol,
+                    request.model.as_deref(),
+                    request.reasoning_preset.as_deref(),
+                )
+            },
+        )
     {
         release_unbound_preparation_baseline(store, &request.job_id, &baseline).await;
         return Err(error);
@@ -527,6 +572,7 @@ pub async fn submit(
         request.agent_type.clone(),
         request.approval_policy.clone(),
         request.model.clone(),
+        request.reasoning_preset.clone(),
     )
     .with_source_workspace(
         request.source_workspace_path.clone(),
@@ -542,7 +588,10 @@ pub async fn submit(
     store
         .mark_preparation_outbound_bound(&request.job_id)
         .await?;
-    let setup_audit = store.preparation_setup_audit(&request.job_id).await?;
+    let setup_audit = setup_audit_for_target(
+        store.preparation_setup_audit(&request.job_id).await?,
+        protocol,
+    );
 
     let mut protocol_request = json!({
         "protocolVersion": DISPATCH_PROTOCOL_VERSION,
@@ -556,6 +605,12 @@ pub async fn submit(
     });
     if let Some(model) = request.model.filter(|value| !value.trim().is_empty()) {
         protocol_request["model"] = Value::String(model);
+    }
+    if let Some(preset) = request
+        .reasoning_preset
+        .filter(|value| !value.trim().is_empty())
+    {
+        protocol_request["reasoningPreset"] = Value::String(preset);
     }
     if let Some(title) = request.title.filter(|value| !value.trim().is_empty()) {
         protocol_request["title"] = Value::String(title);
@@ -601,6 +656,200 @@ pub async fn submit(
         );
     }
     Ok(response)
+}
+
+/// Whether the target can already run the model this submission needs.
+///
+/// Mirrors the model half of [`validate_submission_preflight`], which stays
+/// the authoritative check immediately before submit. This one exists so the
+/// controller can tell "needs repair" from "genuinely unusable" early, while
+/// repair is still cheap.
+pub(super) fn target_serves_model(protocol: &Value, requested_model: Option<&str>) -> bool {
+    match requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        Some(model) => protocol
+            .get("availableModels")
+            .and_then(Value::as_array)
+            .is_some_and(|models| models.iter().any(|entry| entry.as_str() == Some(model))),
+        None => protocol.get("modelConfigured").and_then(Value::as_bool) == Some(true),
+    }
+}
+
+fn unservable_model_message(protocol: &Value, requested_model: Option<&str>) -> String {
+    match requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        Some(model) => {
+            format!("Requested model '{model}' is not ready on the dispatch target")
+        }
+        None => protocol
+            .get("modelDiagnostic")
+            .and_then(Value::as_str)
+            .filter(|diagnostic| !diagnostic.trim().is_empty())
+            .unwrap_or("No ready default model is configured on the dispatch target")
+            .to_string(),
+    }
+}
+
+/// Bring the target's model configuration up to this controller's when the
+/// target cannot serve the submission's model, then re-probe.
+///
+/// Returns the probe the caller should keep using: the fresh one when a sync
+/// happened, the original otherwise. A failed sync is not fatal here — the
+/// caller reports the target's own model diagnostic, which describes the
+/// user-visible problem better than a transport error from the repair attempt.
+async fn ensure_target_model_config(
+    manager: &SSHConnectionManager,
+    store: &OutboundDispatchStore,
+    job_id: &str,
+    connection_id: &str,
+    probe: DispatchSshProbe,
+    requested_model: Option<&str>,
+) -> anyhow::Result<DispatchSshProbe> {
+    if probe
+        .protocol
+        .as_ref()
+        .is_some_and(|protocol| target_serves_model(protocol, requested_model))
+    {
+        return Ok(probe);
+    }
+
+    let attempt = uuid::Uuid::new_v4().as_simple().to_string();
+
+    log::info!(
+        "Dispatch SSH model sync: stage=model-sync-started connection_id={connection_id} requested_model={requested_model:?}"
+    );
+    // Persisted before the remote mutation, exactly like the CLI installer: a
+    // controller that dies mid-write must still leave evidence that this
+    // device's credentials may have reached the target.
+    append_model_sync_audit(
+        store,
+        job_id,
+        &attempt,
+        1,
+        "model-sync-started",
+        json!({ "requestedModel": requested_model }),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("persist the model sync started audit event: {error}"))?;
+
+    if let Err(error) = push_model_config(manager, connection_id).await {
+        log::warn!("Dispatch SSH model sync failed: connection_id={connection_id} error={error}");
+        append_model_sync_audit(
+            store,
+            job_id,
+            &attempt,
+            2,
+            "model-sync-failed",
+            json!({ "error": bounded_audit_detail(&error) }),
+        )
+        .await?;
+        return Ok(probe);
+    }
+
+    // Re-probe with no workspace path: this only needs to re-read the model
+    // readiness the sync just changed.
+    let resynced = match dispatch_ssh::probe(manager, connection_id, None).await {
+        Ok(resynced) => resynced,
+        Err(error) => {
+            append_model_sync_audit(
+                store,
+                job_id,
+                &attempt,
+                2,
+                "model-sync-failed",
+                json!({ "error": bounded_audit_detail(&error) }),
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    let model_count = resynced
+        .protocol
+        .as_ref()
+        .and_then(|protocol| protocol.get("availableModels"))
+        .and_then(Value::as_array)
+        .map(|models| models.len())
+        .unwrap_or(0);
+    append_model_sync_audit(
+        store,
+        job_id,
+        &attempt,
+        2,
+        "model-sync-succeeded",
+        json!({ "modelCount": model_count }),
+    )
+    .await?;
+    log::info!(
+        "Dispatch SSH model sync: stage=model-sync-succeeded connection_id={connection_id} model_count={model_count}"
+    );
+    Ok(resynced)
+}
+
+/// An audit event has a hard size limit, and a transport failure can carry an
+/// unbounded remote tail. Truncating keeps a real failure from turning into a
+/// confusing "audit event too large" error that hides it.
+fn bounded_audit_detail(error: &anyhow::Error) -> String {
+    const MAX_AUDIT_DETAIL_CHARS: usize = 512;
+    let message = error.to_string();
+    let mut chars = message.chars();
+    let truncated: String = chars.by_ref().take(MAX_AUDIT_DETAIL_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+async fn append_model_sync_audit(
+    store: &OutboundDispatchStore,
+    job_id: &str,
+    attempt: &str,
+    sequence: u32,
+    stage: &str,
+    detail: Value,
+) -> anyhow::Result<()> {
+    store
+        .append_preparation_setup_audit(
+            job_id,
+            &format!("{attempt}:model-sync:{sequence}"),
+            json!({
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "action": bitfun_services_core::dispatch_contract::DISPATCH_MODEL_SYNC_SETUP_AUDIT_ACTION,
+                "details": {
+                    "stage": stage,
+                    // Never the synced payload itself: it carries API keys.
+                    "sync": detail,
+                },
+            }),
+        )
+        .await
+}
+
+/// Narrow the controller's own setup journal to the audit rows this target
+/// accepts. A target rejects an unknown action outright, so forwarding one
+/// would turn a working submission into a hard failure on an older CLI.
+fn setup_audit_for_target(events: Vec<Value>, protocol: &Value) -> Vec<Value> {
+    let capabilities: Vec<&str> = protocol
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    events
+        .into_iter()
+        .filter(|event| {
+            event
+                .get("action")
+                .and_then(Value::as_str)
+                .is_some_and(|action| {
+                    bitfun_services_core::dispatch_contract::
+                        dispatch_target_accepts_setup_audit_action(action, &capabilities)
+                })
+        })
+        .collect()
 }
 
 async fn recover_interrupted_cli_install_audit(
@@ -737,10 +986,19 @@ async fn provision_ssh_workspace(
     let have_tips = target_have_tips(&response);
     if base_commit_is_published(&baseline.worktree_path, &baseline.delivery.base_commit).await {
         // Worth saying out loud: the commit is on the remote, so the target
-        // asking for it means its clone is stale or its network is down.
-        log::info!(
-            "Dispatch target could not reach a published base commit; delivering it by bundle"
-        );
+        // asking for it means its clone is stale or its network is down. Say why
+        // when the target told us — on a cold cache this fallback re-sends the
+        // project's whole history over SSH, and "the remote refused us" is the
+        // difference between a slow dispatch and a misconfigured target.
+        match target_fetch_error(&response) {
+            Some(reason) => log::warn!(
+                "Dispatch target could not fetch a published base commit ({reason}); delivering {} history by bundle instead",
+                if have_tips.is_empty() { "the entire" } else { "the missing" }
+            ),
+            None => log::info!(
+                "Dispatch target could not reach a published base commit; delivering it by bundle"
+            ),
+        }
     }
     let bundle = build_base_bundle(store, baseline, &have_tips).await?;
     let upload = dispatch_ssh::upload_bundle(
@@ -762,6 +1020,16 @@ async fn provision_ssh_workspace(
     provisioned_path(&response).ok_or_else(|| {
         anyhow::anyhow!("dispatch target could not check out the base commit after the bundle")
     })
+}
+
+/// Why the target fell back to bundle delivery, when it said.
+pub(super) fn target_fetch_error(response: &Value) -> Option<String> {
+    response
+        .get("fetchError")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 pub(super) fn target_have_tips(response: &Value) -> Vec<String> {
@@ -1060,6 +1328,14 @@ pub(super) fn continue_payload(request: &DispatchContinueRequest) -> Value {
     {
         payload["model"] = Value::String(model.to_string());
     }
+    if let Some(preset) = request
+        .reasoning_preset
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        payload["reasoningPreset"] = Value::String(preset.to_string());
+    }
     if let Some(policy) = request
         .approval_policy
         .as_deref()
@@ -1097,6 +1373,7 @@ pub(super) async fn record_follow_up_state(
         .update_submission_options(
             &record.job_id,
             request.model.as_deref(),
+            request.reasoning_preset.as_deref(),
             request.approval_policy.as_deref(),
         )
         .await
@@ -1188,7 +1465,9 @@ pub(super) fn validate_append_request(request: &DispatchAppendRequest) -> anyhow
     if request.message_id.trim().is_empty() || request.message_id.len() > 128 {
         anyhow::bail!("Dispatch messageId must contain 1-128 bytes");
     }
-    if request.content.trim().is_empty() {
+    // An attachment-only message is a real message; only one with neither text
+    // nor attachments is empty.
+    if request.content.trim().is_empty() && request.attachments.is_empty() {
         anyhow::bail!("Dispatch appended message cannot be empty");
     }
     let total_bytes = request
@@ -1198,6 +1477,7 @@ pub(super) fn validate_append_request(request: &DispatchAppendRequest) -> anyhow
     if total_bytes > MAX_DISPATCH_TEXT_BYTES {
         anyhow::bail!("Dispatch appended message exceeds the 32 KiB request limit");
     }
+    validate_attachment_payloads(&request.attachments)?;
     Ok(())
 }
 
@@ -1293,6 +1573,7 @@ pub(super) fn same_target_identity(left: &DispatchTarget, right: &DispatchTarget
 pub(super) fn validate_submission_preflight(
     protocol: &Value,
     requested_model: Option<&str>,
+    requested_reasoning_preset: Option<&str>,
 ) -> anyhow::Result<()> {
     let workspace = protocol
         .get("workspace")
@@ -1304,7 +1585,7 @@ pub(super) fn validate_submission_preflight(
     {
         anyhow::bail!("Dispatch workspace is not a Git worktree on the target");
     }
-    if let Some(requested_model) = requested_model
+    let selected_model = if let Some(requested_model) = requested_model
         .map(str::trim)
         .filter(|model| !model.is_empty())
     {
@@ -1321,12 +1602,48 @@ pub(super) fn validate_submission_preflight(
                 "Requested model '{requested_model}' is not ready on the dispatch target"
             );
         }
+        requested_model
     } else if protocol.get("modelConfigured").and_then(Value::as_bool) != Some(true) {
         let diagnostic = protocol
             .get("modelDiagnostic")
             .and_then(Value::as_str)
             .unwrap_or("No ready default model is configured on the dispatch target");
         anyhow::bail!("{diagnostic}");
+    } else {
+        protocol
+            .get("defaultModel")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Dispatch target did not report a ready default model")
+            })?
+    };
+
+    if let Some(preset) = requested_reasoning_preset
+        .map(str::trim)
+        .filter(|preset| !preset.is_empty() && *preset != "auto")
+    {
+        let supported = protocol
+            .get("modelCatalog")
+            .and_then(|catalog| catalog.get("models"))
+            .and_then(Value::as_array)
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|model| model.get("id").and_then(Value::as_str) == Some(selected_model))
+            })
+            .and_then(|model| model.get("reasoning"))
+            .and_then(|reasoning| reasoning.get("presets"))
+            .and_then(Value::as_array)
+            .is_some_and(|presets| {
+                presets
+                    .iter()
+                    .any(|candidate| candidate.get("id").and_then(Value::as_str) == Some(preset))
+            });
+        if !supported {
+            anyhow::bail!(
+                "Reasoning preset '{preset}' is not available for target model '{selected_model}'"
+            );
+        }
     }
     Ok(())
 }
@@ -1367,18 +1684,34 @@ mod tests {
         let ready = json!({
             "workspace": { "exists": true, "isDirectory": true, "isGitRepository": true },
             "modelConfigured": true,
-            "availableModels": ["target-model"]
+            "availableModels": ["target-model"],
+            "defaultModel": "target-model",
+            "modelCatalog": {
+                "models": [{
+                    "id": "target-model",
+                    "reasoning": { "presets": [{ "id": "high" }] }
+                }]
+            }
         });
-        validate_submission_preflight(&ready, None).expect("target default");
-        validate_submission_preflight(&ready, Some("target-model")).expect("selected model");
-        assert!(validate_submission_preflight(&ready, Some("local-only-model")).is_err());
+        validate_submission_preflight(&ready, None, None).expect("target default");
+        validate_submission_preflight(&ready, Some("target-model"), Some("high"))
+            .expect("selected model and preset");
+        validate_submission_preflight(&ready, Some("target-model"), Some("auto"))
+            .expect("explicit auto");
+        assert!(validate_submission_preflight(
+            &ready,
+            Some("target-model"),
+            Some("controller-only")
+        )
+        .is_err());
+        assert!(validate_submission_preflight(&ready, Some("local-only-model"), None).is_err());
 
         let missing_workspace = json!({
             "workspace": { "exists": false, "isDirectory": false, "isGitRepository": false },
             "modelConfigured": true,
             "availableModels": []
         });
-        assert!(validate_submission_preflight(&missing_workspace, None).is_err());
+        assert!(validate_submission_preflight(&missing_workspace, None, None).is_err());
 
         let missing_model = json!({
             "workspace": { "exists": true, "isDirectory": true, "isGitRepository": true },
@@ -1386,7 +1719,74 @@ mod tests {
             "modelDiagnostic": "configure a model",
             "availableModels": []
         });
-        assert!(validate_submission_preflight(&missing_model, None).is_err());
+        assert!(validate_submission_preflight(&missing_model, None, None).is_err());
+    }
+
+    #[test]
+    fn model_readiness_distinguishes_repairable_targets_from_unusable_ones() {
+        let empty = json!({ "modelConfigured": false, "availableModels": [] });
+        assert!(!target_serves_model(&empty, None));
+        assert!(!target_serves_model(&empty, Some("local-model")));
+
+        let ready = json!({
+            "modelConfigured": true,
+            "availableModels": ["local-model", "other-model"],
+        });
+        assert!(target_serves_model(&ready, None));
+        assert!(target_serves_model(&ready, Some("local-model")));
+        // A blank selection means "whatever the target defaults to", not a
+        // model named "".
+        assert!(target_serves_model(&ready, Some("   ")));
+        assert!(!target_serves_model(
+            &ready,
+            Some("model-only-on-controller")
+        ));
+
+        // A target with models but no default cannot serve an unspecified
+        // choice, so it is still repairable rather than already ready.
+        let no_default = json!({
+            "modelConfigured": false,
+            "availableModels": ["local-model"],
+        });
+        assert!(!target_serves_model(&no_default, None));
+        assert!(target_serves_model(&no_default, Some("local-model")));
+    }
+
+    #[test]
+    fn setup_audit_drops_rows_an_older_target_would_reject() {
+        let events = vec![
+            json!({ "action": "cli-install", "details": { "stage": "cli-install-succeeded" } }),
+            json!({ "action": "model-sync", "details": { "stage": "model-sync-succeeded" } }),
+            json!({ "action": "invented-later", "details": {} }),
+        ];
+
+        let legacy = json!({ "capabilities": ["persistent_jobs"] });
+        let forwarded = setup_audit_for_target(events.clone(), &legacy);
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(forwarded[0]["action"], "cli-install");
+
+        let current = json!({ "capabilities": ["persistent_jobs", "setup_audit_model_sync"] });
+        let forwarded = setup_audit_for_target(events, &current);
+        assert_eq!(forwarded.len(), 2);
+        assert_eq!(forwarded[1]["action"], "model-sync");
+    }
+
+    #[test]
+    fn continue_payload_preserves_explicit_auto_reasoning_preset() {
+        let payload = continue_payload(&DispatchContinueRequest {
+            job_id: "job-1".to_string(),
+            turn_id: "turn-2".to_string(),
+            prompt: "Continue".to_string(),
+            display_content: None,
+            model: Some("target-model".to_string()),
+            reasoning_preset: Some("auto".to_string()),
+            approval_policy: None,
+            kind: None,
+            attachments: Vec::new(),
+        });
+
+        assert_eq!(payload["model"], "target-model");
+        assert_eq!(payload["reasoningPreset"], "auto");
     }
 
     #[test]

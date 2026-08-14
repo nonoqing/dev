@@ -4,7 +4,9 @@
 //! tested without compiling the full BitFun product runtime.
 
 pub mod bounded_fs;
+#[cfg(feature = "diagnostics")]
 pub mod diagnostics;
+#[cfg(feature = "diff")]
 pub mod diff;
 pub mod dispatch_contract;
 #[cfg(feature = "dispatch-workspace")]
@@ -15,7 +17,7 @@ mod file_lock;
 pub mod filesystem;
 #[cfg(any(feature = "markdown", feature = "workspace-instructions"))]
 pub mod instruction_scope;
-#[cfg(feature = "local-storage")]
+#[cfg(any(feature = "json-io", feature = "local-storage"))]
 pub mod json_store;
 pub mod jsonc;
 pub mod local_instructions;
@@ -27,6 +29,7 @@ pub mod lsp;
 pub mod managed_runtime;
 #[cfg(feature = "markdown")]
 pub mod markdown;
+pub mod path_utils;
 #[cfg(feature = "permission")]
 pub mod permission_store;
 #[cfg(feature = "local-storage")]

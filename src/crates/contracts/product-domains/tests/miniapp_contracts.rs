@@ -48,7 +48,7 @@ use bitfun_product_domains::miniapp::ports::{
     MiniAppRuntimePort, MiniAppStoragePort,
 };
 use bitfun_product_domains::miniapp::runtime::{
-    candidate_dirs, candidate_executable_path, detect_runtime, runtime_lookup_order,
+    candidate_dirs, candidate_executable_path, runtime_lookup_order,
     version_manager_roots, versioned_executable_candidate, DetectedRuntime, RuntimeKind,
 };
 use bitfun_product_domains::miniapp::storage::{
@@ -763,7 +763,6 @@ fn miniapp_runtime_search_plan_preserves_common_install_locations() {
     assert!(roots.contains(&home.join(".fnm").join("node-versions")));
 
     assert_eq!(runtime_lookup_order(), &["bun", "node"]);
-    let _detect_runtime: fn() -> Option<DetectedRuntime> = detect_runtime;
     assert_eq!(
         candidate_executable_path(Path::new("/usr/local/bin"), "node"),
         PathBuf::from("/usr/local/bin").join("node")

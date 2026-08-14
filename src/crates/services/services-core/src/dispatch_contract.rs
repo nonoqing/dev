@@ -7,9 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const DISPATCH_PROTOCOL_VERSION: u32 = 4;
+pub const DISPATCH_PROTOCOL_VERSION: u32 = 5;
 
-/// Capabilities every v4 target advertises unconditionally.
+/// Capabilities every v5 target advertises unconditionally.
 pub const DISPATCH_BASE_TARGET_CAPABILITIES: &[&str] = &[
     "persistent_jobs",
     "cursor_events",
@@ -38,11 +38,86 @@ pub const DISPATCH_BASE_TARGET_CAPABILITIES: &[&str] = &[
     "session_query",
     // v4: inline image attachments on submit and follow-up turns.
     "inline_attachments",
+    // v5: target-owned canonical reasoning catalog and per-turn preset selection.
+    "reasoning_presets",
 ];
 
 /// Advertised only where detached workers can run (Linux/macOS), and
 /// required by every controller: a target that cannot detach cannot dispatch.
 pub const DISPATCH_DETACHED_WORKER_CAPABILITY: &str = "detached_worker";
+
+/// Optional capability for an SSH controller to turn a freshly installed CLI
+/// into an account-backed, always-on device. It is deliberately not part of
+/// [`dispatch_required_target_capabilities`]: detached SSH jobs work without
+/// an account daemon, while one-click account provisioning must fail closed on
+/// older CLIs that do not understand the secret-bearing bootstrap contract.
+pub const DISPATCH_ACCOUNT_DAEMON_PROVISIONING_CAPABILITY: &str = "account_daemon_provisioning";
+
+pub const DISPATCH_ACCOUNT_DAEMON_PROVISIONING_SCHEMA_VERSION: u32 = 1;
+
+/// Setup-audit action every target has accepted since the audit channel
+/// existed. A target rejects a submission carrying any action it does not
+/// know, so this list — not the controller's journal — bounds what may be
+/// forwarded to an arbitrary target.
+pub const DISPATCH_BASE_SETUP_AUDIT_ACTIONS: &[&str] = &["cli-install"];
+
+/// Audit action for an automatic model-configuration push performed while
+/// preparing a submission.
+pub const DISPATCH_MODEL_SYNC_SETUP_AUDIT_ACTION: &str = "model-sync";
+
+/// Optional capability: the target accepts [`DISPATCH_MODEL_SYNC_SETUP_AUDIT_ACTION`]
+/// rows. Deliberately outside [`dispatch_required_target_capabilities`]: an
+/// older CLI still runs the job perfectly well, it just cannot render the
+/// controller's model-sync record, so the controller drops those rows instead
+/// of failing an otherwise valid submission.
+pub const DISPATCH_SETUP_AUDIT_MODEL_SYNC_CAPABILITY: &str = "setup_audit_model_sync";
+
+/// Whether a target advertising `capabilities` accepts this audit action.
+pub fn dispatch_target_accepts_setup_audit_action(action: &str, capabilities: &[&str]) -> bool {
+    DISPATCH_BASE_SETUP_AUDIT_ACTIONS.contains(&action)
+        || (action == DISPATCH_MODEL_SYNC_SETUP_AUDIT_ACTION
+            && capabilities.contains(&DISPATCH_SETUP_AUDIT_MODEL_SYNC_CAPABILITY))
+}
+
+/// Every audit action a target of *this* build accepts, used by the target's
+/// own request validation.
+pub fn dispatch_supported_setup_audit_actions() -> impl Iterator<Item = &'static str> {
+    DISPATCH_BASE_SETUP_AUDIT_ACTIONS
+        .iter()
+        .copied()
+        .chain(std::iter::once(DISPATCH_MODEL_SYNC_SETUP_AUDIT_ACTION))
+}
+
+/// Non-secret identity returned by the target before the relay issues a token.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DispatchAccountDaemonIdentity {
+    pub device_id: String,
+    pub device_name: String,
+}
+
+/// Owner-only bootstrap document staged over SFTP for one target invocation.
+///
+/// This value contains an account bearer token and master key. Callers must
+/// never log it, return it to a frontend, or leave it on disk after the target
+/// command finishes.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DispatchAccountDaemonProvisionRequest {
+    pub schema_version: u32,
+    pub token: String,
+    pub user_id: String,
+    pub master_key_base64: String,
+    pub relay_url: String,
+    pub device_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DispatchAccountDaemonProvisionResponse {
+    pub device_id: String,
+    pub service_installed: bool,
+}
 
 /// Everything a controller refuses to submit without: the unconditional set
 /// plus the platform-conditional detached worker.
@@ -115,5 +190,46 @@ mod tests {
         for capability in DISPATCH_BASE_TARGET_CAPABILITIES {
             assert!(required.contains(capability));
         }
+        assert!(!required.contains(&DISPATCH_ACCOUNT_DAEMON_PROVISIONING_CAPABILITY));
+        assert!(!required.contains(&DISPATCH_SETUP_AUDIT_MODEL_SYNC_CAPABILITY));
+    }
+
+    #[test]
+    fn model_sync_audit_rows_need_the_optional_capability() {
+        assert!(dispatch_target_accepts_setup_audit_action(
+            "cli-install",
+            &[]
+        ));
+        assert!(!dispatch_target_accepts_setup_audit_action(
+            DISPATCH_MODEL_SYNC_SETUP_AUDIT_ACTION,
+            &[]
+        ));
+        assert!(dispatch_target_accepts_setup_audit_action(
+            DISPATCH_MODEL_SYNC_SETUP_AUDIT_ACTION,
+            &[DISPATCH_SETUP_AUDIT_MODEL_SYNC_CAPABILITY]
+        ));
+        assert!(!dispatch_target_accepts_setup_audit_action(
+            "something-else",
+            &[DISPATCH_SETUP_AUDIT_MODEL_SYNC_CAPABILITY]
+        ));
+        let supported: Vec<&str> = dispatch_supported_setup_audit_actions().collect();
+        assert!(supported.contains(&DISPATCH_MODEL_SYNC_SETUP_AUDIT_ACTION));
+        for action in DISPATCH_BASE_SETUP_AUDIT_ACTIONS {
+            assert!(supported.contains(action));
+        }
+    }
+
+    #[test]
+    fn account_daemon_bootstrap_contract_rejects_unknown_fields() {
+        let value = serde_json::json!({
+            "schemaVersion": DISPATCH_ACCOUNT_DAEMON_PROVISIONING_SCHEMA_VERSION,
+            "token": "a".repeat(64),
+            "userId": "user-1",
+            "masterKeyBase64": "key",
+            "relayUrl": "https://relay.example.test",
+            "deviceId": "b".repeat(32),
+            "unexpected": true,
+        });
+        assert!(serde_json::from_value::<DispatchAccountDaemonProvisionRequest>(value).is_err());
     }
 }

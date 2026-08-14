@@ -93,6 +93,7 @@
     "failedDescription": "可以重新加载已保存的会话内容；若会话来自其他设备，请先检查账号登录与网络连接。",
     "preparingOlderHistory": "正在准备更早的历史记录...",
     "olderHistoryNotReady": "更早的历史记录暂未准备好。",
+    "newerHistoryNotReady": "更新的历史记录暂未准备好。",
     "remoteSessionMissing": "在后端找不到该会话数据。若刚重新连接过 SSH 远程工作区，请关闭并重新打开该远程项目，或新建会话后再试。",
     "retry": "重试"
   },
@@ -174,7 +175,6 @@
       "tokens": "{{value}} Tokens"
     },
     "loading": {
-      "markdown": "正在生成用量报告...",
       "title": "正在生成用量报告",
       "description": "正在读取本地会话记录，并整理隐私安全的统计摘要。",
       "steps": {
@@ -280,7 +280,9 @@
     },
     "slowestLabels": {
       "modelCall": "第 {{turn}} 轮模型调用",
-      "modelCallUnknown": "模型调用"
+      "modelCallUnknown": "模型调用",
+      "turn": "第 {{turn}} 轮",
+      "turnUnknown": "轮次"
     },
     "slowest": {
       "details": {
@@ -413,6 +415,7 @@
       "interrupted": "已中断"
     },
     "menu": {
+      "switchPet": "切换宠物",
       "closePet": "关闭宠物",
       "closeBubble": "关闭该气泡"
     },
@@ -484,11 +487,6 @@
     "rollbackDialogIntro": "将执行：",
     "rollbackDialogBulletFiles": "撤销从该轮开始的所有文件修改",
     "rollbackDialogBulletHistory": "删除该轮及之后的对话记录（不可恢复）",
-    "rollbackPanelDialogTitle": "回滚到第 {{index}} 轮之前？",
-    "rollbackPanelDialogIntro": "将执行：",
-    "rollbackPanelBulletRestore": "将文件恢复到第 {{index}} 轮之前的状态",
-    "rollbackPanelBulletUndo": "撤销从该轮开始的所有文件变更",
-    "rollbackPanelBulletHistory": "保留会话历史（之后仍可继续对话）",
     "rollbackSuccess": "已回滚并删除后续对话记录",
     "rollbackFailed": "回滚失败",
     "saveEdit": "保存并重跑",
@@ -664,6 +662,9 @@
       "cliInstallFailed": "无法准备远程运行环境。请检查 SSH 连接后重试。",
       "cliInstallInProgress": "正在准备远程运行环境…",
       "cliInstallUnknownVersion": "所需版本",
+      "modelSyncStarted": "正在把本机的模型配置复制到远程设备…",
+      "modelSyncSucceeded": "模型配置已复制，远程设备可以运行所选模型。",
+      "modelSyncFailed": "无法把模型配置复制到远程设备。",
       "errors": {
         "attachmentUnavailable": "这张图片无法发送到远程设备。请重新添加后再试。",
         "deviceAttachmentTooLarge": "通过账号设备发送的图片总大小不能超过 192 KB。请压缩图片，或改用 SSH 目标。",
@@ -674,12 +675,12 @@
         "sessionUnavailable": "远程任务信息不完整。请重新打开任务，或新建一个任务。",
         "compactWhileRunning": "请等待当前远程任务完成后再压缩上下文。",
         "compactRejected": "目标设备未能开始压缩，请稍后重试。",
-        "imagesWhileRunning": "图片会随下一轮消息发送。请等待当前远程任务完成后再试。",
         "sessionNotReady": "远程任务仍在准备中，请稍后再发送。",
         "submissionUnconfirmed": "暂时无法确认目标是否已接收任务。请稍后检查任务状态。"
       }
     },
     "addBoostTooltip": "智能体模式、图片或 Skill",
+    "modeChangeFailed": "切换智能体模式失败，请重试。",
     "permissionMode": {
       "menuLabel": "权限模式",
       "globalScope": "全局",
@@ -708,9 +709,19 @@
         "tooltip": "此会话的权限由 ACP 客户端控制。"
       },
       "fullAccessWarningTitle": "启用完全访问？",
-      "fullAccessWarningMessage": "完全访问会默认允许工具执行，不再逐次确认。",
+      "fullAccessWarningMessage": "完全访问会默认放行工具调用，不再逐次确认。该设置仅作用于当前会话，项目规则与强制规则仍然生效。",
       "fullAccessConfirm": "启用完全访问",
-      "cancel": "取消"
+      "cancel": "取消",
+      "sessionScope": "当前会话",
+      "currentSessionOverride": "权限：{{mode}}（仅当前会话）",
+      "resetToDefault": "跟随默认模式",
+      "noSession": "请先打开或新建会话，再修改其权限模式。",
+      "turnScope": "仅下一条消息",
+      "currentTurnOverride": "权限：{{mode}}（仅下一条消息）",
+      "nextTurnOnly": "仅下一条消息使用「{{mode}}」",
+      "nextTurnOnlyShort": "仅一次",
+      "fullAccessWarningMessageNextTurn": "完全访问会默认放行工具调用，不再逐次确认。该设置仅作用于下一条消息，项目规则与强制规则仍然生效。",
+      "openDefaultSettings": "打开权限设置"
     },
     "addModeTooltip": "附加 Plan 或 Debug",
     "boostSectionAgent": "智能体",
@@ -795,6 +806,10 @@
     "nativeCommandReconfirmationRequired": "之前选择的外部命令已不可用。请从斜杠菜单中选择 BitFun 命令后再执行。",
     "selectHint": "↑↓ 选择 · Enter 确认 · Esc 取消",
     "current": "当前",
+    "commandStatus": {
+      "restricted": "受限",
+      "chooseSource": "选择来源"
+    },
     "computerUseDisabled": "已在「设置 → 会话权限」中禁用 Computer Use",
     "professionalMode": "专业模式",
     "designMode": "设计模式",
@@ -884,8 +899,8 @@
     "unknownTool": "未知工具"
   },
   "transcriptExport": {
-    "copyFull": "拷贝完整过程",
-    "copyResult": "拷贝结果",
+    "copyFull": "复制完整过程",
+    "copyResult": "复制结果",
     "copyEmpty": "该对话没有可复制的内容",
     "exportEmpty": "该会话没有可导出的内容",
     "exportSuccess": "会话已导出：{{filePath}}",
@@ -1306,9 +1321,6 @@
       "pruned": "已清理",
       "failed": "命令失败"
     }
-  },
-  "stickyTaskIndicator": {
-    "tooltip": "跳转到当前任务"
   },
   "sessionFilesBadge": {
     "files": "文件",
@@ -2389,6 +2401,24 @@
     "xhigh": "Extra High",
     "xhighDesc": "最大推理深度（较慢）"
   },
+  "reasoningSelector": {
+    "title": "思考强度",
+    "auto": "自动",
+    "modelDefault": "模型默认值",
+    "current": "思考强度：{{preset}}",
+    "currentAuto": "思考强度：自动（{{preset}}）",
+    "updateFailed": "更新思考预设失败",
+    "source": {
+      "models_dev": "models.dev",
+      "adapter_fallback": "内置",
+      "model_config": "自定义"
+    },
+    "sourceTooltip": {
+      "models_dev": "根据 models.dev 的模型元数据自动生成",
+      "adapter_fallback": "BitFun 为此模型适配器内置的预设",
+      "model_config": "在此模型的自定义配置中定义"
+    }
+  },
   "coworkScope": {
     "title": "选择 Cowork 工作区",
     "description": "Cowork 模式需要一个工作区目录用于读写文件。你可以使用当前项目，或选择另一个目录。",
@@ -2458,9 +2488,9 @@
         "prompt": "请帮我写一封邮件回复。\n\n对方邮件内容（可粘贴）：\n我的目标（确认/拒绝/推进/澄清）：\n语气（正式/友好/强硬但礼貌）：\n需要包含的信息点：\n\n请输出：\n1) 主题（Subject）建议\n2) 邮件正文（2 个版本：更正式/更简洁）\n3) 需要对方确认的问题列表（如有）"
       },
       "make_docx": {
-        "title": "写一份 Word 文档",
-        "description": "把内容结构化成文档，并导出为 DOCX。",
-        "prompt": "请帮我写一份文档，并导出为 .docx 文件。\n\n文档类型（PRD/方案/复盘/报告/SOP）：\n受众：\n语气（正式/友好/简洁）：\n必须包含的信息点：\n期望长度：\n\n最终交付：\n1) 建议目录结构\n2) 完整正文内容\n3) 导出为 DOCX 文件（保存到 artifacts/）"
+        "title": "写一份结构化文档",
+        "description": "把资料整理成清晰、可复用的文档。",
+        "prompt": "请帮我写一份结构化文档。\n\n文档类型（PRD/方案/复盘/报告/SOP）：\n受众：\n语气（正式/友好/简洁）：\n必须包含的信息点：\n期望长度：\n\n最终交付：\n1) 建议目录结构\n2) 完整正文内容\n3) 将 Markdown 文档保存到 artifacts/"
       },
       "make_spreadsheet": {
         "title": "做一张表格",
@@ -2497,7 +2527,6 @@
     },
     "errors": {
       "emptyContent": "消息内容不能为空",
-      "richContentUnsupported": "包含附件或结构化信息的消息需要等待当前对话完成后发送",
       "sendNowFailed": "立即发送失败，请稍后重试"
     }
   },

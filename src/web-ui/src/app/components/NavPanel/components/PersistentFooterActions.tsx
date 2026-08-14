@@ -1,4 +1,5 @@
-import React, { lazy, Suspense, useState, useCallback, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useCallback, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Settings,
   Info,
@@ -12,7 +13,7 @@ import {
   BarChart3,
   ChevronUp,
 } from 'lucide-react';
-import { Tooltip, Modal } from '@/component-library';
+import { Tooltip, Modal, PresenceBoundary } from '@/component-library';
 import { useI18n } from '@/infrastructure/i18n/hooks/useI18n';
 import { useSceneManager } from '../../../hooks/useSceneManager';
 import { useNavSceneStore } from '../../../stores/navSceneStore';
@@ -23,6 +24,7 @@ import { useNotification } from '@/shared/notification-system';
 import { useAccountLoginState } from '@/infrastructure/account/useAccountLoginState';
 import { remoteConnectAPI } from '@/infrastructure/api/service-api/RemoteConnectAPI';
 import NotificationButton from '../../TitleBar/NotificationButton';
+import GithubStarButton from './GithubStarButton';
 import {
   RemoteConnectDisclaimerContent,
 } from '../../RemoteConnectDialog/RemoteConnectDisclaimer';
@@ -30,6 +32,8 @@ import {
   getRemoteConnectDisclaimerAgreed,
   setRemoteConnectDisclaimerAgreed,
 } from '../../RemoteConnectDialog/remoteConnectDisclaimerStorage';
+import { getAppearanceOverlayHost } from '@/infrastructure/appearance/runtime/AppearanceOverlayHost';
+import { useAnchoredPopoverPosition } from '@/shared/utils/useAnchoredPopoverPosition';
 
 const RemoteConnectDialog = lazy(() => import('../../RemoteConnectDialog'));
 const AboutDialog = lazy(() =>
@@ -70,6 +74,16 @@ const PersistentFooterActions: React.FC = () => {
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuClosing, setMenuClosing] = useState(false);
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
+  const menuPopoverRef = useRef<HTMLDivElement>(null);
+  const menuLayout = useAnchoredPopoverPosition({
+    open: menuOpen,
+    anchorRef: menuTriggerRef,
+    popoverRef: menuPopoverRef,
+    preferredPlacement: 'top',
+    alignment: 'start',
+    gap: 6,
+  });
   const [showAbout, setShowAbout] = useState(false);
   const [showRemoteConnect, setShowRemoteConnect] = useState(false);
   const [remoteInitialGroup, setRemoteInitialGroup] = useState<'network' | 'bot' | 'account' | undefined>(undefined);
@@ -183,6 +197,7 @@ const PersistentFooterActions: React.FC = () => {
           <div className="bitfun-nav-panel__footer-more-wrap">
             <Tooltip content={t('nav.moreOptions')} placement="right" followCursor disabled={menuOpen}>
               <button
+                ref={menuTriggerRef}
                 type="button"
                 className={`bitfun-nav-panel__footer-btn bitfun-nav-panel__footer-btn--icon${menuOpen ? ' is-active' : ''}`}
                 aria-label={t('nav.moreOptions')}
@@ -204,19 +219,26 @@ const PersistentFooterActions: React.FC = () => {
               </button>
             </Tooltip>
 
-            {menuOpen && (
+            {menuOpen && createPortal(
               <>
                 <div
                   className="bitfun-nav-panel__footer-backdrop"
                   onClick={closeMenu}
                 />
                 <div
+                  ref={menuPopoverRef}
                   className={`bitfun-nav-panel__footer-menu${menuClosing ? ' is-closing' : ''}`}
                   role="menu"
                   data-testid="nav-footer-menu"
                   data-bf-component="nav-panel"
                   data-bf-part="footerMenu"
                   data-bf-state={menuClosing ? 'closing' : 'open'}
+                  data-bf-placement={menuLayout?.placement ?? 'top'}
+                  style={{
+                    top: `${menuLayout?.top ?? 0}px`,
+                    left: `${menuLayout?.left ?? 0}px`,
+                    visibility: menuLayout ? 'visible' : 'hidden',
+                  }}
                 >
                   <button
                     type="button"
@@ -284,7 +306,8 @@ const PersistentFooterActions: React.FC = () => {
                     <span>{t('header.about')}</span>
                   </button>
                 </div>
-              </>
+              </>,
+              getAppearanceOverlayHost(),
             )}
           </div>
 
@@ -328,15 +351,16 @@ const PersistentFooterActions: React.FC = () => {
         </div>
 
         <div className="bitfun-nav-panel__footer-right">
+          <GithubStarButton />
           <NotificationButton className="bitfun-nav-panel__footer-btn" navFooterHoverIconSwap />
         </div>
       </div>
-      {showAbout && (
+      <PresenceBoundary active={showAbout}>
         <Suspense fallback={null}>
           <AboutDialog isOpen={showAbout} onClose={() => setShowAbout(false)} />
         </Suspense>
-      )}
-      {showRemoteConnect && (
+      </PresenceBoundary>
+      <PresenceBoundary active={showRemoteConnect}>
         <Suspense fallback={null}>
           <RemoteConnectDialog
             isOpen={showRemoteConnect}
@@ -344,7 +368,7 @@ const PersistentFooterActions: React.FC = () => {
             initialGroup={remoteInitialGroup}
           />
         </Suspense>
-      )}
+      </PresenceBoundary>
       <Modal
         isOpen={showRemoteDisclaimer}
         onClose={() => setShowRemoteDisclaimer(false)}

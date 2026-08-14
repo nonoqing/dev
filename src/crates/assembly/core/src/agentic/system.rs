@@ -16,7 +16,8 @@ use crate::infrastructure::ai::AIClientFactory;
 use crate::infrastructure::try_get_path_manager_arc;
 use crate::runtime_ownership::CoreRuntimeOwnership;
 use crate::service::token_usage::{TokenUsageService, TokenUsageSubscriber};
-use bitfun_product_capabilities::DeliveryProfile;
+use bitfun_observability::Telemetry;
+pub use bitfun_product_capabilities::DeliveryProfile;
 
 /// Agentic runtime state shared by host adapters.
 #[derive(Clone)]
@@ -26,7 +27,12 @@ pub struct AgenticSystem {
     pub token_usage_service: Arc<TokenUsageService>,
 }
 
-/// Initialize the agentic runtime and register the global coordinator.
+/// Initialize the full compatibility Agent Runtime and register the global
+/// coordinator.
+///
+/// Narrow product hosts must use `init_agentic_system_for_profile` so their
+/// explicit assembly plan remains the only capability authority.
+#[cfg(feature = "product-full")]
 pub async fn init_agentic_system() -> Result<AgenticSystem> {
     init_agentic_system_for_profile(DeliveryProfile::ProductFull).await
 }
@@ -55,12 +61,44 @@ pub async fn init_agentic_system_for_profile(
         .await
 }
 
+/// Initialize a product runtime with an explicitly owned telemetry facade.
+/// Concrete exporters and user configuration remain app/service concerns.
+pub async fn init_agentic_system_for_profile_with_telemetry(
+    delivery_profile: DeliveryProfile,
+    telemetry: Telemetry,
+) -> Result<AgenticSystem> {
+    let path_manager = try_get_path_manager_arc()?;
+    let runtime_ownership = Arc::new(CoreRuntimeOwnership::embedded(
+        path_manager.as_ref(),
+        "embedded-host",
+    ));
+    init_agentic_system_inner(delivery_profile, runtime_ownership, telemetry).await
+}
+
 /// Initializes one product runtime with an explicitly selected ownership
 /// deployment. First-party fixed-workspace hosts use this before protocol/UI
 /// readiness; public Agent Runtime contracts remain unchanged.
 pub async fn init_agentic_system_for_profile_with_runtime_ownership(
     delivery_profile: DeliveryProfile,
     runtime_ownership: Arc<CoreRuntimeOwnership>,
+) -> Result<AgenticSystem> {
+    init_agentic_system_inner(delivery_profile, runtime_ownership, Telemetry::noop()).await
+}
+
+/// Initialize a product runtime with explicit ownership and telemetry. Product
+/// entrypoints own Startup lifecycle; this function owns only Agent assembly.
+pub async fn init_agentic_system_for_profile_with_runtime_ownership_and_telemetry(
+    delivery_profile: DeliveryProfile,
+    runtime_ownership: Arc<CoreRuntimeOwnership>,
+    telemetry: Telemetry,
+) -> Result<AgenticSystem> {
+    init_agentic_system_inner(delivery_profile, runtime_ownership, telemetry).await
+}
+
+async fn init_agentic_system_inner(
+    delivery_profile: DeliveryProfile,
+    runtime_ownership: Arc<CoreRuntimeOwnership>,
+    telemetry: Telemetry,
 ) -> Result<AgenticSystem> {
     info!("Initializing agentic system for profile {delivery_profile}");
 
@@ -74,13 +112,6 @@ pub async fn init_agentic_system_for_profile_with_runtime_ownership(
     let path_manager = try_get_path_manager_arc()?;
     let persistence_manager = Arc::new(persistence::PersistenceManager::new(path_manager.clone())?);
     let token_usage_service = Arc::new(TokenUsageService::new(path_manager.clone()).await?);
-    let token_usage_subscriber = Arc::new(TokenUsageSubscriber::new(token_usage_service.clone()));
-    event_router.subscribe_internal("token_usage".to_string(), token_usage_subscriber);
-    event_router.subscribe_internal(
-        "thread_goal_tokens".to_string(),
-        Arc::new(ThreadGoalTokenSubscriber),
-    );
-
     let context_store = Arc::new(session::SessionContextStore::new());
     let context_compressor = Arc::new(session::ContextCompressor::new(Default::default()));
 
@@ -90,38 +121,59 @@ pub async fn init_agentic_system_for_profile_with_runtime_ownership(
         Default::default(),
     ));
 
+    event_router.subscribe_internal(
+        "token_usage".to_string(),
+        Arc::new(TokenUsageSubscriber::new(token_usage_service.clone())),
+    );
+    event_router.subscribe_internal(
+        "session_context_usage".to_string(),
+        Arc::new(session::SessionContextUsageSubscriber::new(
+            session_manager.clone(),
+        )),
+    );
+    event_router.subscribe_internal(
+        "thread_goal_tokens".to_string(),
+        Arc::new(ThreadGoalTokenSubscriber),
+    );
+
     let tool_registry = tools::registry::get_global_tool_registry();
     let tool_state_manager = Arc::new(tools::pipeline::ToolStateManager::new(event_queue.clone()));
     let permission_request_manager =
         crate::product_runtime::core_permission_request_manager().map_err(anyhow::Error::msg)?;
     let tool_pipeline = Arc::new(
         tools::pipeline::ToolPipeline::new(tool_registry, tool_state_manager, None)
+            .with_telemetry(telemetry.clone())
             .with_permission_request_manager(permission_request_manager),
     );
 
     let stream_processor = Arc::new(execution::StreamProcessor::new(event_queue.clone()));
-    let round_executor = Arc::new(execution::RoundExecutor::new(
-        stream_processor,
-        event_queue.clone(),
-        tool_pipeline.clone(),
-    ));
+    let round_executor = Arc::new(
+        execution::RoundExecutor::new(stream_processor, event_queue.clone(), tool_pipeline.clone())
+            .with_telemetry(telemetry.clone()),
+    );
 
-    let execution_engine = Arc::new(execution::ExecutionEngine::new(
-        round_executor,
-        event_queue.clone(),
-        session_manager.clone(),
-        context_compressor,
-        execution::ExecutionEngineConfig::default(),
-    ));
+    let execution_engine = Arc::new(
+        execution::ExecutionEngine::new(
+            round_executor,
+            event_queue.clone(),
+            session_manager.clone(),
+            context_compressor,
+            execution::ExecutionEngineConfig::default(),
+        )
+        .with_telemetry(telemetry.clone()),
+    );
 
-    let coordinator = Arc::new(coordination::ConversationCoordinator::new(
-        session_manager,
-        execution_engine,
-        tool_pipeline,
-        event_queue.clone(),
-        event_router.clone(),
-        runtime_ownership,
-    ));
+    let coordinator = Arc::new(
+        coordination::ConversationCoordinator::new(
+            session_manager,
+            execution_engine,
+            tool_pipeline,
+            event_queue.clone(),
+            event_router.clone(),
+            runtime_ownership,
+        )
+        .with_telemetry(telemetry),
+    );
 
     coordination::ConversationCoordinator::set_global(coordinator.clone());
 

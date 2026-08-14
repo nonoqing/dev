@@ -319,6 +319,23 @@ function staticSourceSupportEntry(symbol) {
   };
 }
 
+function commonExternalSubagentToolMappingEntry(symbol) {
+  return {
+    symbol,
+    owner: 'static-hook-support shared declarative source adapter utility owner',
+    consumer: 'reviewed OpenCode and Claude Code declarative subagent adapters',
+    verification:
+      'shared mapping unit tests, ecosystem subagent adapter fixtures, and core-boundary public API budget checks',
+    p0: 'runtime-free common external Agent tool capability normalization',
+    contractSlice: contractSlices.externalSourceControlContract,
+    wireImpact: false,
+    rationale:
+      'sibling declarative adapters need one static mapping while provider-specific aliases remain adapter-owned',
+    exit:
+      'remove only if every reviewed consumer moves to an equivalent adapter-layer mapping owner',
+  };
+}
+
 function declarativeSourceAdapterEntry(
   symbol,
   owner,
@@ -477,7 +494,9 @@ export const staticHookSupportPublicApiEntries = [
   'BoundedDirectoryWalkLimit',
   'BoundedDirectoryWalkError',
   'collect_bounded_regular_files',
-].map(staticSourceSupportEntry));
+].map(staticSourceSupportEntry)).concat([
+  'common_external_subagent_tool_capability',
+].map(commonExternalSubagentToolMappingEntry));
 
 function externalHookContractEntry(symbol, owner, consumer, wireImpact = false) {
   return {
@@ -868,6 +887,7 @@ export const externalSubagentContractPublicApiEntries = [
   'ExternalSubagentModelBindingMethod',
   'ExternalSubagentModelBindingOption',
   'ExternalSubagentModelBindingGroup',
+  'ExternalSubagentToolCapability',
   'ExternalSubagentToolSelector',
   'ExternalSubagentToolRequest',
   'ExternalSubagentCompatibilityState',
@@ -1050,6 +1070,7 @@ export const externalSourceCorePublicApiEntries = [
     'set_external_prompt_command_conflict_choice',
     'external_source_snapshot',
     'external_source_read_only_snapshot',
+    'ensure_external_source_workspace_snapshot',
     'set_external_source_enabled',
     'expand_external_prompt_command',
     'sanitize_external_source_operation_error',
@@ -1076,6 +1097,23 @@ export const externalSourceCorePublicApiEntries = [
     true,
   ),
   ...[
+    'unacknowledged_external_ecosystems',
+    'acknowledge_external_ecosystems',
+  ].map((symbol) => ({
+    symbol,
+    owner: 'bitfun-core external source composition facade',
+    consumer: 'Desktop external-source host adapter and Web settings navigation',
+    verification:
+      'core acknowledgement persistence and execution-domain scoping tests, Desktop command contract tests, and Web settings awareness tests',
+    p0: 'first-discovery notification for external-source settings',
+    contractSlice: contractSlices.externalSourceCommandContract,
+    wireImpact: true,
+    rationale:
+      'the Web settings notification must remain stable across refreshes and workspace changes without treating acknowledgement as permission or policy',
+    exit:
+      'remove only if Web settings no longer persists first-discovery awareness or a reviewed owner-scoped replacement preserves the same workspace isolation',
+  })),
+  ...[
     'ExternalToolActivationState',
     'ExternalToolApprovalRequest',
     'ExternalToolCapability',
@@ -1084,6 +1122,7 @@ export const externalSourceCorePublicApiEntries = [
     'ExternalToolConflictCandidateKind',
     'ExternalToolRuntimeKind',
     'set_external_tool_target_decision',
+    'set_external_tool_targets_enabled',
     'set_external_tool_conflict_choice',
   ].map((symbol) =>
     externalToolEntry(
@@ -1105,6 +1144,7 @@ export const externalSourceCorePublicApiEntries = [
     'ExternalSubagentModelRequest',
     'ExternalSubagentSummary',
     'set_external_subagent_activation',
+    'set_external_subagents_enabled',
     'set_external_subagent_model_binding',
     'choose_external_subagent_conflict',
   ].map((symbol) =>
@@ -1122,6 +1162,7 @@ export const externalSourceCorePublicApiEntries = [
     'ExternalMcpTransportKind',
     'native_mcp_candidate_id',
     'set_external_mcp_server_decision',
+    'set_external_mcp_servers_enabled',
     'choose_external_mcp_conflict',
   ].map((symbol) =>
     externalMcpEntry(

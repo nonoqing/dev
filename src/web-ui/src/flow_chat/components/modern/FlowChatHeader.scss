@@ -8,44 +8,20 @@
   justify-content: space-between;
   gap: $size-gap-1;
   padding: 0 $size-gap-3;
-  border-bottom: 1px dashed var(--bf-appearance-token-border-base);
+  border-bottom: 1px solid var(--bf-appearance-token-border-base);
 
-  // Frosted glass effect.
-  background: color-mix(in srgb, var(--bf-appearance-token-color-bg-elevated) 45%, transparent);
-  backdrop-filter: blur(20px) saturate(1.3);
-  -webkit-backdrop-filter: blur(20px) saturate(1.3);
-  
+  // Opaque bar stacked above the message list, so message geometry stays
+  // independent of the header.
+  background: var(--bf-appearance-token-color-bg-scene);
+
   height: 36px;
   min-height: 36px;
   flex-shrink: 0;
-  transition: all $motion-base $easing-standard;
+  transition:
+    background-color $motion-base $easing-standard,
+    border-color $motion-base $easing-standard;
   position: relative;
   z-index: 10;
-  
-  // ==================== Bottom gradient blur ====================
-  &::after {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 100%;
-    height: 16px;
-    pointer-events: none;
-    
-    background: linear-gradient(
-      to bottom,
-      color-mix(in srgb, var(--bf-appearance-token-color-bg-elevated) 35%, transparent) 0%,
-      color-mix(in srgb, var(--bf-appearance-token-color-bg-elevated) 20%, transparent) 35%,
-      color-mix(in srgb, var(--bf-appearance-token-color-bg-elevated) 8%, transparent) 65%,
-      transparent 100%
-    );
-
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-
-    mask-image: linear-gradient(to bottom, black 0%, transparent 100%);
-    -webkit-mask-image: linear-gradient(to bottom, black 0%, transparent 100%);
-  }
 
   &__btw-back {
     flex: 0 0 auto;
@@ -225,11 +201,9 @@
   }
 
   &__background-command-panel {
-    position: absolute;
-    top: calc(100% + 8px);
-    right: 0;
-    width: min(340px, calc(100vw - 32px));
-    max-height: min(360px, calc(100vh - 96px));
+    position: fixed;
+    width: min(340px, calc(100vw - 16px));
+    max-height: min(360px, calc(100vh - 16px));
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -239,7 +213,9 @@
     box-shadow: var(--bf-appearance-token-shadow-lg);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
-    z-index: 30;
+    z-index: $z-popover;
+    color: var(--bf-appearance-token-color-text-primary);
+    font-family: var(--bf-appearance-token-font-family-sans);
   }
 
   &__background-command-panel-header {
@@ -377,6 +353,10 @@
       top: auto;
       right: auto;
       z-index: 10000;
+      max-height: calc(100vh - 16px);
+      overflow-y: auto;
+      color: var(--bf-appearance-token-color-text-primary);
+      font-family: var(--bf-appearance-token-font-family-sans);
     }
   }
 

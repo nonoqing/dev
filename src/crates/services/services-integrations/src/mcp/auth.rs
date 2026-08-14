@@ -122,12 +122,7 @@ impl MCPRemoteOAuthCredentialVault {
             .await
             .context("write MCP OAuth vault key")?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&self.key_path, std::fs::Permissions::from_mode(0o600));
-        }
+        let _ = bitfun_services_core::path_utils::set_mode(&self.key_path, 0o600);
 
         Ok(key)
     }
@@ -225,12 +220,7 @@ impl MCPRemoteOAuthCredentialVault {
             .await
             .context("write MCP OAuth vault")?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&self.vault_path, std::fs::Permissions::from_mode(0o600));
-        }
+        let _ = bitfun_services_core::path_utils::set_mode(&self.vault_path, 0o600);
 
         Ok(())
     }

@@ -495,7 +495,7 @@ fn find_executable_with_path(command: &str, configured_path: Option<&OsStr>) -> 
     }
 
     for directory in command_search_paths(configured_path) {
-        for candidate in executable_candidates(&directory, command) {
+        for candidate in bitfun_core::infrastructure::executable_candidates(&directory, command) {
             if executable_file(&candidate) {
                 return Some(candidate);
             }
@@ -552,23 +552,8 @@ fn push_user_bin_paths(paths: &mut Vec<PathBuf>, seen: &mut HashSet<OsString>) {
 }
 
 fn push_system_bin_paths(paths: &mut Vec<PathBuf>, seen: &mut HashSet<OsString>) {
-    #[cfg(target_os = "macos")]
-    {
-        for prefix in ["/opt/homebrew", "/usr/local"] {
-            push_existing_search_path(paths, seen, PathBuf::from(format!("{prefix}/bin")));
-            push_existing_search_path(paths, seen, PathBuf::from(format!("{prefix}/sbin")));
-            for node in ["node", "node@18", "node@20", "node@22", "node@24"] {
-                push_existing_search_path(
-                    paths,
-                    seen,
-                    PathBuf::from(format!("{prefix}/opt/{node}/bin")),
-                );
-            }
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (paths, seen);
+    for path in bitfun_core::infrastructure::system_executable_search_paths() {
+        push_existing_search_path(paths, seen, path);
     }
 }
 
@@ -587,42 +572,9 @@ fn push_search_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<OsString>, path
         return;
     }
 
-    let key = search_path_key(&path);
+    let key = bitfun_core::infrastructure::path_search_key(&path);
     if seen.insert(key) {
         paths.push(path);
-    }
-}
-
-fn search_path_key(path: &Path) -> OsString {
-    #[cfg(windows)]
-    {
-        OsString::from(path.to_string_lossy().to_ascii_lowercase())
-    }
-    #[cfg(not(windows))]
-    {
-        path.as_os_str().to_os_string()
-    }
-}
-
-fn executable_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
-    #[cfg(windows)]
-    {
-        let command_path = PathBuf::from(command);
-        if command_path.extension().is_some() {
-            return vec![directory.join(command)];
-        }
-        let extensions = env::var_os("PATHEXT").unwrap_or_else(|| OsString::from(".EXE;.BAT;.CMD"));
-        extensions
-            .to_string_lossy()
-            .split(';')
-            .filter(|extension| !extension.is_empty())
-            .map(|extension| directory.join(format!("{command}{extension}")))
-            .collect()
-    }
-
-    #[cfg(not(windows))]
-    {
-        vec![directory.join(command)]
     }
 }
 

@@ -34,9 +34,12 @@ import {
   type RelayTaskStatus,
   type RelayVerifyResult,
   type DockerAccessMode,
+  type RelayMirrorMode,
 } from './relayDeployApi';
+import { buildRelayServerSearchState, getRelayConnectionHost } from './serverSearch';
 import { ConnectedTerminal, getTerminalService } from '@/tools/terminal';
 import { createLogger } from '@/shared/utils/logger';
+import { getMotionAwareScrollBehavior } from '@/shared/utils/motionPreference';
 import './RelayDeployWizard.scss';
 
 const log = createLogger('RelayDeployWizard');
@@ -114,7 +117,10 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
   const revealConnectForm = useCallback(() => {
     const el = connectFormRef.current;
     if (!el) return;
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    el.scrollIntoView({
+      behavior: getMotionAwareScrollBehavior('smooth'),
+      block: 'start',
+    });
     setConnectFormHighlighted(true);
     if (connectFormHighlightTimerRef.current != null) {
       window.clearTimeout(connectFormHighlightTimerRef.current);
@@ -142,6 +148,7 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
   const [preflight, setPreflight] = useState<RelayPreflight | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [relayPortInput, setRelayPortInput] = useState(String(DEFAULT_RELAY_PORT));
+  const [mirrorMode, setMirrorMode] = useState<RelayMirrorMode>('auto');
 
   // ── interactive PTY task (install docker / deploy) ───────────────────────
   const [activeTask, setActiveTask] = useState<RelayDeployTask | null>(null);
@@ -238,7 +245,7 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
 
   // ── lifecycle ────────────────────────────────────────────────────────────
   // Closing the wizard MUST cancel the remote task (kill pid tree / best-effort
-  // compose stop). Never leave a nohup Docker build running after dismiss.
+  // the image script's rollback trap). Never leave a detached pull running after dismiss.
   useEffect(() => {
     if (!isOpen) {
       stopPolling();
@@ -268,6 +275,7 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
       setPreflight(null);
       setPreflightLoading(false);
       setRelayPortInput(String(DEFAULT_RELAY_PORT));
+      setMirrorMode('auto');
       setActiveTask(null);
       setTaskStatus(null);
       setRegUsername('');
@@ -475,9 +483,10 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
 
   const handleFillFromConfig = (entry: SSHConfigEntry) => {
     const hasKey = !!entry.identityFile?.trim();
+    const connectHost = getRelayConnectionHost(entry);
     setFormData({
       name: entry.host,
-      host: entry.host,
+      host: connectHost,
       port: entry.port ? String(entry.port) : '22',
       username: entry.user || '',
       authType: hasKey ? 'privateKey' : 'password',
@@ -572,20 +581,6 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
     startTaskPolling(task, connId);
   }, [closeDeployTerminal, startTaskPolling]);
 
-  const handleInstallDocker = async () => {
-    if (!connectionId) return;
-    setError(null);
-    setTaskStatus('running');
-    setActiveTask('install_docker');
-    try {
-      const started = await relayDeployApi.installDocker(connectionId);
-      await launchInteractiveTask('install_docker', connectionId, started.scriptPath);
-    } catch (e) {
-      setTaskStatus('failed');
-      setError(`[start] ${errMsg(e)}`);
-    }
-  };
-
   const handleStartDeploy = async () => {
     if (!connectionId) return;
     const port = parseRelayPort(relayPortInput);
@@ -598,7 +593,7 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
     setTaskStatus('running');
     setActiveTask('deploy');
     try {
-      const started = await relayDeployApi.startDeploy(connectionId, port);
+      const started = await relayDeployApi.startDeploy(connectionId, port, mirrorMode);
       await launchInteractiveTask('deploy', connectionId, started.scriptPath);
     } catch (e) {
       setTaskStatus('failed');
@@ -687,47 +682,26 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
   };
 
   // ── derived view data ────────────────────────────────────────────────────
-  const filteredSavedConnections = savedConnections.filter((conn) => {
-    if (!savedSearch.trim()) return true;
-    const q = savedSearch.toLowerCase();
-    return (
-      conn.name.toLowerCase().includes(q) ||
-      conn.host.toLowerCase().includes(q) ||
-      conn.username.toLowerCase().includes(q)
-    );
-  });
-
-  const filteredSSHConfigHosts = sshConfigHosts.filter((entry) => {
-    const hostname = entry.hostname || entry.host;
-    const port = entry.port || 22;
-    const user = entry.user || '';
-    if (savedConnections.some((c) => c.host === hostname && c.port === port && c.username === user)) {
-      return false;
-    }
-    if (!configSearch.trim()) return true;
-    const q = configSearch.toLowerCase();
-    return (
-      entry.host.toLowerCase().includes(q) ||
-      hostname.toLowerCase().includes(q) ||
-      user.toLowerCase().includes(q)
-    );
-  });
+  const {
+    filteredSavedConnections,
+    filteredSSHConfigHosts,
+    hasSavedConnections,
+    hasSSHConfigHosts,
+  } = buildRelayServerSearchState(
+    savedConnections,
+    sshConfigHosts,
+    savedSearch,
+    configSearch,
+  );
 
   const accessMode = preflight?.dockerAccessMode;
   const dockerRecoverable = !!preflight && preflight.dockerInstalled
-    && accessMode !== 'missing'
-    && (preflight.composeAvailable
-      || accessMode === 'sudo_nopass'
-      || accessMode === 'sudo_needs_password'
-      || accessMode === 'group_inactive'
-      || accessMode === 'broken_docker_home'
-      || accessMode === 'daemon_down');
+    && accessMode !== 'missing';
   const canInstallDocker = !!preflight && !preflight.dockerInstalled
     && (preflight.sudoAvailable || preflight.sudoNeedsPassword);
   const portValid = parseRelayPort(relayPortInput) != null;
   const canDeploy = !!preflight && preflight.archSupported
-    && preflight.curlAvailable && preflight.tarAvailable
-    && dockerRecoverable
+    && (dockerRecoverable || canInstallDocker)
     && portValid
     && (!preflight.portBusy || preflight.portOwnedByRelay);
 
@@ -745,12 +719,18 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
     { label: t('ssh.remote.privateKey'), value: 'privateKey', icon: <Key size={14} /> },
   ];
 
+  const mirrorModeOptions = [
+    { label: t('relayDeploy.mirrorModeAuto'), value: 'auto' },
+    { label: t('relayDeploy.mirrorModeCn'), value: 'cn' },
+    { label: t('relayDeploy.mirrorModeGlobal'), value: 'global' },
+  ];
+
   // ── step renderers ───────────────────────────────────────────────────────
   const renderConnect = () => (
     <div className="relay-deploy-wizard__scroll">
       <p className="relay-deploy-wizard__desc">{t('relayDeploy.selectServerDesc')}</p>
 
-      {savedConnections.length > 0 && (
+      {hasSavedConnections && (
         <div className="relay-deploy-wizard__section">
           <div className="relay-deploy-wizard__section-header">
             <h3 className="relay-deploy-wizard__section-title">{t('ssh.remote.savedConnections')}</h3>
@@ -764,7 +744,11 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
             />
           </div>
           <div className="relay-deploy-wizard__server-list">
-            {filteredSavedConnections.map((conn) => (
+            {filteredSavedConnections.length === 0 ? (
+              <div className="relay-deploy-wizard__search-empty" role="status">
+                {t('empty.noResults')}
+              </div>
+            ) : filteredSavedConnections.map((conn) => (
               <div
                 key={conn.id}
                 className="relay-deploy-wizard__server-item"
@@ -790,7 +774,7 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
         </div>
       )}
 
-      {filteredSSHConfigHosts.length > 0 && (
+      {hasSSHConfigHosts && (
         <div className="relay-deploy-wizard__section">
           <div className="relay-deploy-wizard__section-header">
             <h3 className="relay-deploy-wizard__section-title">{t('ssh.remote.sshConfigHosts')}</h3>
@@ -804,7 +788,11 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
             />
           </div>
           <div className="relay-deploy-wizard__server-list">
-            {filteredSSHConfigHosts.map((entry) => (
+            {filteredSSHConfigHosts.length === 0 ? (
+              <div className="relay-deploy-wizard__search-empty" role="status">
+                {t('empty.noResults')}
+              </div>
+            ) : filteredSSHConfigHosts.map((entry) => (
               <div
                 key={entry.host}
                 className="relay-deploy-wizard__server-item relay-deploy-wizard__server-item--config"
@@ -831,7 +819,7 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
         </div>
       )}
 
-      {(savedConnections.length > 0 || filteredSSHConfigHosts.length > 0) && (
+      {(hasSavedConnections || hasSSHConfigHosts) && (
         <div className="relay-deploy-wizard__divider"><span>{t('ssh.remote.newConnection')}</span></div>
       )}
 
@@ -946,6 +934,7 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
     const taskFailed = activeTask === 'install_docker' && taskStatus === 'failed';
     const dockerOk = pf?.dockerAccessMode === 'ok';
     const dockerWarn = !!pf?.dockerInstalled && !dockerOk && pf.dockerAccessMode !== 'missing';
+    const dockerWillInstall = !!pf && !pf.dockerInstalled && canInstallDocker;
     return (
       <div className="relay-deploy-wizard__scroll">
         <div className="relay-deploy-wizard__server-banner">
@@ -990,6 +979,20 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
               <p className="relay-deploy-wizard__port-hint">{t('relayDeploy.relayPortHint')}</p>
             </div>
 
+            <div className="relay-deploy-wizard__mirror-row">
+              <div className="relay-deploy-wizard__field relay-deploy-wizard__field--mirror">
+                <label className="relay-deploy-wizard__label">{t('relayDeploy.mirrorMode')}</label>
+                <Select
+                  options={mirrorModeOptions}
+                  value={mirrorMode}
+                  onChange={(value) => setMirrorMode(String(value) as RelayMirrorMode)}
+                  size="medium"
+                  disabled={taskRunning || preflightLoading}
+                />
+              </div>
+              <p className="relay-deploy-wizard__mirror-hint">{t('relayDeploy.mirrorModeHint')}</p>
+            </div>
+
             {portConflict && (
               <div className="relay-deploy-wizard__notice relay-deploy-wizard__notice--warn">
                 <AlertTriangle size={18} />
@@ -1021,31 +1024,11 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
                   : `${pf.os} / ${pf.arch} — ${t('relayDeploy.checkOsUnsupported')}`,
               )}
               {renderCheckRow(
-                dockerOk ? true : dockerWarn ? 'warn' : false,
+                dockerOk ? true : (dockerWarn || dockerWillInstall) ? 'warn' : false,
                 t('relayDeploy.checkDocker'),
-                dockerAccessHint(pf.dockerAccessMode),
-              )}
-              {renderCheckRow(
-                !pf.dockerInstalled ? 'warn' : pf.composeAvailable,
-                t('relayDeploy.checkCompose'),
-                pf.composeAvailable ? t('relayDeploy.checkDockerOk') : t('relayDeploy.checkComposeMissing'),
-              )}
-              {renderCheckRow(
-                pf.curlAvailable,
-                'curl',
-                pf.curlAvailable ? t('relayDeploy.checkDockerOk') : t('relayDeploy.checkMissing'),
-              )}
-              {renderCheckRow(
-                pf.tarAvailable,
-                'tar',
-                pf.tarAvailable ? t('relayDeploy.checkDockerOk') : t('relayDeploy.checkMissing'),
-              )}
-              {renderCheckRow(
-                pf.memTotalMb === 0 ? 'warn' : pf.memTotalMb >= 2048 ? true : 'warn',
-                t('relayDeploy.checkMemory'),
-                pf.memTotalMb >= 2048
-                  ? t('relayDeploy.checkMemoryValue', { mb: pf.memTotalMb })
-                  : `${t('relayDeploy.checkMemoryValue', { mb: pf.memTotalMb })} — ${t('relayDeploy.checkMemoryLow')}`,
+                dockerWillInstall
+                  ? t('relayDeploy.dockerAutoInstallHint')
+                  : dockerAccessHint(pf.dockerAccessMode),
               )}
               {renderCheckRow(
                 !pf.portBusy || pf.portOwnedByRelay,
@@ -1125,12 +1108,6 @@ export const RelayDeployWizard: React.FC<RelayDeployWizardProps> = ({
                     <ChevronLeft size={14} />
                     {t('relayDeploy.back')}
                   </Button>
-                  {canInstallDocker && (
-                    <Button variant="secondary" size="small" onClick={handleInstallDocker} disabled={taskRunning}>
-                      {taskRunning ? <Loader2 size={14} className="spinning" /> : <RefreshCw size={14} />}
-                      {t('relayDeploy.installDocker')}
-                    </Button>
-                  )}
                   {!pf.dockerInstalled && !canInstallDocker && !taskRunning && (
                     <span className="relay-deploy-wizard__hint">{t('relayDeploy.dockerManualHint')}</span>
                   )}

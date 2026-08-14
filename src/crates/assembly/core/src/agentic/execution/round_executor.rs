@@ -14,7 +14,12 @@ use crate::agentic::memories::{
     parse_bitfun_memory_citation, parse_bitfun_memory_citation_payloads,
     strip_bitfun_memory_citations,
 };
-use crate::agentic::permission_policy::resolve_effective_permission_policy;
+use crate::agentic::observability::{
+    completion_from_error, finish_reason_class, inference_classes, retryable_error, status_class,
+};
+use crate::agentic::permission_policy::{
+    permission_mode_from_context, resolve_effective_permission_policy,
+};
 use crate::agentic::tools::computer_use_host::ComputerUseHostRef;
 use crate::agentic::tools::pipeline::{
     SubagentBatchExecutionPolicy as PipelineSubagentBatchExecutionPolicy, ToolExecutionContext,
@@ -30,18 +35,25 @@ use crate::service::config::project_permission_store::{
 use crate::service::config::types::AgentProfileConfig;
 use crate::service::config::types::SubagentBatchExecutionPolicy as ConfigSubagentBatchExecutionPolicy;
 use crate::service::config::GlobalConfigManager;
-use crate::util::elapsed_ms_u64;
 use crate::util::errors::{BitFunError, BitFunResult};
 use crate::util::types::Message as AIMessage;
 use crate::util::types::ToolDefinition;
-use bitfun_agent_runtime::permission::AUTO_APPROVE_ASK_CONTEXT_KEY;
+use crate::util::{elapsed_ms_u64, TokenCounter};
 use bitfun_agent_runtime::turn_cancellation::DialogTurnCancellationTokenStore;
 use bitfun_ai_adapters::{
     ModelExchangeRequestTraceHandle, ModelExchangeResponseTrace, ModelExchangeTraceConfig,
 };
 use bitfun_core_types::errors::{AiProviderError, ErrorCategory};
+use bitfun_observability::domains::{
+    attempt_bucket, index_bucket, record_inference_usage, start_inference_attempt,
+    start_inference_with_request_facts, start_round, CompletionFacts, InferenceAttemptFinishFacts,
+    InferenceAttemptStartFacts, InferenceContextClass, InferenceFinishFacts, InferenceRequestFacts,
+    InferenceResponseFacts, InferenceStartFacts, InferenceStreamOutcomeClass, InferenceUsageFacts,
+    RoundFinishFacts, RoundStartFacts, SafeErrorType, StatusClass, ToolArgumentRecoveryClass,
+};
+use bitfun_observability::Telemetry;
 use bitfun_runtime_ports::PermissionRule;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -52,6 +64,7 @@ pub struct RoundExecutor {
     tool_pipeline: Option<Arc<ToolPipeline>>,
     event_queue: Arc<EventQueue>,
     cancellation_tokens: DialogTurnCancellationTokenStore,
+    telemetry: Telemetry,
 }
 
 /// Mutable lifecycle shared by all provider attempts that belong to one
@@ -88,7 +101,7 @@ impl ModelRoundLifecycle {
         self.attempts_started
     }
 
-    fn attempts_started(&self) -> u32 {
+    pub(super) fn attempts_started(&self) -> u32 {
         self.attempts_started
     }
 }
@@ -103,6 +116,26 @@ impl RoundExecutor {
 
     fn has_user_visible_assistant_text(text: &str) -> bool {
         !text.trim().is_empty()
+    }
+
+    fn tool_argument_recovery(stream_result: &StreamResult) -> Option<ToolArgumentRecoveryClass> {
+        if stream_result
+            .tool_calls
+            .iter()
+            .any(|tool_call| !tool_call.is_valid())
+        {
+            Some(ToolArgumentRecoveryClass::Invalid)
+        } else if stream_result.tool_calls.iter().any(|tool_call| {
+            tool_call.recovered_from_truncation
+                || !matches!(
+                    tool_call.repair_kind,
+                    bitfun_agent_stream::ToolArgumentRepairKind::None
+                )
+        }) {
+            Some(ToolArgumentRecoveryClass::Repaired)
+        } else {
+            None
+        }
     }
 
     fn retry_diagnostic(
@@ -141,8 +174,13 @@ impl RoundExecutor {
         raw_error: Option<String>,
         tool_calls: &[ToolCall],
     ) {
-        let diagnostic =
-            Self::retry_diagnostic(attempt_id, attempt_index, category, raw_error, tool_calls);
+        let diagnostic = Self::retry_diagnostic(
+            attempt_id,
+            attempt_index,
+            category,
+            raw_error.clone(),
+            tool_calls,
+        );
         self.emit_event(
             AgenticEvent::ModelRoundAttemptSuperseded {
                 session_id: context.session_id.clone(),
@@ -175,7 +213,7 @@ impl RoundExecutor {
                     format!("{}:attempt:{attempt_number}", lifecycle.round_id),
                     attempt_number,
                     "context_overflow",
-                    Some(raw_error),
+                    Some(raw_error.clone()),
                     &[],
                 ),
             },
@@ -217,6 +255,7 @@ impl RoundExecutor {
 
     fn resolve_permission_policy(
         global: &crate::service::config::types::GlobalConfig,
+        mode: bitfun_runtime_ports::PermissionMode,
         project_rules: &[PermissionRule],
         agent_profile: Option<&AgentProfileConfig>,
         agent_definition_constraints: &bitfun_runtime_ports::PermissionConstraintLayer,
@@ -224,6 +263,7 @@ impl RoundExecutor {
     ) -> bitfun_runtime_ports::ResolvedPermissionPolicy {
         resolve_effective_permission_policy(
             global,
+            Some(mode),
             project_rules,
             agent_profile,
             Some(agent_definition_constraints),
@@ -232,14 +272,16 @@ impl RoundExecutor {
         )
     }
 
-    fn resolve_auto_approve_ask(
+    /// The one place a running round learns its permission mode.
+    ///
+    /// Both the static preset and the interactive auto-answer preference are
+    /// derived from this single value, so a round can never run with a preset
+    /// from one mode and an approval behavior from another.
+    fn resolve_permission_mode(
         global: &crate::service::config::types::GlobalConfig,
         context_vars: &std::collections::HashMap<String, String>,
-    ) -> bool {
-        context_vars
-            .get(AUTO_APPROVE_ASK_CONTEXT_KEY)
-            .and_then(|value| value.parse::<bool>().ok())
-            .unwrap_or(global.tool_permissions.interaction.auto_approve_ask)
+    ) -> bitfun_runtime_ports::PermissionMode {
+        permission_mode_from_context(global, context_vars)
     }
 
     async fn sleep_with_cancellation(
@@ -262,7 +304,13 @@ impl RoundExecutor {
             tool_pipeline: Some(tool_pipeline),
             event_queue,
             cancellation_tokens: DialogTurnCancellationTokenStore::new(),
+            telemetry: bitfun_observability::Telemetry::noop(),
         }
+    }
+
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     pub fn computer_use_host(&self) -> Option<ComputerUseHostRef> {
@@ -275,21 +323,45 @@ impl RoundExecutor {
     pub async fn execute_round(
         &self,
         ai_client: Arc<AIClient>,
-        context: RoundContext,
+        mut context: RoundContext,
         ai_messages: Vec<AIMessage>,
         tool_definitions: Option<Vec<ToolDefinition>>,
         context_window: Option<usize>,
     ) -> BitFunResult<RoundResult> {
         let mut lifecycle = ModelRoundLifecycle::new();
-        self.execute_round_with_lifecycle(
-            ai_client,
-            context,
-            ai_messages,
-            tool_definitions,
-            context_window,
-            &mut lifecycle,
-        )
-        .await
+        let observation = start_round(
+            &self.telemetry,
+            RoundStartFacts {
+                index_bucket: index_bucket(context.round_number),
+                subagent: context.subagent_parent_info.is_some(),
+            },
+            context.observation_context.clone(),
+        );
+        context.observation_context = observation.context();
+        let result = self
+            .execute_round_with_lifecycle(
+                ai_client,
+                context,
+                ai_messages,
+                tool_definitions,
+                context_window,
+                &mut lifecycle,
+            )
+            .await;
+        let finish = match &result {
+            Ok(result) => RoundFinishFacts {
+                completion: CompletionFacts::completed(),
+                has_tool_calls: !result.tool_calls.is_empty(),
+                attempt_bucket: attempt_bucket(lifecycle.attempts_started()),
+            },
+            Err(error) => RoundFinishFacts {
+                completion: completion_from_error(error),
+                has_tool_calls: false,
+                attempt_bucket: attempt_bucket(lifecycle.attempts_started()),
+            },
+        };
+        observation.finish(finish);
+        result
     }
 
     pub(super) async fn execute_round_with_lifecycle(
@@ -331,7 +403,8 @@ impl RoundExecutor {
         }
 
         let trace_config =
-            prepare_model_exchange_trace(&context, &round_id, ai_client.as_ref()).await;
+            prepare_model_exchange_trace(&context, &round_id, ai_client.as_ref(), &self.telemetry)
+                .await;
         // Resolve this user policy once for the entire round, before the
         // stream begins. The stream crate receives only this immutable fact;
         // it never reads product configuration directly.
@@ -341,9 +414,45 @@ impl RoundExecutor {
                 Err(_) => Default::default(),
             };
         let allow_normal_tool_json_repair = global_config.ai.allow_tool_json_repair;
+        let tool_definition_tokens_estimate = tool_definitions.as_ref().map(|definitions| {
+            TokenCounter::estimate_tool_definitions_tokens(definitions).min(u64::MAX as usize)
+                as u64
+        });
+        let context_window_tokens =
+            context_window.map(|tokens| tokens.min(u64::MAX as usize) as u64);
+        let (provider_class, model_class, protocol_class) =
+            inference_classes(&ai_client.config.format, context.telemetry_model_class);
+        let inference_observation = start_inference_with_request_facts(
+            &self.telemetry,
+            InferenceStartFacts {
+                provider_class,
+                model_class,
+                protocol_class,
+                context_class: InferenceContextClass::Turn,
+                auth_class: context.telemetry_auth_class,
+            },
+            InferenceRequestFacts {
+                message_count: Some(ai_messages.len().min(u64::MAX as usize) as u64),
+                tool_count: Some(
+                    tool_definitions
+                        .as_ref()
+                        .map_or(0, Vec::len)
+                        .min(u64::MAX as usize) as u64,
+                ),
+            },
+            context.observation_context.clone(),
+        );
+        let inference_context = inference_observation.context();
         let max_attempts = Self::MAX_STREAM_ATTEMPTS;
-        let mut local_attempt_index = 0usize;
-        let (stream_result, send_to_stream_ms, stream_processing_ms, final_trace_handle) = loop {
+        let inference_result: BitFunResult<_> = async {
+            let mut local_attempt_index = 0usize;
+            let (
+                stream_result,
+                send_to_stream_ms,
+                stream_processing_ms,
+                final_trace_handle,
+                request_turn_offset_ms,
+            ) = loop {
             let attempt_number = lifecycle.begin_attempt();
             let attempt_id = format!("{round_id}:attempt:{attempt_number}");
             // Check cancellation before opening a model stream. This catches
@@ -357,6 +466,19 @@ impl RoundExecutor {
             }
 
             let request_started_at = Instant::now();
+            let request_turn_offset_ms = elapsed_ms_u64(context.turn_started_at);
+            let mut attempt_observation = Some(start_inference_attempt(
+                &self.telemetry,
+                InferenceAttemptStartFacts {
+                    attempt_bucket: attempt_bucket(attempt_number),
+                },
+                inference_context.clone(),
+            ));
+            let mut finish_attempt = |facts: InferenceAttemptFinishFacts| {
+                if let Some(observation) = attempt_observation.take() {
+                    observation.finish(facts);
+                }
+            };
             debug!(
                 "Sending request: model={}, messages={}, tools={}, round_attempt={}, local_retry={}/{}",
                 context.effective_model_name,
@@ -370,13 +492,21 @@ impl RoundExecutor {
             let request_trace_config = trace_config
                 .clone()
                 .map(|config| config.with_round_attempt(attempt_id.clone(), attempt_number));
-            let send_future = ai_client.send_message_stream(
+            let send_future = ai_client.send_message_stream_once(
                 ai_messages.clone(),
                 tool_definitions.clone(),
                 request_trace_config,
             );
             let send_result = tokio::select! {
                 _ = cancel_token.cancelled() => {
+                    finish_attempt(InferenceAttemptFinishFacts {
+                        completion: CompletionFacts::cancelled(),
+                        status_class: None,
+                        retryable: Some(false),
+                        ttft_ms: None,
+                        stream_outcome: None,
+                        tool_argument_recovery: None,
+                    });
                     return Err(BitFunError::Cancelled("Execution cancelled".to_string()));
                 }
                 result = send_future => result,
@@ -399,27 +529,52 @@ impl RoundExecutor {
                     error!("AI request failed: {}", e);
                     let provider_error = e.downcast_ref::<AiProviderError>().cloned();
                     let err_msg = e.to_string();
-                    let is_structured_context_overflow = provider_error
+                    let category = provider_error
                         .as_ref()
-                        .is_some_and(|error| error.category == ErrorCategory::ContextOverflow);
-                    if !is_structured_context_overflow
-                        && Self::is_transient_network_error(&err_msg)
-                        && local_attempt_index < max_attempts - 1
-                    {
+                        .map(|error| error.category.clone())
+                        .unwrap_or_else(|| {
+                            bitfun_core_types::errors::classify_ai_error_message(&err_msg)
+                        });
+                    let error = if category == ErrorCategory::ContextOverflow {
+                        BitFunError::RecoverableContextOverflow(
+                            provider_error.clone().unwrap_or_else(|| {
+                                AiProviderError::classified(
+                                    err_msg.clone(),
+                                    ErrorCategory::ContextOverflow,
+                                )
+                            }),
+                        )
+                    } else if let Some(error) = provider_error.clone() {
+                        BitFunError::AIProvider(error)
+                    } else {
+                        BitFunError::AIClient(err_msg.clone())
+                    };
+                    if local_attempt_index < max_attempts - 1 {
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: completion_from_error(&error),
+                            status_class: Some(status_class(Some(&error))),
+                            retryable: Some(true),
+                            ttft_ms: None,
+                            stream_outcome: None,
+                            tool_argument_recovery: None,
+                        });
                         self.record_retry_diagnostic(
                             &context,
                             &round_id,
                             attempt_id.clone(),
                             attempt_number,
-                            "transient_request_error",
+                            "request_error",
                             Some(err_msg.clone()),
                             &[],
                         )
                         .await;
-                        let delay_ms =
-                            Self::retry_delay_ms_for_error(local_attempt_index, &err_msg);
+                        let delay_ms = Self::retry_delay_ms_for_provider_error(
+                            local_attempt_index,
+                            &err_msg,
+                            provider_error.as_ref(),
+                        );
                         warn!(
-                            "Retrying AI request after connection failure: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, delay_ms={}, error={}",
+                            "Retrying AI request after error: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, delay_ms={}, error={}",
                             context.session_id,
                             round_id,
                             attempt_number,
@@ -432,41 +587,22 @@ impl RoundExecutor {
                         local_attempt_index += 1;
                         continue;
                     }
-                    if !is_structured_context_overflow && Self::is_transient_network_error(&err_msg)
-                    {
-                        return Err(BitFunError::AIClient(format!(
-                            "Stream retry budget exhausted after {} attempts: {}",
-                            max_attempts, err_msg
-                        )));
-                    }
-                    // Non-transient errors (429 budget exhausted, context
-                    // overflow, auth, etc.) are returned directly. The error
-                    // message is classified downstream via
-                    // `BitFunError::error_category()` into `ErrorCategory` for
-                    // frontend recovery actions (wait_and_retry, switch_model,
-                    // etc.).
-                    let category = provider_error
-                        .as_ref()
-                        .map(|error| error.category.clone())
-                        .unwrap_or_else(|| {
-                            bitfun_core_types::errors::classify_ai_error_message(&err_msg)
-                        });
-                    let error = if category == ErrorCategory::ContextOverflow {
-                        BitFunError::RecoverableContextOverflow(provider_error.unwrap_or_else(
-                            || AiProviderError::classified(err_msg, ErrorCategory::ContextOverflow),
-                        ))
-                    } else if let Some(error) = provider_error {
-                        BitFunError::AIProvider(error)
-                    } else {
-                        BitFunError::AIClient(err_msg)
-                    };
                     warn!(
-                        "AI request terminal failure: session_id={}, round_id={}, category={:?}, error={}",
+                        "AI request retry budget exhausted: session_id={}, round_id={}, attempts={}, category={:?}, error={}",
                         context.session_id,
                         round_id,
+                        max_attempts,
                         error.error_category(),
                         error
                     );
+                    finish_attempt(InferenceAttemptFinishFacts {
+                        completion: completion_from_error(&error),
+                        status_class: Some(status_class(Some(&error))),
+                        retryable: Some(retryable_error(&error)),
+                        ttft_ms: None,
+                        stream_outcome: None,
+                        tool_argument_recovery: None,
+                    });
                     return Err(error);
                 }
             };
@@ -488,6 +624,14 @@ impl RoundExecutor {
                     "Cancel token detected after AI stream opened, stopping execution: session_id={}",
                     context.session_id
                 );
+                finish_attempt(InferenceAttemptFinishFacts {
+                    completion: CompletionFacts::cancelled(),
+                    status_class: None,
+                    retryable: Some(false),
+                    ttft_ms: None,
+                    stream_outcome: Some(InferenceStreamOutcomeClass::Interrupted),
+                    tool_argument_recovery: None,
+                });
                 return Err(BitFunError::Cancelled("Execution cancelled".to_string()));
             }
 
@@ -524,22 +668,23 @@ impl RoundExecutor {
             {
                 Ok(result) => {
                     let stream_processing_ms = elapsed_ms_u64(stream_started_at);
-                    if Self::has_interrupted_invalid_tool_calls(&result) {
-                        let err_msg = result.partial_recovery_reason.clone().unwrap_or_else(|| {
-                            "Interrupted while streaming tool arguments".to_string()
-                        });
-
-                        if !Self::has_user_visible_assistant_text(&result.full_text)
-                            && local_attempt_index < max_attempts - 1
-                            && Self::is_transient_network_error(&err_msg)
-                        {
+                    let has_interrupted_invalid_tool_calls =
+                        Self::has_interrupted_invalid_tool_calls(&result);
+                    if let Some(partial_recovery_reason) = result.partial_recovery_reason.as_deref()
+                    {
+                        if local_attempt_index < max_attempts - 1 {
+                            let diagnostic_category = if has_interrupted_invalid_tool_calls {
+                                "interrupted_tool_arguments"
+                            } else {
+                                "partial_stream_error"
+                            };
                             self.record_retry_diagnostic(
                                 &context,
                                 &round_id,
                                 attempt_id.clone(),
                                 attempt_number,
-                                "interrupted_tool_arguments",
-                                Some(err_msg.clone()),
+                                diagnostic_category,
+                                Some(partial_recovery_reason.to_string()),
                                 &result.tool_calls,
                             )
                             .await;
@@ -549,31 +694,48 @@ impl RoundExecutor {
                                 Self::trace_response_from_stream_result("partial", &result),
                             )
                             .await;
-                            let delay_ms =
-                                Self::retry_delay_ms_for_error(local_attempt_index, &err_msg);
+                            let delay_ms = Self::retry_delay_ms_for_error(
+                                local_attempt_index,
+                                partial_recovery_reason,
+                            );
                             warn!(
-                                "Retrying stream because tool arguments were interrupted before valid JSON completed: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, delay_ms={}, invalid_tool_calls={}, error={}",
+                                "Retrying stream after partial recovery error: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, delay_ms={}, effective_output={}, tool_calls={}, reason={}",
                                 context.session_id,
                                 round_id,
                                 attempt_number,
                                 local_attempt_index + 1,
                                 max_attempts,
                                 delay_ms,
-                                result
-                                    .tool_calls
-                                    .iter()
-                                    .filter(|tool_call| !tool_call.is_valid())
-                                    .count(),
-                                err_msg
+                                result.has_effective_output,
+                                result.tool_calls.len(),
+                                partial_recovery_reason
                             );
+                            finish_attempt(InferenceAttemptFinishFacts {
+                                completion: CompletionFacts::failed(
+                                    SafeErrorType::NetworkUnavailable,
+                                ),
+                                status_class: Some(StatusClass::Network),
+                                retryable: Some(true),
+                                ttft_ms: result
+                                    .first_visible_output_ms
+                                    .or(result.first_chunk_ms),
+                                stream_outcome: Some(InferenceStreamOutcomeClass::Interrupted),
+                                tool_argument_recovery: Self::tool_argument_recovery(&result),
+                            });
                             Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
                             local_attempt_index += 1;
                             continue;
                         }
+                    }
+
+                    if has_interrupted_invalid_tool_calls {
+                        let err_msg = result.partial_recovery_reason.clone().unwrap_or_else(|| {
+                            "Interrupted while streaming tool arguments".to_string()
+                        });
 
                         if Self::has_user_visible_assistant_text(&result.full_text) {
                             warn!(
-                                "Dropping invalid partial tool calls from interrupted stream; preserving already-streamed assistant text: session_id={}, round_id={}, invalid_tool_calls={}, error={}",
+                                "Dropping invalid partial tool calls after stream retry budget was exhausted; preserving assistant text: session_id={}, round_id={}, invalid_tool_calls={}, error={}",
                                 context.session_id,
                                 round_id,
                                 result
@@ -594,11 +756,26 @@ impl RoundExecutor {
                             recovered
                                 .tool_calls
                                 .retain(|tool_call| tool_call.is_valid());
+                            finish_attempt(InferenceAttemptFinishFacts {
+                                completion: CompletionFacts::degraded(SafeErrorType::Provider),
+                                status_class: Some(StatusClass::Success),
+                                retryable: Some(false),
+                                ttft_ms: recovered
+                                    .first_visible_output_ms
+                                    .or(recovered.first_chunk_ms),
+                                stream_outcome: Some(
+                                    InferenceStreamOutcomeClass::PartialRecovered,
+                                ),
+                                tool_argument_recovery: Some(
+                                    ToolArgumentRecoveryClass::Invalid,
+                                ),
+                            });
                             break (
                                 recovered,
                                 send_to_stream_ms,
                                 stream_processing_ms,
                                 trace_handle,
+                                request_turn_offset_ms,
                             );
                         }
 
@@ -619,6 +796,16 @@ impl RoundExecutor {
                             ),
                         )
                         .await;
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(SafeErrorType::Provider),
+                            status_class: Some(StatusClass::Network),
+                            retryable: Some(false),
+                            ttft_ms: result.first_visible_output_ms.or(result.first_chunk_ms),
+                            stream_outcome: Some(
+                                InferenceStreamOutcomeClass::RetryExhausted,
+                            ),
+                            tool_argument_recovery: Some(ToolArgumentRecoveryClass::Invalid),
+                        });
                         return Err(BitFunError::AIClient(format!(
                             "Stream retry budget exhausted after {} attempts: {}",
                             max_attempts, err_msg
@@ -627,51 +814,6 @@ impl RoundExecutor {
 
                     let no_effective_output = !result.has_effective_output;
                     let is_partial_recovery = result.partial_recovery_reason.is_some();
-                    let partial_recovery_reason =
-                        result.partial_recovery_reason.as_deref().unwrap_or("");
-
-                    if is_partial_recovery
-                        && !Self::has_user_visible_assistant_text(&result.full_text)
-                        && !result.tool_calls.is_empty()
-                        && Self::is_transient_network_error(partial_recovery_reason)
-                        && local_attempt_index < max_attempts - 1
-                    {
-                        self.record_retry_diagnostic(
-                            &context,
-                            &round_id,
-                            attempt_id.clone(),
-                            attempt_number,
-                            "partial_stream_error",
-                            Some(partial_recovery_reason.to_string()),
-                            &result.tool_calls,
-                        )
-                        .await;
-                        Self::complete_model_exchange_trace(
-                            trace_config.as_ref(),
-                            trace_handle.as_ref(),
-                            Self::trace_response_from_stream_result("partial", &result),
-                        )
-                        .await;
-                        let delay_ms = Self::retry_delay_ms_for_error(
-                            local_attempt_index,
-                            partial_recovery_reason,
-                        );
-                        warn!(
-                            "Retrying stream because tool calls arrived on an interrupted network stream without assistant text: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, delay_ms={}, tool_calls={}, reason={}",
-                            context.session_id,
-                            round_id,
-                            attempt_number,
-                            local_attempt_index + 1,
-                            max_attempts,
-                            delay_ms,
-                            result.tool_calls.len(),
-                            partial_recovery_reason
-                        );
-                        Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
-                        local_attempt_index += 1;
-                        continue;
-                    }
-
                     if Self::is_invalid_tool_only_without_text(&result) {
                         let err_msg = "Provider returned only invalid tool arguments".to_string();
                         if local_attempt_index < max_attempts - 1 {
@@ -706,6 +848,20 @@ impl RoundExecutor {
                                 delay_ms,
                                 result.tool_calls.len()
                             );
+                            finish_attempt(InferenceAttemptFinishFacts {
+                                completion: CompletionFacts::failed(
+                                    SafeErrorType::ToolValidation,
+                                ),
+                                status_class: Some(StatusClass::Success),
+                                retryable: Some(true),
+                                ttft_ms: result
+                                    .first_visible_output_ms
+                                    .or(result.first_chunk_ms),
+                                stream_outcome: Some(InferenceStreamOutcomeClass::Complete),
+                                tool_argument_recovery: Some(
+                                    ToolArgumentRecoveryClass::Invalid,
+                                ),
+                            });
                             Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
                             local_attempt_index += 1;
                             continue;
@@ -728,50 +884,95 @@ impl RoundExecutor {
                             ),
                         )
                         .await;
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(SafeErrorType::ToolValidation),
+                            status_class: Some(StatusClass::Success),
+                            retryable: Some(false),
+                            ttft_ms: result.first_visible_output_ms.or(result.first_chunk_ms),
+                            stream_outcome: Some(
+                                InferenceStreamOutcomeClass::RetryExhausted,
+                            ),
+                            tool_argument_recovery: Some(
+                                ToolArgumentRecoveryClass::RetryExhausted,
+                            ),
+                        });
                         return Err(BitFunError::AIClient(format!(
                             "Stream retry budget exhausted after {} attempts: {}",
                             max_attempts, err_msg
                         )));
                     }
 
-                    if no_effective_output && local_attempt_index < max_attempts - 1 {
-                        self.record_retry_diagnostic(
-                            &context,
-                            &round_id,
-                            attempt_id.clone(),
-                            attempt_number,
-                            "no_effective_output",
-                            None,
-                            &[],
-                        )
-                        .await;
+                    if no_effective_output {
+                        let err_msg = result
+                            .partial_recovery_reason
+                            .clone()
+                            .unwrap_or_else(|| "No effective output received".to_string());
+                        if local_attempt_index < max_attempts - 1 {
+                            self.record_retry_diagnostic(
+                                &context,
+                                &round_id,
+                                attempt_id.clone(),
+                                attempt_number,
+                                "no_effective_output",
+                                Some(err_msg.clone()),
+                                &result.tool_calls,
+                            )
+                            .await;
+                            Self::complete_model_exchange_trace(
+                                trace_config.as_ref(),
+                                trace_handle.as_ref(),
+                                Self::error_trace_response_from_stream_result(
+                                    "error",
+                                    err_msg.clone(),
+                                    &result,
+                                ),
+                            )
+                            .await;
+                            let delay_ms =
+                                Self::retry_delay_ms_for_error(local_attempt_index, &err_msg);
+                            warn!(
+                                "Retrying stream because no effective output was received: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, delay_ms={}, error={}",
+                                context.session_id,
+                                round_id,
+                                attempt_number,
+                                local_attempt_index + 1,
+                                max_attempts,
+                                delay_ms,
+                                err_msg
+                            );
+                            Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
+                            local_attempt_index += 1;
+                            continue;
+                        }
+
                         Self::complete_model_exchange_trace(
                             trace_config.as_ref(),
                             trace_handle.as_ref(),
-                            Self::error_trace_response(
+                            Self::error_trace_response_from_stream_result(
                                 "error",
-                                "No effective output received".to_string(),
+                                err_msg.clone(),
+                                &result,
                             ),
                         )
                         .await;
-                        let delay_ms = Self::retry_delay_ms(local_attempt_index);
-                        warn!(
-                            "Retrying stream because no effective output was received: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, delay_ms={}",
-                            context.session_id,
-                            round_id,
-                            attempt_number,
-                            local_attempt_index + 1,
-                            max_attempts,
-                            delay_ms
-                        );
-                        Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
-                        local_attempt_index += 1;
-                        continue;
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(SafeErrorType::Provider),
+                            status_class: Some(StatusClass::Success),
+                            retryable: Some(false),
+                            ttft_ms: result.first_visible_output_ms.or(result.first_chunk_ms),
+                            stream_outcome: Some(
+                                InferenceStreamOutcomeClass::NoEffectiveOutput,
+                            ),
+                            tool_argument_recovery: None,
+                        });
+                        return Err(BitFunError::AIClient(format!(
+                            "Stream retry budget exhausted after {} attempts: {}",
+                            max_attempts, err_msg
+                        )));
                     }
-
                     if is_partial_recovery {
                         warn!(
-                            "Accepting stream partial recovery without retry: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, reason={}",
+                            "Accepting useful partial stream output after retry budget was exhausted: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, reason={}",
                             context.session_id,
                             round_id,
                             attempt_number,
@@ -784,64 +985,99 @@ impl RoundExecutor {
                         );
                     }
 
+                    finish_attempt(InferenceAttemptFinishFacts {
+                        completion: if is_partial_recovery {
+                            CompletionFacts::degraded(SafeErrorType::Provider)
+                        } else {
+                            CompletionFacts::completed()
+                        },
+                        status_class: Some(StatusClass::Success),
+                        retryable: Some(false),
+                        ttft_ms: result.first_visible_output_ms.or(result.first_chunk_ms),
+                        stream_outcome: Some(if is_partial_recovery {
+                            InferenceStreamOutcomeClass::PartialRecovered
+                        } else if result.has_effective_output {
+                            InferenceStreamOutcomeClass::Complete
+                        } else {
+                            InferenceStreamOutcomeClass::NoEffectiveOutput
+                        }),
+                        tool_argument_recovery: Self::tool_argument_recovery(&result),
+                    });
                     break (
                         result,
                         send_to_stream_ms,
                         stream_processing_ms,
                         trace_handle,
+                        request_turn_offset_ms,
                     );
                 }
                 Err(stream_err) => {
                     let err_msg = stream_err.error.to_string();
                     let stream_error_category = stream_err.error.error_category();
-                    let can_retry = !stream_err.has_effective_output
-                        && stream_error_category != ErrorCategory::ContextOverflow
-                        && local_attempt_index < max_attempts - 1
-                        && Self::is_transient_network_error(&err_msg);
+                    let attempt_completion = completion_from_error(&stream_err.error);
+                    let attempt_status_class = status_class(Some(&stream_err.error));
+                    let attempt_retryable = retryable_error(&stream_err.error);
+                    let provider_error = match &stream_err.error {
+                        BitFunError::AIProvider(error)
+                        | BitFunError::RecoverableContextOverflow(error) => Some(error),
+                        _ => None,
+                    };
                     Self::complete_model_exchange_trace(
                         trace_config.as_ref(),
                         trace_handle.as_ref(),
                         Self::error_trace_response("error", err_msg.clone()),
                     )
                     .await;
-                    if can_retry {
+                    if local_attempt_index < max_attempts - 1 {
                         self.record_retry_diagnostic(
                             &context,
                             &round_id,
                             attempt_id.clone(),
                             attempt_number,
-                            "transient_stream_error",
+                            "stream_error",
                             Some(err_msg.clone()),
                             &[],
                         )
                         .await;
-                        let delay_ms =
-                            Self::retry_delay_ms_for_error(local_attempt_index, &err_msg);
+                        let delay_ms = Self::retry_delay_ms_for_provider_error(
+                            local_attempt_index,
+                            &err_msg,
+                            provider_error,
+                        );
                         warn!(
-                            "Retrying stream after transient error with no effective output: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, delay_ms={}, error={}",
+                            "Retrying stream after error: session_id={}, round_id={}, round_attempt={}, local_retry={}/{}, delay_ms={}, effective_output={}, category={:?}, error={}",
                             context.session_id,
                             round_id,
                             attempt_number,
                             local_attempt_index + 1,
                             max_attempts,
                             delay_ms,
+                            stream_err.has_effective_output,
+                            stream_error_category,
                             err_msg
                         );
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: attempt_completion,
+                            status_class: Some(attempt_status_class),
+                            retryable: Some(true),
+                            ttft_ms: None,
+                            stream_outcome: Some(InferenceStreamOutcomeClass::Interrupted),
+                            tool_argument_recovery: None,
+                        });
                         Self::sleep_with_cancellation(delay_ms, &cancel_token).await?;
                         local_attempt_index += 1;
                         continue;
                     }
-                    if stream_error_category != ErrorCategory::ContextOverflow
-                        && Self::is_transient_network_error(&err_msg)
-                    {
-                        return Err(BitFunError::AIClient(format!(
-                            "Stream retry budget exhausted after {} attempts: {}",
-                            max_attempts, err_msg
-                        )));
-                    }
-                    if !stream_err.has_effective_output
-                        && stream_error_category == ErrorCategory::ContextOverflow
-                    {
+                    warn!(
+                        "Stream retry budget exhausted: session_id={}, round_id={}, attempts={}, effective_output={}, category={:?}, error={}",
+                        context.session_id,
+                        round_id,
+                        max_attempts,
+                        stream_err.has_effective_output,
+                        stream_error_category,
+                        err_msg
+                    );
+                    if stream_error_category == ErrorCategory::ContextOverflow {
                         let provider_error = match stream_err.error {
                             BitFunError::AIProvider(error)
                             | BitFunError::RecoverableContextOverflow(error) => error,
@@ -849,10 +1085,112 @@ impl RoundExecutor {
                                 AiProviderError::classified(err_msg, ErrorCategory::ContextOverflow)
                             }
                         };
+                        finish_attempt(InferenceAttemptFinishFacts {
+                            completion: CompletionFacts::failed(
+                                SafeErrorType::ContextOverflow,
+                            ),
+                            status_class: Some(attempt_status_class),
+                            retryable: Some(attempt_retryable),
+                            ttft_ms: None,
+                            stream_outcome: Some(InferenceStreamOutcomeClass::RetryExhausted),
+                            tool_argument_recovery: None,
+                        });
                         return Err(BitFunError::RecoverableContextOverflow(provider_error));
                     }
+                    finish_attempt(InferenceAttemptFinishFacts {
+                        completion: attempt_completion,
+                        status_class: Some(attempt_status_class),
+                        retryable: Some(attempt_retryable),
+                        ttft_ms: None,
+                        stream_outcome: Some(InferenceStreamOutcomeClass::RetryExhausted),
+                        tool_argument_recovery: None,
+                    });
                     return Err(stream_err.error);
                 }
+            }
+            };
+            Ok((
+                stream_result,
+                send_to_stream_ms,
+                stream_processing_ms,
+                final_trace_handle,
+                request_turn_offset_ms,
+            ))
+        }
+        .await;
+        let (
+            stream_result,
+            send_to_stream_ms,
+            stream_processing_ms,
+            final_trace_handle,
+            request_turn_offset_ms,
+        ) = match inference_result {
+            Ok(result) => {
+                let usage = result.0.usage.as_ref();
+                inference_observation.finish_with_response_facts(
+                    InferenceFinishFacts {
+                        completion: if result.0.partial_recovery_reason.is_some() {
+                            CompletionFacts::degraded(SafeErrorType::Provider)
+                        } else {
+                            CompletionFacts::completed()
+                        },
+                        attempt_bucket: attempt_bucket(lifecycle.attempts_started()),
+                        status_class: Some(StatusClass::Success),
+                        retryable: Some(false),
+                        ttft_ms: result.0.first_visible_output_ms.or(result.0.first_chunk_ms),
+                        input_tokens: usage.map(|usage| usage.prompt_token_count as u64),
+                        output_tokens: usage.map(|usage| usage.candidates_token_count as u64),
+                        reasoning_tokens: usage
+                            .and_then(|usage| usage.reasoning_token_count)
+                            .map(u64::from),
+                        cache_read_tokens: usage
+                            .and_then(|usage| usage.cached_content_token_count)
+                            .map(u64::from),
+                        cache_creation_tokens: usage
+                            .and_then(|usage| usage.cache_creation_token_count)
+                            .map(u64::from),
+                        total_tokens: usage.map(|usage| usage.total_token_count as u64),
+                        context_window_tokens,
+                        tool_definition_tokens_estimate,
+                    },
+                    InferenceResponseFacts {
+                        finish_reason: result.0.finish_reason.as_deref().map(finish_reason_class),
+                        has_tool_calls: Some(!result.0.tool_calls.is_empty()),
+                        output_length: Some(result.0.full_text.len() as u64),
+                        reasoning_length: Some(result.0.full_thinking.len() as u64),
+                        output_line_count: Some(result.0.full_text.lines().count() as u64),
+                        reasoning_present: Some(result.0.reasoning_content_present),
+                        reasoning_first_ms: result.0.reasoning_first_ms,
+                        reasoning_duration_ms: result.0.reasoning_duration_ms,
+                        stream_outcome: Some(if result.0.partial_recovery_reason.is_some() {
+                            InferenceStreamOutcomeClass::PartialRecovered
+                        } else if result.0.has_effective_output {
+                            InferenceStreamOutcomeClass::Complete
+                        } else {
+                            InferenceStreamOutcomeClass::NoEffectiveOutput
+                        }),
+                        tool_argument_recovery: Self::tool_argument_recovery(&result.0),
+                    },
+                );
+                result
+            }
+            Err(error) => {
+                inference_observation.finish(InferenceFinishFacts {
+                    completion: completion_from_error(&error),
+                    attempt_bucket: attempt_bucket(lifecycle.attempts_started()),
+                    status_class: Some(status_class(Some(&error))),
+                    retryable: Some(retryable_error(&error)),
+                    ttft_ms: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    reasoning_tokens: None,
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    total_tokens: None,
+                    context_window_tokens,
+                    tool_definition_tokens_estimate,
+                });
+                return Err(error);
             }
         };
 
@@ -897,9 +1235,39 @@ impl RoundExecutor {
         // provider returned usage but before this round settles; dropping that
         // usage makes cancelled turns look unaccounted even though the provider
         // already supplied authoritative counts.
-        if let Some(ref usage) = stream_result.usage {
+        let mut resolved_usage = stream_result.usage.clone();
+        if let Some(ref usage) = resolved_usage {
             self.emit_token_usage_update(&context, usage, context_window, is_subagent)
                 .await;
+        } else if !stream_result.full_text.is_empty() || !stream_result.tool_calls.is_empty() {
+            // Fallback: if streaming response doesn't include usage data,
+            // try a non-streaming request to get token usage stats.
+            warn!(
+                "No token usage data in stream result, attempting non-streaming fallback: session_id={}, turn_id={}, model={}",
+                context.session_id,
+                context.dialog_turn_id,
+                context.effective_model_name
+            );
+            let fallback_result = self
+                .fetch_usage_via_non_stream(&ai_client, &ai_messages, &tool_definitions)
+                .await;
+            if let Ok(Some(fallback_usage)) = fallback_result {
+                resolved_usage = Some(fallback_usage.clone());
+                self.emit_token_usage_update(&context, &fallback_usage, context_window, is_subagent)
+                    .await;
+                info!(
+                    "Successfully fetched usage via non-streaming fallback: session_id={}, input_tokens={}, output_tokens={}",
+                    context.session_id,
+                    fallback_usage.prompt_token_count,
+                    fallback_usage.candidates_token_count
+                );
+            } else {
+                warn!(
+                    "Non-streaming fallback for usage data failed: session_id={}, error={:?}",
+                    context.session_id,
+                    fallback_result.err()
+                );
+            }
         }
 
         // Check cancellation token again after stream processing completes.
@@ -995,6 +1363,9 @@ impl RoundExecutor {
                 partial_recovery_reason: stream_result.partial_recovery_reason.clone(),
                 had_assistant_text: Self::has_user_visible_assistant_text(&stream_result.full_text),
                 had_thinking_content: !stream_result.full_thinking.is_empty(),
+                first_result_ms: stream_result
+                    .first_visible_output_ms
+                    .map(|duration| request_turn_offset_ms.saturating_add(duration)),
             });
         }
 
@@ -1033,6 +1404,7 @@ impl RoundExecutor {
                     lifecycle.attempts_started()
                 )),
                 attempt_index: Some(lifecycle.attempts_started()),
+                observation_context: context.observation_context.clone(),
                 agent_type: context.agent_type.clone(),
                 workspace: context.workspace.clone(),
                 primary_model_facts: context.primary_model_facts.clone(),
@@ -1056,8 +1428,9 @@ impl RoundExecutor {
             let subagent_batch_execution_policy = Self::map_subagent_batch_execution_policy(
                 global_config.ai.subagent_batch_execution_policy,
             );
-            let auto_approve_ask =
-                Self::resolve_auto_approve_ask(&global_config, &context.context_vars);
+            let permission_mode =
+                Self::resolve_permission_mode(&global_config, &context.context_vars);
+            let auto_approve_ask = permission_mode.auto_approve_ask();
 
             let project_rules = match context.workspace.as_ref() {
                 Some(workspace) if workspace.is_remote() => {
@@ -1089,6 +1462,7 @@ impl RoundExecutor {
                 .get(agent_profile_id.as_ref());
             let permission_policy = Self::resolve_permission_policy(
                 &global_config,
+                permission_mode,
                 &project_rules,
                 agent_profile,
                 &context.permission_constraints,
@@ -1250,6 +1624,9 @@ impl RoundExecutor {
             partial_recovery_reason: stream_result.partial_recovery_reason.clone(),
             had_assistant_text: Self::has_user_visible_assistant_text(&stream_result.full_text),
             had_thinking_content: !stream_result.full_thinking.is_empty(),
+            first_result_ms: stream_result
+                .first_visible_output_ms
+                .map(|duration| request_turn_offset_ms.saturating_add(duration)),
         })
     }
 
@@ -1314,6 +1691,25 @@ impl RoundExecutor {
             is_subagent
         );
 
+        let (provider_class, model_class, _) = inference_classes(
+            &context.primary_model_facts.api_format,
+            context.telemetry_model_class,
+        );
+        record_inference_usage(
+            &self.telemetry,
+            InferenceUsageFacts {
+                provider_class,
+                model_class,
+                subagent: is_subagent,
+                input_tokens: usage.prompt_token_count as u64,
+                output_tokens: Some(usage.candidates_token_count as u64),
+                reasoning_tokens: usage.reasoning_token_count.map(u64::from),
+                cache_read_tokens: usage.cached_content_token_count.map(u64::from),
+                cache_creation_tokens: usage.cache_creation_token_count.map(u64::from),
+                total_tokens: Some(usage.total_token_count as u64),
+            },
+        );
+
         self.emit_event(
             AgenticEvent::TokenUsageUpdated {
                 session_id: context.session_id.clone(),
@@ -1326,6 +1722,7 @@ impl RoundExecutor {
                 max_context_tokens: context_window,
                 is_subagent,
                 cached_tokens: usage.cached_content_token_count.map(|v| v as usize),
+                reasoning_tokens: usage.reasoning_token_count.map(|v| v as usize),
                 token_details: token_details_from_usage(usage),
             },
             EventPriority::Normal,
@@ -1421,6 +1818,7 @@ impl RoundExecutor {
             tool_calls,
             usage,
             provider_metadata,
+            finish_reason,
             partial_recovery_reason,
         ) = if let Some(result) = result {
             (
@@ -1432,10 +1830,11 @@ impl RoundExecutor {
                     .as_ref()
                     .and_then(|usage| serde_json::to_value(usage).ok()),
                 result.provider_metadata.clone(),
+                result.finish_reason.clone(),
                 result.partial_recovery_reason.clone(),
             )
         } else {
-            (None, None, None, None, None, None)
+            (None, None, None, None, None, None, None)
         };
 
         ModelExchangeResponseTrace {
@@ -1445,6 +1844,9 @@ impl RoundExecutor {
             tool_calls,
             usage,
             provider_metadata,
+            finish_reason,
+            ttft_ms: result
+                .and_then(|result| result.first_visible_output_ms.or(result.first_chunk_ms)),
             partial_recovery_reason,
             error,
         }
@@ -1482,14 +1884,25 @@ impl RoundExecutor {
     }
 
     fn retry_delay_ms_for_error(attempt_index: usize, error_message: &str) -> u64 {
+        Self::retry_delay_ms_for_provider_error(attempt_index, error_message, None)
+    }
+
+    fn retry_delay_ms_for_provider_error(
+        attempt_index: usize,
+        error_message: &str,
+        provider_error: Option<&AiProviderError>,
+    ) -> u64 {
         let shift = u32::try_from(attempt_index)
             .unwrap_or(u32::MAX)
             .min(Self::MAX_RETRY_EXPONENT_SHIFT);
         let msg = error_message.to_lowercase();
-        let is_rate_limit =
-            msg.contains("429") || msg.contains("rate limit") || msg.contains("too many requests");
+        let is_rate_limit = provider_error
+            .is_some_and(|error| error.category == ErrorCategory::RateLimit)
+            || msg.contains("429")
+            || msg.contains("rate limit")
+            || msg.contains("too many requests");
 
-        if is_rate_limit {
+        let fallback = if is_rate_limit {
             Self::RATE_LIMIT_RETRY_BASE_DELAY_MS
                 .saturating_mul(1u64 << shift)
                 .min(Self::MAX_RATE_LIMIT_DELAY_MS)
@@ -1497,6 +1910,16 @@ impl RoundExecutor {
             Self::RETRY_BASE_DELAY_MS
                 .saturating_mul(1u64 << shift)
                 .min(Self::MAX_EXPONENTIAL_DELAY_MS)
+        };
+
+        match provider_error.and_then(|error| error.retry_after_ms) {
+            Some(retry_after_ms) if is_rate_limit => retry_after_ms
+                .max(fallback)
+                .min(Self::MAX_RATE_LIMIT_DELAY_MS),
+            Some(retry_after_ms) if retry_after_ms > 0 => {
+                retry_after_ms.min(Self::MAX_RATE_LIMIT_DELAY_MS)
+            }
+            Some(_) | None => fallback,
         }
     }
 
@@ -1605,6 +2028,39 @@ impl RoundExecutor {
 
         transient_keywords.iter().any(|k| msg.contains(k))
     }
+
+    /// Fallback method to fetch token usage data via a non-streaming request
+    /// when the streaming response doesn't include usage data.
+    async fn fetch_usage_via_non_stream(
+        &self,
+        ai_client: &Arc<AIClient>,
+        messages: &[AIMessage],
+        tools: &Option<Vec<ToolDefinition>>,
+    ) -> BitFunResult<Option<crate::util::types::ai::GeminiUsage>> {
+        // AIMessage is an alias for bitfun_core_types::Message,
+        // which is exactly what AIClient::send_message_non_stream expects.
+        let messages_owned = messages.to_vec();
+        let tools_owned = tools.clone();
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            ai_client.send_message_non_stream(messages_owned, tools_owned),
+        )
+        .await
+        {
+            Ok(Ok(response)) => {
+                Ok(response.usage)
+            }
+            Ok(Err(e)) => {
+                warn!("Non-streaming fallback request failed: {}", e);
+                Ok(None)
+            }
+            Err(_) => {
+                warn!("Non-streaming fallback request timed out");
+                Ok(None)
+            }
+        }
+    }
 }
 
 fn token_details_from_usage(
@@ -1645,8 +2101,11 @@ mod tests {
     use crate::service::config::types::{AgentProfileConfig, GlobalConfig};
     use crate::util::errors::BitFunError;
     use crate::util::types::ai::GeminiUsage;
-    use bitfun_agent_runtime::permission::AUTO_APPROVE_ASK_CONTEXT_KEY;
+    use bitfun_agent_runtime::permission::{
+        AUTO_APPROVE_ASK_CONTEXT_KEY, PERMISSION_MODE_CONTEXT_KEY,
+    };
     use bitfun_agent_runtime::turn_cancellation::DialogTurnCancellationTokenStore;
+    use bitfun_observability::{InMemorySink, PolicySnapshot, Telemetry, TelemetryLevel};
     use bitfun_runtime_ports::{
         DelegationPolicy, PermissionEffect, PermissionEvaluator, PermissionPolicyPreset,
         PermissionRule,
@@ -1654,7 +2113,7 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
     fn test_round_executor() -> RoundExecutor {
@@ -1664,6 +2123,7 @@ mod tests {
             tool_pipeline: None,
             event_queue,
             cancellation_tokens: DialogTurnCancellationTokenStore::new(),
+            telemetry: bitfun_observability::Telemetry::noop(),
         }
     }
 
@@ -1682,7 +2142,10 @@ mod tests {
 
     #[tokio::test]
     async fn context_overflow_recovery_supersedes_the_current_attempt() {
-        let executor = test_round_executor();
+        let memory = Arc::new(InMemorySink::default());
+        let mut executor = test_round_executor();
+        executor.telemetry =
+            Telemetry::build(PolicySnapshot::new(TelemetryLevel::Debug), memory.clone()).0;
         let mut lifecycle = ModelRoundLifecycle::new();
         let round_id = lifecycle.round_id.clone();
         assert_eq!(lifecycle.begin_attempt(), 1);
@@ -1714,6 +2177,7 @@ mod tests {
             }
             event => panic!("unexpected event: {event:?}"),
         }
+        assert!(memory.debug_records().is_empty());
     }
 
     fn test_round_context() -> RoundContext {
@@ -1724,7 +2188,9 @@ mod tests {
             dialog_turn_id: "turn-1".to_string(),
             turn_index: 0,
             round_number: 0,
+            turn_started_at: Instant::now(),
             round_group_id: None,
+            observation_context: None,
             workspace: None,
             model_exchange_trace_dir: None,
             available_tools: Vec::new(),
@@ -1735,6 +2201,8 @@ mod tests {
             primary_model_facts: tool_runtime::context::PrimaryModelFacts::new(
                 "model-1", "model-1", "openai", true,
             ),
+            telemetry_model_class: bitfun_observability::domains::ModelClass::Other,
+            telemetry_auth_class: None,
             agent_type: "agentic".to_string(),
             context_vars: HashMap::new(),
             permission_constraints: Default::default(),
@@ -1772,6 +2240,7 @@ mod tests {
 
         let resolved = RoundExecutor::resolve_permission_policy(
             &global,
+            bitfun_runtime_ports::PermissionMode::Ask,
             &project_rules,
             Some(&agent),
             &Default::default(),
@@ -1798,38 +2267,65 @@ mod tests {
     }
 
     #[test]
-    fn auto_approve_context_overrides_persisted_interaction_preference() {
+    fn permission_mode_context_overrides_persisted_default_mode() {
+        use bitfun_runtime_ports::PermissionMode;
+
         let mut global = GlobalConfig::default();
         global.tool_permissions.interaction.auto_approve_ask = true;
         let mut context_vars = std::collections::HashMap::new();
 
-        assert!(RoundExecutor::resolve_auto_approve_ask(
-            &global,
-            &context_vars
-        ));
+        // No override: the stored configuration is the default mode.
+        assert_eq!(
+            RoundExecutor::resolve_permission_mode(&global, &context_vars),
+            PermissionMode::AutoApprove
+        );
+
+        // The legacy flag still speaks for the auto-approval half.
         context_vars.insert(
             AUTO_APPROVE_ASK_CONTEXT_KEY.to_string(),
             "false".to_string(),
         );
-
-        assert!(!RoundExecutor::resolve_auto_approve_ask(
-            &global,
-            &context_vars
-        ));
+        assert_eq!(
+            RoundExecutor::resolve_permission_mode(&global, &context_vars),
+            PermissionMode::Ask
+        );
         context_vars.insert(AUTO_APPROVE_ASK_CONTEXT_KEY.to_string(), "true".to_string());
-        assert!(RoundExecutor::resolve_auto_approve_ask(
-            &global,
-            &context_vars
-        ));
-
+        assert_eq!(
+            RoundExecutor::resolve_permission_mode(&global, &context_vars),
+            PermissionMode::AutoApprove
+        );
         context_vars.insert(
             AUTO_APPROVE_ASK_CONTEXT_KEY.to_string(),
             "invalid".to_string(),
         );
-        assert!(RoundExecutor::resolve_auto_approve_ask(
-            &global,
-            &context_vars
-        ));
+        assert_eq!(
+            RoundExecutor::resolve_permission_mode(&global, &context_vars),
+            PermissionMode::AutoApprove
+        );
+
+        // The resolved mode key outranks the legacy flag.
+        context_vars.insert(
+            PERMISSION_MODE_CONTEXT_KEY.to_string(),
+            PermissionMode::FullAccess.as_str().to_string(),
+        );
+        context_vars.insert(
+            AUTO_APPROVE_ASK_CONTEXT_KEY.to_string(),
+            "false".to_string(),
+        );
+        assert_eq!(
+            RoundExecutor::resolve_permission_mode(&global, &context_vars),
+            PermissionMode::FullAccess
+        );
+
+        // An unparseable mode falls back instead of failing open.
+        context_vars.insert(
+            PERMISSION_MODE_CONTEXT_KEY.to_string(),
+            "elevated".to_string(),
+        );
+        assert_eq!(
+            RoundExecutor::resolve_permission_mode(&global, &context_vars),
+            PermissionMode::Ask
+        );
     }
 
     #[tokio::test]
@@ -1870,7 +2366,7 @@ mod tests {
             prompt_token_count: 100,
             candidates_token_count: 20,
             total_token_count: 120,
-            reasoning_token_count: None,
+            reasoning_token_count: Some(7),
             cached_content_token_count: Some(30),
             cache_creation_token_count: None,
         };
@@ -1893,6 +2389,7 @@ mod tests {
                 max_context_tokens: Some(128_000),
                 is_subagent: false,
                 cached_tokens: Some(30),
+                reasoning_tokens: Some(7),
                 ..
             } if session_id == "session-1"
                 && turn_id == "turn-1"
@@ -2014,9 +2511,12 @@ mod tests {
                 cache_creation_token_count: None,
             }),
             provider_metadata: Some(json!({ "finish_reason": "tool_calls" })),
+            finish_reason: Some("tool_calls".to_string()),
             has_effective_output: false,
             first_chunk_ms: Some(10),
             first_visible_output_ms: None,
+            reasoning_first_ms: Some(10),
+            reasoning_duration_ms: Some(25),
             partial_recovery_reason: Some("tool arguments invalid".to_string()),
         };
 
@@ -2041,6 +2541,8 @@ mod tests {
             trace.provider_metadata,
             Some(json!({ "finish_reason": "tool_calls" }))
         );
+        assert_eq!(trace.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(trace.ttft_ms, Some(10));
         assert_eq!(
             trace.usage,
             Some(json!({
@@ -2110,16 +2612,6 @@ mod tests {
     }
 
     #[test]
-    fn is_transient_error_treats_rate_limit_as_transient() {
-        assert!(RoundExecutor::is_transient_network_error(
-            "OpenAI Streaming API error 429 Too Many Requests"
-        ));
-        assert!(RoundExecutor::is_transient_network_error(
-            "rate limit exceeded"
-        ));
-    }
-
-    #[test]
     fn retry_delay_grows_beyond_previous_four_second_cap() {
         assert_eq!(RoundExecutor::retry_delay_ms(0), 500);
         assert_eq!(RoundExecutor::retry_delay_ms(3), 4_000);
@@ -2146,43 +2638,37 @@ mod tests {
     }
 
     #[test]
-    fn is_transient_error_treats_network_errors_as_transient() {
-        assert!(RoundExecutor::is_transient_network_error(
-            "connection reset by peer"
-        ));
-        assert!(RoundExecutor::is_transient_network_error("timeout"));
-    }
+    fn provider_retry_after_is_only_a_delay_hint() {
+        let permission_error = bitfun_core_types::errors::AiProviderError::from_parts(
+            "permission denied".to_string(),
+            Some("openai".to_string()),
+            None,
+            Some(403),
+        )
+        .with_retry_after_ms(Some(1_000));
+        assert_eq!(
+            RoundExecutor::retry_delay_ms_for_provider_error(
+                5,
+                &permission_error.message,
+                Some(&permission_error),
+            ),
+            1_000
+        );
 
-    #[test]
-    fn is_transient_error_treats_context_overflow_as_non_transient() {
-        assert!(!RoundExecutor::is_transient_network_error(
-            "prompt is too long"
-        ));
-    }
-
-    #[test]
-    fn is_transient_error_treats_budget_exhausted_as_non_transient() {
-        // After SSE layer exhausts its retry budget, the round executor must
-        // NOT re-enter another round of attempts (would cause 10×10 = 100
-        // retries).
-        assert!(!RoundExecutor::is_transient_network_error(
-            "OpenAI Streaming API failed after 10 attempts: \
-             OpenAI Streaming API error 429 Too Many Requests"
-        ));
-        assert!(!RoundExecutor::is_transient_network_error(
-            "Stream retry budget exhausted after 10 attempts: timeout"
-        ));
-    }
-
-    #[test]
-    fn is_transient_error_does_not_misclassify_failed_after_without_attempts() {
-        // "failed after " without "attempts:" should NOT be treated as budget
-        // exhausted — it may be a legitimately retryable transient error.
-        assert!(RoundExecutor::is_transient_network_error(
-            "stream failed after connection reset"
-        ));
-        assert!(RoundExecutor::is_transient_network_error(
-            "request failed after timeout"
-        ));
+        let rate_limit_error = bitfun_core_types::errors::AiProviderError::from_parts(
+            "too many requests".to_string(),
+            Some("openai".to_string()),
+            None,
+            Some(429),
+        )
+        .with_retry_after_ms(Some(1_000));
+        assert_eq!(
+            RoundExecutor::retry_delay_ms_for_provider_error(
+                3,
+                &rate_limit_error.message,
+                Some(&rate_limit_error),
+            ),
+            16_000
+        );
     }
 }

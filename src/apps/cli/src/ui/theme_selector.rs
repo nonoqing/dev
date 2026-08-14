@@ -10,6 +10,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::ui::selector_common::PagedSelector;
 use crate::ui::theme::{StyleKind, Theme};
 
 #[derive(Debug, Clone)]
@@ -86,6 +87,14 @@ impl ThemeSelectorState {
         let selected = self.list_state.selected().unwrap_or(0);
         let next = (selected + 1) % self.items.len();
         self.list_state.select(Some(next));
+    }
+
+    pub(super) fn move_page_up(&mut self) {
+        PagedSelector::move_page_up(self)
+    }
+
+    pub(super) fn move_page_down(&mut self) {
+        PagedSelector::move_page_down(self)
     }
 
     pub(super) fn selected_item(&self) -> Option<&ThemeItem> {
@@ -213,6 +222,24 @@ impl ThemeSelectorState {
             }
             _ => None,
         }
+    }
+}
+
+impl PagedSelector for ThemeSelectorState {
+    fn last_area(&self) -> Option<Rect> {
+        self.last_area
+    }
+
+    fn list_state_mut(&mut self) -> &mut ListState {
+        &mut self.list_state
+    }
+
+    fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
     }
 }
 

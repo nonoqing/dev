@@ -245,13 +245,7 @@ impl PluginLoader {
             }
         }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&server_path)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&server_path, perms)?;
-        }
+        crate::path_utils::set_mode(&server_path, 0o755)?;
 
         Ok(server_path)
     }

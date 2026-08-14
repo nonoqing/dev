@@ -45,6 +45,7 @@ impl ChatMode {
             &transcript,
         );
         new_state.current_model_id = summary.model_id;
+        new_state.current_reasoning_preset = summary.reasoning_preset;
         new_state.apply_workspace_binding(workspace_binding);
 
         self.reset_lineage_navigation(chat_view);
@@ -52,7 +53,6 @@ impl ChatMode {
         chat_view.activate_session_composer(&source_session_id, &new_session_id);
         *session_id = new_session_id.clone();
         *chat_state = new_state;
-        chat_state.set_worktree_control_available(!self.agent.is_shared());
         self.agent_type = restored_agent_type;
         self.workspace = chat_state.workspace.clone();
         self.refresh_workspace_git_status(chat_state, rt_handle);
@@ -109,6 +109,7 @@ impl ChatMode {
                         &transcript,
                     );
                     state.current_model_id = session_summary.model_id;
+                    state.current_reasoning_preset = session_summary.reasoning_preset;
                     state.apply_workspace_binding(workspace_binding);
 
                     Ok::<_, anyhow::Error>((state, restored_agent_type, migration_notices))
@@ -121,7 +122,6 @@ impl ChatMode {
         chat_view.activate_session_composer(&previous_session_id, new_session_id);
         *session_id = new_session_id.to_string();
         *chat_state = new_state;
-        chat_state.set_worktree_control_available(!self.agent.is_shared());
         self.agent_type = restored_agent_type;
         self.workspace = chat_state.workspace.clone();
         self.refresh_workspace_git_status(chat_state, rt_handle);
@@ -177,7 +177,6 @@ impl ChatMode {
         chat_view.activate_session_composer(&previous_session_id, &new_session_id);
         *session_id = new_session_id;
         *chat_state = new_state;
-        chat_state.set_worktree_control_available(!self.agent.is_shared());
         self.workspace = chat_state.workspace.clone();
         self.refresh_workspace_git_status(chat_state, rt_handle);
         self.auto_approve_ask_override = None;
@@ -394,11 +393,19 @@ impl ChatMode {
                         format!("{}d ago", elapsed.as_secs() / 86400)
                     }
                 };
+                let pinned = self
+                    .config
+                    .behavior
+                    .pinned_sessions
+                    .iter()
+                    .any(|id| id == &s.session_id);
                 SessionItem {
                     session_id: s.session_id,
                     session_name: s.session_name,
                     last_activity,
                     workspace: project_workspace.clone(),
+                    pinned,
+                    last_active_at_ms: s.last_active_at_ms,
                 }
             })
             .collect();
@@ -467,6 +474,48 @@ impl ChatMode {
         self.pending_session_operation = Some(PendingSessionOperation {
             session_id,
             kind: PendingSessionOperationKind::Delete { session_name },
+            started_at: Instant::now(),
+            slow_notice_shown: false,
+            exit_warning_shown: false,
+            handle,
+        });
+    }
+
+    /// Handle session rename from the session selector
+    fn handle_session_rename(
+        &mut self,
+        item: &SessionItem,
+        new_name: &str,
+        chat_view: &mut ChatView,
+        rt_handle: &tokio::runtime::Handle,
+    ) {
+        if self.pending_session_operation.is_some() {
+            chat_view.set_status(Some(
+                "A Session operation is already in progress. Please wait.".to_string(),
+            ));
+            return;
+        }
+        if new_name == item.session_name {
+            chat_view.set_status(Some("The session already uses that name.".to_string()));
+            return;
+        }
+
+        let session_id = item.session_id.clone();
+        let task_session_id = session_id.clone();
+        let task_session_name = new_name.to_string();
+        let pending_session_name = task_session_name.clone();
+        let agent = self.agent.clone();
+        chat_view.set_status(Some(format!("Renaming session {}...", item.session_name)));
+        let handle = rt_handle.spawn(async move {
+            agent
+                .rename_session(&task_session_id, &task_session_name)
+                .await
+        });
+        self.pending_session_operation = Some(PendingSessionOperation {
+            session_id,
+            kind: PendingSessionOperationKind::Rename {
+                session_name: pending_session_name,
+            },
             started_at: Instant::now(),
             slow_notice_shown: false,
             exit_warning_shown: false,

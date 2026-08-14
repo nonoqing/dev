@@ -81,7 +81,9 @@
     padding: 5px 10px;
     border-radius: 6px;
     background: var(--bf-appearance-token-element-bg-subtle);
-    transition: all var(--bf-appearance-token-motion-fast) var(--bf-appearance-token-easing-standard);
+    transition:
+      transform var(--bf-appearance-token-motion-fast) var(--bf-appearance-token-easing-standard),
+      background-color var(--bf-appearance-token-motion-fast) var(--bf-appearance-token-easing-standard);
     cursor: pointer;
     position: relative;
 
@@ -433,7 +435,7 @@
   }
 
   &__spinner {
-    animation: spin 1s linear infinite;
+    animation: ssh-connection-spin 1s linear infinite;
     margin-right: 6px;
   }
 }
@@ -490,7 +492,7 @@
   }
 }
 
-@keyframes spin {
+@keyframes ssh-connection-spin {
   from {
     transform: rotate(0deg);
   }
@@ -499,7 +501,23 @@
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .ssh-connection-dialog__saved-item {
+    transition: none;
+  }
+
+  .ssh-connection-dialog__form--highlighted,
+  .ssh-connection-dialog__spinner {
+    animation: none;
+  }
+}
+
 /** SSH remote workspace dialog only: above nav fixed popovers (~10k) so the dimmed backdrop captures clicks. */
 .ssh-connection-dialog__modal-overlay {
   z-index: 20000;
+}
+
+/** Portalled Select menus must remain above the dialog's raised overlay. */
+.select__dropdown.ssh-connection-dialog__select-dropdown {
+  z-index: 20001;
 }

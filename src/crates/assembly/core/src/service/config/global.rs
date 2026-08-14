@@ -4,7 +4,7 @@
 
 use super::service::ConfigService;
 use crate::util::errors::*;
-#[cfg(feature = "product-full")]
+#[cfg(feature = "agent-runtime")]
 use log::warn;
 use log::{debug, info};
 use std::sync::Arc;
@@ -47,6 +47,9 @@ pub enum ConfigUpdateEvent {
     AppUpdated,
     /// Configuration fully reloaded.
     ConfigReloaded,
+    /// The models.dev reasoning catalog snapshot changed. Session owners use
+    /// this to reconcile persisted reasoning preset selections.
+    ReasoningCatalogUpdated,
     /// Debug-mode configuration updated.
     DebugModeConfigUpdated {
         /// The new ingest port.
@@ -108,7 +111,7 @@ impl GlobalConfigManager {
 
         info!("Global config service initialized");
 
-        #[cfg(feature = "product-full")]
+        #[cfg(feature = "agent-runtime")]
         {
             match super::mode_config_canonicalizer::canonicalize_agent_profile_configs().await {
                 Ok(report) => {
@@ -168,7 +171,7 @@ impl GlobalConfigManager {
     pub async fn reload() -> BitFunResult<()> {
         let service = Self::get_service().await?;
         service.reload().await?;
-        #[cfg(feature = "product-full")]
+        #[cfg(feature = "agent-runtime")]
         if let Err(error) =
             super::mode_config_canonicalizer::canonicalize_agent_profile_configs().await
         {

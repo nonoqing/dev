@@ -4,6 +4,7 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 description = "BitFun integration service owner crate"
+autotests = false
 
 [lib]
 name = "bitfun_services_integrations"
@@ -14,11 +15,12 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
+ts-rs = { workspace = true, optional = true }
 bitfun-agent-runtime = { path = "../../execution/agent-runtime", optional = true }
 bitfun-agent-tools = { path = "../../execution/tool-contracts", optional = true }
 bitfun-events = { path = "../../contracts/events" }
 bitfun-core-types = { path = "../../contracts/core-types", optional = true }
-bitfun-product-domains = { path = "../../contracts/product-domains", default-features = false, optional = true }
+bitfun-product-domains = { path = "../../contracts/product-domains", optional = true }
 bitfun-runtime-ports = { path = "../../contracts/runtime-ports", optional = true }
 aes-gcm = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }
@@ -26,10 +28,11 @@ anyhow = { workspace = true, optional = true }
 argon2 = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
-bitfun-services-core = { path = "../services-core", default-features = false, optional = true }
+bitfun-services-core = { path = "../services-core", optional = true }
 bzip2 = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 dunce = { workspace = true, optional = true }
+encoding_rs = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 fs2 = { workspace = true, optional = true }
@@ -45,9 +48,9 @@ mac_address = { workspace = true, optional = true }
 md5 = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 oxc = { workspace = true, optional = true }
-qrcode = { workspace = true, optional = true }
+qrcode = { workspace = true, features = ["image", "svg"], optional = true }
 rand = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["http2"], optional = true }
 semver = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
@@ -94,8 +97,22 @@ zbus-secret-service-keyring-store = { workspace = true, optional = true }
 
 [features]
 default = []
-announcement = ["reqwest", "reqwest/rustls", "tokio/fs", "tokio/sync"]
-browser-control = ["anyhow", "bitfun-services-core/process-runtime", "dirs", "reqwest", "reqwest/rustls", "thiserror", "tokio/time"]
+# Derive `ts_rs::TS` on wire types (git/* today). Types that live behind a
+# feature group (e.g. `git`) only derive `TS` when that group is also enabled;
+# app-server's `ts` feature enables `product-full` which pulls `git`.
+ts = ["dep:ts-rs"]
+announcement = ["reqwest", "reqwest/json", "reqwest/rustls", "tokio/fs", "tokio/sync"]
+models-dev = [
+    "reqwest",
+    "reqwest/rustls",
+    "reqwest/system-proxy",
+    "sha2",
+    "tokio/fs",
+    "tokio/sync",
+    "tokio/time",
+    "windows",
+]
+browser-control = ["anyhow", "bitfun-services-core/process-runtime", "dirs", "reqwest", "reqwest/json", "reqwest/rustls", "thiserror", "tokio/time"]
 canvas-runtime = [
     "dep:bitfun-product-domains",
     "oxc",
@@ -104,11 +121,11 @@ canvas-runtime = [
     "urlencoding",
     "uuid",
 ]
-debug-log = ["anyhow", "chrono", "reqwest", "reqwest/rustls", "tokio/rt", "uuid"]
+debug-log = ["anyhow", "chrono", "reqwest", "reqwest/json", "reqwest/rustls", "tokio/rt", "uuid"]
 deep-research = ["bitfun-agent-runtime", "tokio/fs"]
 git = [
     "async-trait",
-    "bitfun-runtime-ports",
+    "bitfun-runtime-ports/git-port",
     "bitfun-services-core/process-runtime",
     "chrono",
     "git2",
@@ -130,13 +147,16 @@ mcp = [
     "anyhow",
     "async-trait",
     "base64",
-    "bitfun-agent-tools",
+    "bitfun-agent-tools/mcp-bridge",
+    "bitfun-services-core/filesystem",
     "bitfun-services-core/process-runtime",
     "futures",
     "hex",
     "rand",
     "reqwest",
+    "reqwest/json",
     "reqwest/rustls",
+    "reqwest/stream",
     "rmcp",
     "rmcp/transport-streamable-http-client-reqwest",
     "sha2",
@@ -159,6 +179,7 @@ miniapp-runtime = [
     "dirs",
     "reqwest",
     "reqwest/rustls",
+    "reqwest/stream",
     "tokio/fs",
     "tokio/io-util",
     "tokio/net",
@@ -180,7 +201,10 @@ miniapp-market = [
     "image",
     "miniapp-runtime",
     "reqwest",
+    "reqwest/json",
+    "reqwest/query",
     "reqwest/rustls",
+    "reqwest/stream",
     "semver",
     "sha2",
     "thiserror",
@@ -222,10 +246,13 @@ remote-connect = [
     "argon2",
     "async-trait",
     "base64",
-    "bitfun-agent-tools",
+    "dep:bitfun-agent-tools",
+    "dep:bitfun-core-types",
+    "bitfun-services-core/filesystem",
     "bitfun-services-core/local-storage",
     "bitfun-services-core/process-runtime",
-    "bitfun-runtime-ports",
+    "bitfun-runtime-ports/agent-api",
+    "bitfun-runtime-ports/remote-workspace-ports",
     "chrono",
     "dirs",
     "futures",
@@ -238,6 +265,9 @@ remote-connect = [
     "qrcode",
     "rand",
     "reqwest",
+    "reqwest/json",
+    "reqwest/multipart",
+    "reqwest/query",
     "reqwest/rustls",
     "rustls",
     "rustls-native-certs",
@@ -262,7 +292,9 @@ remote-ssh = [
     "bitfun-services-core/filesystem",
     "bitfun-services-core/process-runtime",
     "bitfun-services-core/workspace-identity",
-    "bitfun-runtime-ports",
+    "bitfun-runtime-ports/remote-exec-port",
+    "bitfun-runtime-ports/remote-workspace-ports",
+    "bitfun-runtime-ports/workspace-ports",
     "sha2",
     "terminal-core",
     "thiserror",
@@ -282,16 +314,18 @@ remote-ssh-concrete = [
     "anyhow",
     "async-trait",
     "base64",
-    "bitfun-runtime-ports",
+    "dep:bitfun-runtime-ports",
     "chrono",
     "dirs",
     "minisign-verify",
     "rand",
     "reqwest",
     "reqwest/rustls",
+    "reqwest/stream",
     "russh",
     "russh-sftp",
     "russh-keys",
+    "semver",
     "shellexpand",
     "ssh_config",
     "terminal-core",
@@ -304,7 +338,10 @@ review-platform = [
     "chrono",
     "futures",
     "reqwest",
+    "reqwest/json",
+    "reqwest/query",
     "reqwest/rustls",
+    "reqwest/stream",
     "sha2",
     "thiserror",
     "tokio/fs",
@@ -322,6 +359,7 @@ speech = [
     "futures-util",
     "reqwest",
     "reqwest/rustls",
+    "reqwest/stream",
     "sha2",
     "sherpa-onnx",
     "tar",
@@ -349,7 +387,7 @@ workspace-search = [
 process-tree = ["bitfun-services-core/process-runtime"]
 script-tool-runtime = [
     "async-trait",
-    "bitfun-runtime-ports",
+    "bitfun-runtime-ports/script-tool-runtime",
     "process-tree",
     "tokio/io-util",
     "tokio/process",
@@ -358,9 +396,10 @@ script-tool-runtime = [
     "tokio/time",
     "which",
 ]
-web-tools = ["reqwest", "reqwest/rustls", "thiserror"]
+web-tools = ["encoding_rs", "reqwest/json", "reqwest", "reqwest/rustls", "reqwest/cookies", "thiserror"]
 product-full = [
     "announcement",
+    "models-dev",
     "browser-control",
     "canvas-runtime",
     "debug-log",
@@ -384,58 +423,66 @@ ssh_config = ["dep:ssh_config"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "test-util"] }
 
 [[test]]
 name = "debug_log_owner_contracts"
+path = "tests/debug_log_owner_contracts.rs"
 required-features = ["debug-log"]
 
 [[test]]
 name = "script_tool_runtime"
+path = "tests/script_tool_runtime.rs"
 required-features = ["script-tool-runtime"]
 
 [[test]]
 name = "announcement_contracts"
+path = "tests/announcement_contracts.rs"
 required-features = ["announcement"]
 
 [[test]]
 name = "file_watch_contracts"
+path = "tests/file_watch_contracts.rs"
 required-features = ["file-watch"]
 
 [[test]]
 name = "function_agent_contracts"
+path = "tests/function_agent_contracts.rs"
 required-features = ["function-agents"]
 
 [[test]]
 name = "git_contracts"
+path = "tests/git_contracts.rs"
 required-features = ["git"]
 
 [[test]]
 name = "mcp_contracts"
+path = "tests/mcp_contracts.rs"
 required-features = ["mcp"]
 
 [[test]]
 name = "mcp_streamable_http_contracts"
+path = "tests/mcp_streamable_http_contracts.rs"
 required-features = ["mcp"]
 
 [[test]]
 name = "remote_connect_contracts"
+path = "tests/remote_connect_contracts.rs"
 required-features = ["remote-connect"]
 
 [[test]]
 name = "remote_ssh_contracts"
-required-features = ["remote-ssh"]
-
-[[test]]
-name = "remote_ssh_disabled_contracts"
+path = "tests/remote_ssh_contracts.rs"
 required-features = ["remote-ssh"]
 
 [[test]]
 name = "remote_workspace_search_disabled_contracts"
+path = "tests/remote_workspace_search_disabled_contracts.rs"
 required-features = ["remote-ssh", "workspace-search"]
 
 [[test]]
 name = "workspace_search_contracts"
+path = "tests/workspace_search_contracts.rs"
 required-features = ["workspace-search"]
 
 [lints]

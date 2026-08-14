@@ -9,10 +9,11 @@ use serde_json::{Map, Value};
 use std::fmt;
 
 /// The effect produced by a matching permission rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionEffect {
     Allow,
+    #[default]
     Ask,
     Deny,
 }
@@ -187,6 +188,7 @@ impl std::error::Error for PermissionRuntimeCeilingValidationError {}
 pub enum PermissionPolicyPreset {
     #[default]
     Ask,
+    Deny,
     FullAccess,
 }
 
@@ -215,6 +217,7 @@ impl PermissionPolicyPreset {
                 PermissionRule::new("git", "git shortlog *", PermissionEffect::Allow),
                 PermissionRule::new("git", "git branch", PermissionEffect::Allow),
             ],
+            Self::Deny => vec![PermissionRule::new("*", "*", PermissionEffect::Deny)],
             Self::FullAccess => vec![PermissionRule::new("*", "*", PermissionEffect::Allow)],
         }
     }
@@ -235,10 +238,218 @@ pub struct PermissionInteractionConfig {
     pub auto_approve_ask: bool,
 }
 
+/// The interaction mode a dialog turn runs with.
+///
+/// This is the single user-facing selection behind the permission control. It
+/// projects onto the two independent knobs the runtime already owns: the static
+/// policy preset and the interactive auto-answer preference. Keeping both knobs
+/// derived from one value prevents meaningless combinations such as full access
+/// plus auto approval.
+///
+/// A mode never widens the resolved ruleset beyond its preset baseline. Project,
+/// agent, enforced, and constraint layers are evaluated after the baseline, so a
+/// `FullAccess` turn is still bounded by every deny those layers own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Every `ask` decision is raised to the user.
+    #[default]
+    Ask,
+    /// Deny tool calls by default unless a later explicit rule allows them.
+    Deny,
+    /// Static policy is unchanged; interactive `ask` is answered automatically.
+    AutoApprove,
+    /// The policy baseline allows everything the later layers do not deny.
+    FullAccess,
+}
+
+impl PermissionMode {
+    pub const fn preset(self) -> PermissionPolicyPreset {
+        match self {
+            Self::Ask | Self::AutoApprove => PermissionPolicyPreset::Ask,
+            Self::Deny => PermissionPolicyPreset::Deny,
+            Self::FullAccess => PermissionPolicyPreset::FullAccess,
+        }
+    }
+
+    pub const fn auto_approve_ask(self) -> bool {
+        matches!(self, Self::AutoApprove)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Deny => "deny",
+            Self::AutoApprove => "auto_approve",
+            Self::FullAccess => "full_access",
+        }
+    }
+
+    /// Parses a wire value, accepting the surface aliases already used by the
+    /// desktop control and the CLI approval flags.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ask" => Some(Self::Ask),
+            "deny" | "reject" => Some(Self::Deny),
+            "auto" | "auto_approve" | "autoapprove" => Some(Self::AutoApprove),
+            "full_access" | "fullaccess" | "full" => Some(Self::FullAccess),
+            _ => None,
+        }
+    }
+
+    /// Derives the mode a stored configuration represents.
+    ///
+    /// `full_access` wins over the auto-approve preference: the preset already
+    /// resolves every `ask` to `allow`, so auto-answering is not observable.
+    pub const fn from_config(config: &ToolPermissionConfig) -> Self {
+        match config.default_permission {
+            PermissionEffect::Allow => Self::FullAccess,
+            PermissionEffect::Deny => Self::Deny,
+            PermissionEffect::Ask if config.interaction.auto_approve_ask => Self::AutoApprove,
+            PermissionEffect::Ask => Self::Ask,
+        }
+    }
+}
+
+impl fmt::Display for PermissionMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Deserializes an optional mode without letting an unrecognized value fail the
+/// whole record it belongs to.
+///
+/// Persisted carriers must use this. A file written by a newer build can hold a
+/// mode this build has never heard of, and the strict derive would turn that
+/// single field into a parse failure for the entire session state — the failure
+/// mode that made incompatible model settings block startup before.
+///
+/// An unreadable value degrades to `None`, which means "follow the user-level
+/// default". That is the same resolution a session that never chose a mode
+/// gets, so the fallback lands on a value the user configured themselves rather
+/// than on a mode nobody asked for. The selection is intentionally dropped
+/// rather than preserved: a value this build cannot evaluate must not decide
+/// how tools get authorized.
+pub fn deserialize_optional_permission_mode<'de, D>(
+    deserializer: D,
+) -> Result<Option<PermissionMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value
+        .as_ref()
+        .and_then(Value::as_str)
+        .and_then(PermissionMode::parse))
+}
+
+/// Deserializes the user-editable global default without allowing an unknown
+/// value to make the entire application configuration unreadable.
+///
+/// Only the three documented wire values are accepted. Unknown strings and
+/// values of the wrong JSON type safely degrade to `ask`.
+pub fn deserialize_default_permission_or_ask<'de, D>(
+    deserializer: D,
+) -> Result<PermissionEffect, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(match value.as_str() {
+        Some("allow") => PermissionEffect::Allow,
+        Some("deny") => PermissionEffect::Deny,
+        Some("ask") | Some(_) | None => PermissionEffect::Ask,
+    })
+}
+
+/// The layer that owns the effective mode of one dialog turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionModeSource {
+    /// The user-level default applied to sessions that never chose a mode.
+    GlobalDefault,
+    /// A workspace-level default. Reserved: no surface writes this layer yet.
+    Project,
+    /// The session's own selection.
+    Session,
+    /// A single submission's one-off selection.
+    Turn,
+}
+
+/// Ordered mode inputs. Later layers win; every layer is optional except the
+/// global default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PermissionModeLayers {
+    pub global_default: PermissionMode,
+    pub project: Option<PermissionMode>,
+    pub session: Option<PermissionMode>,
+    pub turn: Option<PermissionMode>,
+}
+
+impl PermissionModeLayers {
+    pub const fn new(global_default: PermissionMode) -> Self {
+        Self {
+            global_default,
+            project: None,
+            session: None,
+            turn: None,
+        }
+    }
+
+    pub const fn with_session(mut self, session: Option<PermissionMode>) -> Self {
+        self.session = session;
+        self
+    }
+
+    pub const fn with_turn(mut self, turn: Option<PermissionMode>) -> Self {
+        self.turn = turn;
+        self
+    }
+}
+
+/// One effective mode plus the layer that owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedPermissionMode {
+    pub mode: PermissionMode,
+    pub source: PermissionModeSource,
+}
+
+/// Resolves `turn -> session -> project -> global default`.
+pub const fn resolve_permission_mode(layers: PermissionModeLayers) -> ResolvedPermissionMode {
+    if let Some(mode) = layers.turn {
+        return ResolvedPermissionMode {
+            mode,
+            source: PermissionModeSource::Turn,
+        };
+    }
+    if let Some(mode) = layers.session {
+        return ResolvedPermissionMode {
+            mode,
+            source: PermissionModeSource::Session,
+        };
+    }
+    if let Some(mode) = layers.project {
+        return ResolvedPermissionMode {
+            mode,
+            source: PermissionModeSource::Project,
+        };
+    }
+    ResolvedPermissionMode {
+        mode: layers.global_default,
+        source: PermissionModeSource::GlobalDefault,
+    }
+}
+
 /// Root configuration contract for the `tool_permissions` config section.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ToolPermissionConfig {
+    /// Shared global default used by CLI and Desktop. Legacy configs are
+    /// normalized from the old preset/interaction fields.
+    #[serde(default, deserialize_with = "deserialize_default_permission_or_ask")]
+    pub default_permission: PermissionEffect,
     pub policy: PermissionPolicyConfig,
     pub interaction: PermissionInteractionConfig,
 }
@@ -252,6 +463,10 @@ pub struct ToolPermissionConfig {
 pub struct PermissionPolicyLayers<'a> {
     pub product_defaults: &'a [PermissionRule],
     pub global: &'a PermissionPolicyConfig,
+    /// Effective interaction mode for this resolution. `None` keeps the stored
+    /// global preset, which is the behavior of callers that never resolved a
+    /// session- or turn-scoped mode.
+    pub mode: Option<PermissionMode>,
     pub project: &'a [PermissionRule],
     pub agent: &'a [PermissionRule],
     pub enforced: &'a [PermissionRule],
@@ -266,6 +481,10 @@ pub struct PermissionPolicyLayers<'a> {
 pub struct ChildPermissionPolicyLayers<'a> {
     pub product_defaults: &'a [PermissionRule],
     pub global: &'a PermissionPolicyConfig,
+    /// Effective interaction mode inherited from the delegating turn. The
+    /// parent runtime ceiling is still applied on top, so an inherited
+    /// `FullAccess` cannot widen what the parent restricted.
+    pub mode: Option<PermissionMode>,
     pub project: &'a [PermissionRule],
     pub child_agent: &'a [PermissionRule],
     pub parent_runtime_ceiling: &'a PermissionRuntimeCeiling,
@@ -275,7 +494,7 @@ pub struct ChildPermissionPolicyLayers<'a> {
 /// Expands the configured preset and merges every static rule layer in its
 /// security-significant evaluation order.
 pub fn resolve_permission_policy(layers: PermissionPolicyLayers<'_>) -> ResolvedPermissionPolicy {
-    let baseline = layers.global.preset.baseline_rules();
+    let baseline = effective_preset(layers.mode, layers.global).baseline_rules();
     ResolvedPermissionPolicy::new(
         merge_permission_rule_layers(&[
             layers.product_defaults,
@@ -294,7 +513,7 @@ pub fn resolve_permission_policy(layers: PermissionPolicyLayers<'_>) -> Resolved
 pub fn resolve_child_permission_policy(
     layers: ChildPermissionPolicyLayers<'_>,
 ) -> ResolvedPermissionPolicy {
-    let baseline = layers.global.preset.baseline_rules();
+    let baseline = effective_preset(layers.mode, layers.global).baseline_rules();
     ResolvedPermissionPolicy::new(
         merge_permission_rule_layers(&[
             layers.product_defaults,
@@ -312,6 +531,7 @@ pub fn resolve_child_permission_policy(
 
 /// Identifies the boundary that originated a permission request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionRequestSourceKind {
     ToolCall,
@@ -320,6 +540,7 @@ pub enum PermissionRequestSourceKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionRequestSource {
     pub kind: PermissionRequestSourceKind,
@@ -333,6 +554,7 @@ pub struct PermissionRequestSource {
 /// concrete child execution. These fields only project the existing
 /// delegation relationship to interactive surfaces and audit consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionDelegationContext {
     pub parent_session_id: String,
@@ -351,6 +573,7 @@ pub struct PermissionDelegationContext {
 /// presentation and audit persistence. Raw secrets and unrestricted command
 /// payloads must remain outside this DTO.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionRequest {
     pub request_id: String,
@@ -395,6 +618,7 @@ pub struct PermissionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum PermissionReply {
     Once,
@@ -406,6 +630,7 @@ pub enum PermissionReply {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionReplySource {
     User,
@@ -415,6 +640,7 @@ pub enum PermissionReplySource {
 
 /// Process-local lifecycle event projected to interactive permission surfaces.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(
     tag = "event",
     rename_all = "snake_case",
@@ -437,6 +663,7 @@ pub enum PermissionRequestEvent {
 
 /// A remembered allow scoped by project, action, and resource.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionGrant {
     pub project_id: String,
@@ -456,6 +683,7 @@ impl PermissionGrant {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionGrantKey {
     pub project_id: String,
@@ -464,6 +692,7 @@ pub struct PermissionGrantKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum PermissionAuditEvent {
     Requested,
@@ -478,6 +707,7 @@ pub enum PermissionAuditEvent {
 
 /// An append-only audit fact containing only presentation-safe request data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionAuditRecord {
     pub audit_id: String,
@@ -614,6 +844,14 @@ impl Default for PermissionEvaluator {
     fn default() -> Self {
         Self::for_current_platform()
     }
+}
+
+/// Picks the preset baseline a resolution should expand.
+fn effective_preset(
+    mode: Option<PermissionMode>,
+    global: &PermissionPolicyConfig,
+) -> PermissionPolicyPreset {
+    mode.map_or(global.preset, PermissionMode::preset)
 }
 
 /// Merges global, project, and agent rule layers without changing their order.

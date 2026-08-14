@@ -19,7 +19,7 @@ use super::theme_selector::{ThemeItem, ThemeSelectorState};
 use crate::actions::{
     action_by_id, action_for_alias, removed_management_command_hint, ActionContext, ActionHandler,
     ActionSpec, ActionState, ResolvedKeymap, IMAGE_ATTACHMENTS_REQUIRE_MESSAGE,
-    SHARED_TUI_EMBEDDED_HANDOFF, SHARED_TUI_HELP_NOTE,
+    SHARED_TUI_HELP_NOTE,
 };
 use crate::config::CliConfig;
 /// Startup page module
@@ -30,6 +30,11 @@ use crate::config::CliConfig;
 /// - Model/Agent/Session/Skill/Subagent selector popups
 /// - Random tips
 use anyhow::Result;
+use bitfun_app_server_protocol::model::{
+    AddModelRequest, ModelDefaultSlot, SetModelDefaultRequest, UpdateModelRequest,
+};
+use bitfun_app_server_protocol::skill::SkillSummary;
+use bitfun_app_server_protocol::subagent::SubagentSummary;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::Backend,
@@ -42,21 +47,7 @@ use ratatui::{
 use std::sync::Arc;
 use std::time::Duration;
 
-use bitfun_core::agentic::agents::{
-    get_agent_registry, AgentInfo, SubAgentSource, SubagentListScope, SubagentQueryContext,
-};
-use bitfun_core::agentic::tools::implementations::skills::{
-    mode_overrides::{
-        load_project_mode_skills_document_local, save_project_mode_skills_document_local,
-        set_mode_skill_disabled_in_document, set_user_mode_skill_state,
-    },
-    registry::SkillRegistry,
-    ModeSkillInfo, SkillInfo,
-};
-use bitfun_core::product_runtime::CoreAgentRuntimeCompatibility;
-use bitfun_core::service::config::GlobalConfigManager;
-
-use crate::agent::runtime_client::CliAgentRuntimeClient;
+use crate::agent::tui_client::{TuiAgentClient, TuiAgentMode};
 
 /// Types of popups that can be shown on the startup page
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +62,7 @@ enum PopupType {
     ProviderSelector,
     ModelConfigForm,
     LoginForm,
+    PromptStashSelector,
 }
 
 /// Navigation stack for managing popup hierarchy
@@ -204,22 +196,27 @@ pub(crate) struct StartupPage {
     login_form: LoginFormState,
     theme_preview_original: Option<Theme>,
 
+    // ── Prompt stash ──
+    prompt_stash_selector: crate::ui::prompt_stash_selector::PromptStashSelectorState,
+    stash_non_empty: bool,
+
     // ── System context ──
-    agent: Arc<CliAgentRuntimeClient>,
-    compatibility: Option<CoreAgentRuntimeCompatibility>,
+    agent: Arc<TuiAgentClient>,
 
     // ── State ──
     /// Selected agent type (can be changed via /agent or Tab)
     agent_type: String,
     /// Display name of selected model
     model_display_name: String,
+    /// Explicit model chosen for the new Session being composed. Persisted
+    /// defaults and an agent profile remain inputs only until the user chooses.
+    selected_model_id: Option<String>,
     /// Workspace path for display in bottom bar
     workspace_display: String,
     /// Status message (temporarily shown instead of tip)
     status: Option<String>,
     /// Info popup message (rendered as overlay, dismissed by any key)
     info_popup: Option<String>,
-
     /// Popup navigation stack for back navigation
     popup_stack: PopupStack,
 }
@@ -227,8 +224,7 @@ pub(crate) struct StartupPage {
 impl StartupPage {
     pub(crate) fn new(
         config: CliConfig,
-        agent: Arc<CliAgentRuntimeClient>,
-        compatibility: Option<CoreAgentRuntimeCompatibility>,
+        agent: Arc<TuiAgentClient>,
         default_agent: String,
         workspace: Option<String>,
     ) -> Self {
@@ -289,10 +285,13 @@ impl StartupPage {
             model_config_form: ModelConfigFormState::new(),
             login_form: LoginFormState::new(),
             theme_preview_original: None,
+            prompt_stash_selector: crate::ui::prompt_stash_selector::PromptStashSelectorState::new(
+            ),
+            stash_non_empty: false,
             agent,
-            compatibility,
             agent_type: default_agent,
             model_display_name: String::new(),
+            selected_model_id: None,
             workspace_display: workspace.unwrap_or_else(|| {
                 std::env::current_dir()
                     .ok()
@@ -315,6 +314,21 @@ impl StartupPage {
         &self.agent_type
     }
 
+    /// Set a model ID override (from `--model` flag) for display and session
+    /// composition. The ID is validated when applied to the session; an invalid
+    /// ID logs a warning and falls back to the default model.
+    pub(crate) fn set_model_override(&mut self, model_id: Option<String>) {
+        if model_id.is_some() {
+            self.selected_model_id = model_id;
+        }
+        self.load_current_model_name();
+    }
+
+    /// Return the model explicitly selected for the new Session, if any.
+    pub(crate) fn selected_model_id(&self) -> Option<&str> {
+        self.selected_model_id.as_deref()
+    }
+
     /// Get the current workspace path for this CLI process.
     pub(crate) fn workspace(&self) -> Option<String> {
         if self.workspace_display.is_empty() {
@@ -325,7 +339,10 @@ impl StartupPage {
     }
 
     fn action_state(&self, popup_open: bool) -> ActionState {
-        ActionState::startup(popup_open).with_shared_tui(self.agent.is_shared())
+        ActionState::startup(popup_open)
+            .with_shared_tui(self.agent.is_shared())
+            .with_has_input(!self.text_input.text().trim().is_empty())
+            .with_stash_non_empty(self.stash_non_empty)
     }
 
     /// Get the current CLI config after startup-page edits.
@@ -352,6 +369,7 @@ impl StartupPage {
             || self.provider_selector.is_visible()
             || self.model_config_form.is_visible()
             || self.login_form.is_visible()
+            || self.prompt_stash_selector.is_visible()
     }
 
     pub(crate) fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<StartupResult> {
@@ -371,6 +389,21 @@ impl StartupPage {
                             if key.kind == KeyEventKind::Press
                                 || key.kind == KeyEventKind::Repeat =>
                         {
+                            // Ctrl+Z on Unix: suspend terminal before
+                            // dispatching to handle_key (which only handles
+                            // undo on Windows).
+                            #[cfg(unix)]
+                            if matches!(
+                                (key.code, key.modifiers),
+                                (KeyCode::Char('z'), KeyModifiers::CONTROL)
+                            ) {
+                                tracing::debug!("Suspend terminal triggered");
+                                if let Err(error) = crate::ui::suspend_and_resume_terminal(terminal)
+                                {
+                                    tracing::error!("Failed to suspend terminal: {error}");
+                                }
+                                continue;
+                            }
                             if let Some(result) = self.handle_key(key) {
                                 return Ok(result);
                             }
@@ -426,6 +459,9 @@ impl StartupPage {
             Event::Paste(text) => {
                 if self.login_form.is_visible() {
                     self.login_form.insert_paste(&text);
+                } else if self.session_selector.is_visible() && self.session_selector.is_renaming()
+                {
+                    self.session_selector.insert_rename_text(&text);
                 } else if self.info_popup.is_none() && !self.any_popup_visible() {
                     self.paste_terminal_text(&text);
                 }
@@ -480,6 +516,7 @@ impl StartupPage {
         self.theme_selector.render(frame, size, &self.theme);
         self.provider_selector.render(frame, size, &self.theme);
         self.model_config_form.render_mut(frame, size, &self.theme);
+        self.prompt_stash_selector.render(frame, size, &self.theme);
 
         // Overlay: command palette (Ctrl+P)
         self.command_palette.render(frame, size, &self.theme);
@@ -795,10 +832,36 @@ impl StartupPage {
                         self.apply_model_selection(&selected);
                     }
                 }
-                KeyCode::Char('e') => {
+                KeyCode::Char('e') if self.model_selector.allows_edit() => {
                     if let Some(selected) = self.model_selector.confirm_selection() {
                         self.model_selector.hide();
                         self.edit_model(&selected);
+                    }
+                }
+                // Ctrl+F: toggle favorite on the selected model.
+                KeyCode::Char('f')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.model_selector.allows_edit() =>
+                {
+                    self.model_selector.toggle_favorite();
+                }
+                // Ctrl+A: open the provider list (add-model step 1).
+                KeyCode::Char('a')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.model_selector.allows_edit() =>
+                {
+                    let agent = self.agent.clone();
+                    let catalog = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(agent.model_catalog())
+                    });
+                    match catalog {
+                        Ok(catalog) => {
+                            self.push_current_popup_to_stack();
+                            self.provider_selector.show(catalog.provider_catalog);
+                        }
+                        Err(error) => {
+                            self.status = Some(format!("Failed to load model providers: {error}"));
+                        }
                     }
                 }
                 KeyCode::Esc => self.navigate_back(),
@@ -831,10 +894,13 @@ impl StartupPage {
                 SessionAction::Delete(item) => {
                     self.handle_session_delete(&item);
                 }
-                SessionAction::Close => {
-                    self.navigate_back();
+                SessionAction::Rename(item, new_name) => {
+                    self.handle_session_rename(&item, new_name);
                 }
-                SessionAction::None => {}
+                SessionAction::PinToggle(item) => {
+                    self.handle_session_pin_toggle(&item);
+                }
+                SessionAction::Close | SessionAction::None => {}
             }
             return None;
         }
@@ -901,6 +967,25 @@ impl StartupPage {
             return self.handle_login_form_action(action);
         }
 
+        // ── Prompt stash selector intercepts all keys when visible ──
+
+        if self.prompt_stash_selector.is_visible() {
+            let action = self.prompt_stash_selector.handle_key_event(key);
+            match action {
+                crate::ui::prompt_stash_selector::PromptStashAction::Select(id) => {
+                    self.restore_prompt_stash(&id);
+                }
+                crate::ui::prompt_stash_selector::PromptStashAction::Delete(id) => {
+                    self.delete_prompt_stash(&id);
+                }
+                crate::ui::prompt_stash_selector::PromptStashAction::Close => {
+                    self.navigate_back();
+                }
+                crate::ui::prompt_stash_selector::PromptStashAction::None => {}
+            }
+            return None;
+        }
+
         // ── Command palette intercepts all keys when visible ──
 
         if self.command_palette.is_visible() {
@@ -937,17 +1022,63 @@ impl StartupPage {
 
         // ── Normal key handling ──
 
+        // ── Slash command menu autocomplete keys ──
+        // When the inline command menu (typing "/...") is visible, capture
+        // navigation/confirm keys so they drive the completion list instead
+        // of their default actions (Tab=switch agent, Ctrl+P=command palette,
+        // Enter=submit, Up/Down=cursor, Esc=clear input).
+        if self.command_menu.is_visible() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Tab, _) | (KeyCode::Enter, _) => {
+                    if let Some(action_id) = self.command_menu.apply_selection() {
+                        self.text_input.clear();
+                        self.refresh_command_menu();
+                        return self.handle_palette_action(&action_id);
+                    }
+                    return None;
+                }
+                (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                    self.command_menu.move_up();
+                    return None;
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                    self.command_menu.move_down();
+                    return None;
+                }
+                (KeyCode::Esc, _) => {
+                    // Dismiss the command menu and clear the "/" input.
+                    self.text_input.clear();
+                    self.refresh_command_menu();
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         if let Some(action) = self.keymap.resolve(key, self.action_state(false)) {
             return self.dispatch_action(action, self.action_state(false));
         }
 
         match (key.code, key.modifiers) {
+            // Ctrl+D: exit the app only when the input box is empty.
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) if self.text_input.is_empty() => {
+                return Some(StartupResult::Exit);
+            }
             (KeyCode::Esc, _) => {
                 if !self.text_input.is_empty() {
                     self.clear_composer();
                     self.refresh_command_menu();
                 }
             }
+
+            // Emacs-style editing keys (shared with chat mode via
+            // TextInput::handle_emacs_edit_key). These reach the fallback
+            // because the keymap moved NextTool to Ctrl+N, ClearInput to
+            // Ctrl+L, and ToggleBrowse to Ctrl+B.
+            _ if self.text_input.handle_emacs_edit_key(key) => {
+                self.refresh_command_menu();
+            }
+
             (KeyCode::Up, KeyModifiers::NONE) => {
                 if !self.text_input.move_cursor_up() {
                     self.text_input.set_cursor_home();
@@ -1016,7 +1147,16 @@ impl StartupPage {
                 }
                 self.info_popup = Some(help);
             }
-            ActionHandler::Exit => return Some(StartupResult::Exit),
+            ActionHandler::Exit => {
+                // Ctrl+C on startup: clear input if non-empty, otherwise exit.
+                if !self.text_input.is_empty() {
+                    self.text_input.clear();
+                    self.refresh_command_menu();
+                    self.status = Some("Input cleared".to_string());
+                    return None;
+                }
+                return Some(StartupResult::Exit);
+            }
             ActionHandler::NewSession => {
                 return Some(StartupResult::NewSession { prompt: None });
             }
@@ -1024,8 +1164,21 @@ impl StartupPage {
             ActionHandler::SelectModel => self.show_model_selector(),
             ActionHandler::SelectTheme => self.show_theme_selector(),
             ActionHandler::AddModel => {
-                self.push_current_popup_to_stack();
-                self.provider_selector.show();
+                if !self.agent.is_shared() {
+                    let agent = self.agent.clone();
+                    let catalog = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(agent.model_catalog())
+                    });
+                    match catalog {
+                        Ok(catalog) => {
+                            self.push_current_popup_to_stack();
+                            self.provider_selector.show(catalog.provider_catalog);
+                        }
+                        Err(error) => {
+                            self.status = Some(format!("Failed to load model providers: {error}"));
+                        }
+                    }
+                }
             }
             ActionHandler::OpenAgentSelector => self.show_agent_selector(),
             ActionHandler::SwitchAgent => self.cycle_agent(1),
@@ -1055,6 +1208,7 @@ impl StartupPage {
                 None => self.status = Some("Init prompt not found".to_string()),
             },
             ActionHandler::OpenPalette => {
+                self.refresh_stash_non_empty();
                 self.push_current_popup_to_stack();
                 self.command_palette.show(self.action_state(false));
             }
@@ -1065,6 +1219,9 @@ impl StartupPage {
             ActionHandler::Paste => self.paste_clipboard(),
             ActionHandler::ClosePopups => self.close_all_popups(),
             ActionHandler::NavigateBack => self.navigate_back(),
+            ActionHandler::PromptStash => self.stash_current_prompt(),
+            ActionHandler::PromptStashPop => self.pop_prompt_stash(),
+            ActionHandler::PromptStashList => self.show_prompt_stash(),
             ActionHandler::RenameSession
             | ActionHandler::ViewSubagents
             | ActionHandler::Timeline
@@ -1080,9 +1237,6 @@ impl StartupPage {
             | ActionHandler::WorkspaceDiff
             | ActionHandler::CompactSession
             | ActionHandler::Editor
-            | ActionHandler::PromptStash
-            | ActionHandler::PromptStashPop
-            | ActionHandler::PromptStashList
             | ActionHandler::ToggleTimestamps
             | ActionHandler::ToggleThinking
             | ActionHandler::ToggleToolDetails
@@ -1272,18 +1426,11 @@ impl StartupPage {
     }
 
     fn logout(&mut self) {
-        let logged_in = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(crate::account::is_logged_in())
-        });
-        if !logged_in {
-            self.status = Some("Not logged in.".to_string());
-            return;
-        }
         self.status = Some(
             match tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(crate::account::logout())
+                tokio::runtime::Handle::current().block_on(self.agent.account_logout())
             }) {
-                Ok(()) => "Logged out.".to_string(),
+                Ok(_) => "Logged out.".to_string(),
                 Err(error) => format!("Logout failed: {error}"),
             },
         );
@@ -1343,59 +1490,61 @@ impl StartupPage {
         } else if self.login_form.is_visible() {
             self.popup_stack.push(PopupType::LoginForm);
             self.login_form.hide();
+        } else if self.prompt_stash_selector.is_visible() {
+            self.popup_stack.push(PopupType::PromptStashSelector);
+            self.prompt_stash_selector.hide();
         }
     }
 
     fn show_login_form(&mut self) {
         self.close_all_popups();
         let logged_in = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(crate::account::is_logged_in())
+            tokio::runtime::Handle::current().block_on(self.agent.account_snapshot())
         });
-        if logged_in {
-            self.open_account_panel();
-        } else {
-            self.login_form.show();
-        }
-    }
-
-    fn workspace_path_for_sync(&self) -> std::path::PathBuf {
-        self.workspace_path_buf()
-    }
-
-    fn open_account_panel(&mut self) {
-        let (info, devices, progress) = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let info = crate::account::account_info().await;
-                let devices = crate::account::list_devices().await.unwrap_or_default();
-                let progress = crate::account_sync::current_sync_progress().await;
-                (info, devices, progress)
-            })
-        });
-        match info {
-            Ok(info) => self.login_form.show_account(info, devices, progress),
-            Err(e) => {
-                self.status = Some(format!("Failed to load account: {e}"));
+        match logged_in {
+            Ok(snapshot) if snapshot.logged_in => self.open_account_panel(snapshot),
+            Ok(_) => self.login_form.show(),
+            Err(error) => {
                 self.login_form.show();
+                self.login_form
+                    .set_error(format!("Failed to load account: {error}"));
             }
         }
+    }
+
+    fn open_account_panel(
+        &mut self,
+        snapshot: bitfun_app_server_protocol::account::AccountSnapshotResponse,
+    ) {
+        let Some(info) = snapshot.info else {
+            self.login_form.show();
+            return;
+        };
+        self.login_form
+            .show_account(info, snapshot.devices, snapshot.sync);
     }
 
     fn refresh_account_panel_live(&mut self) {
         if !self.login_form.is_visible() {
             return;
         }
-        let progress = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(crate::account_sync::current_sync_progress())
-        });
+        let Ok(progress) = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.settings_sync_snapshot())
+        }) else {
+            return;
+        };
+        let progress = progress.progress;
         // Refresh devices occasionally while syncing / after done.
         let devices = if matches!(
             progress.status,
-            crate::account_sync::SyncStatus::Syncing | crate::account_sync::SyncStatus::Done
+            bitfun_app_server_protocol::account::SettingsSyncStatus::Syncing
+                | bitfun_app_server_protocol::account::SettingsSyncStatus::Done
         ) {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
-                    .block_on(crate::account::list_devices())
+                    .block_on(self.agent.account_snapshot())
                     .ok()
+                    .map(|snapshot| snapshot.devices)
             })
         } else {
             None
@@ -1404,16 +1553,19 @@ impl StartupPage {
     }
 
     fn start_sync_and_show_account(&mut self, is_first_login: bool) {
-        let Some(compatibility) = self.compatibility.clone() else {
-            self.open_account_panel();
-            self.status = Some(format!(
-                "Account settings sync is unavailable in Shared TUI preview. {SHARED_TUI_EMBEDDED_HANDOFF}"
-            ));
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.agent.settings_sync_start(is_first_login))
+        });
+        if let Err(error) = result {
+            self.status = Some(format!("Account settings sync failed: {error}"));
             return;
-        };
-        let workspace = self.workspace_path_for_sync();
-        crate::account_sync::start_auto_sync_background(compatibility, is_first_login, workspace);
-        self.open_account_panel();
+        }
+        if let Ok(snapshot) = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.account_snapshot())
+        }) {
+            self.open_account_panel(snapshot);
+        }
         self.status = Some(if is_first_login {
             "Sync started (use local / upload settings).".to_string()
         } else {
@@ -1425,13 +1577,11 @@ impl StartupPage {
         match action {
             LoginFormAction::Submit(creds) => {
                 let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(
-                        crate::account::login_with_credentials(
-                            &creds.relay_url,
-                            &creds.username,
-                            &creds.password,
-                        ),
-                    )
+                    tokio::runtime::Handle::current().block_on(self.agent.account_login(
+                        creds.relay_url,
+                        creds.username,
+                        creds.password,
+                    ))
                 });
                 match result {
                     Ok(login) => {
@@ -1449,47 +1599,61 @@ impl StartupPage {
                 }
             }
             LoginFormAction::SyncUseLocal => {
-                if let Err(e) = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(crate::account::finalize_login_after_sync_choice())
-                }) {
-                    self.login_form
-                        .set_error(format!("Finalize login failed: {e}"));
-                    let _ = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(crate::account::logout())
-                    });
-                    self.login_form.show();
-                    return None;
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(self.agent.account_finalize_login(
+                        bitfun_app_server_protocol::account::AccountSyncChoice::Local,
+                    ))
+                });
+                match result {
+                    Ok(snapshot) => {
+                        self.open_account_panel(snapshot);
+                        self.status =
+                            Some("Sync started (use local / upload settings).".to_string());
+                    }
+                    Err(error) => {
+                        self.login_form
+                            .set_error(format!("Finalize login failed: {error}"));
+                        let _ = tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(self.agent.account_logout())
+                        });
+                        self.login_form.show();
+                    }
                 }
-                self.start_sync_and_show_account(true);
             }
             LoginFormAction::SyncUseCloud => {
-                if let Err(e) = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(crate::account::finalize_login_after_sync_choice())
-                }) {
-                    self.login_form
-                        .set_error(format!("Finalize login failed: {e}"));
-                    let _ = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(crate::account::logout())
-                    });
-                    self.login_form.show();
-                    return None;
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(self.agent.account_finalize_login(
+                        bitfun_app_server_protocol::account::AccountSyncChoice::Cloud,
+                    ))
+                });
+                match result {
+                    Ok(snapshot) => {
+                        self.open_account_panel(snapshot);
+                        self.status =
+                            Some("Sync started (use cloud / download settings).".to_string());
+                    }
+                    Err(error) => {
+                        self.login_form
+                            .set_error(format!("Finalize login failed: {error}"));
+                        let _ = tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(self.agent.account_logout())
+                        });
+                        self.login_form.show();
+                    }
                 }
-                self.start_sync_and_show_account(false);
             }
             LoginFormAction::SyncCancel => {
                 let _ = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(crate::account::logout())
+                    tokio::runtime::Handle::current().block_on(self.agent.settings_sync_cancel())
                 });
                 self.login_form.show();
                 self.status = Some("Sync cancelled; logged out.".to_string());
             }
             LoginFormAction::Logout => {
                 match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(crate::account::logout())
+                    tokio::runtime::Handle::current().block_on(self.agent.account_logout())
                 }) {
-                    Ok(()) => {
+                    Ok(_) => {
                         self.login_form.show();
                         self.status = Some("Logged out.".to_string());
                     }
@@ -1504,6 +1668,110 @@ impl StartupPage {
             LoginFormAction::None => {}
         }
         None
+    }
+
+    // ======================== Prompt stash ========================
+
+    fn refresh_stash_non_empty(&mut self) {
+        self.stash_non_empty = crate::prompt_stash::is_stash_non_empty();
+    }
+
+    fn stash_current_prompt(&mut self) {
+        let draft = self.draft_snapshot();
+        if draft.text.trim().is_empty() {
+            self.status = Some("There is no prompt to stash".to_string());
+            return;
+        }
+        match crate::prompt_stash::stash_prompt(&draft, self.workspace().as_deref()) {
+            Ok(()) => {
+                self.close_all_popups();
+                self.clear_composer();
+                self.refresh_command_menu();
+                self.stash_non_empty = true;
+                self.status = Some("Prompt stashed".to_string());
+            }
+            Err(error) => self.status = Some(format!("Could not stash prompt: {error}")),
+        }
+    }
+
+    fn pop_prompt_stash(&mut self) {
+        match crate::prompt_stash::pop_stash(self.workspace().as_deref()) {
+            Ok(Some((draft, references_detached))) => {
+                self.close_all_popups();
+                let mut draft = draft;
+                draft.retain_valid_sources();
+                let cursor = draft.text.chars().count();
+                self.apply_draft_at_cursor(draft, cursor);
+                self.refresh_stash_non_empty();
+                self.status = Some(crate::prompt_stash::restored_status(
+                    "Restored the latest stashed prompt",
+                    references_detached,
+                ));
+            }
+            Ok(None) => self.status = Some("Prompt stash is empty".to_string()),
+            Err(error) => self.status = Some(format!("Could not read prompt stash: {error}")),
+        }
+    }
+
+    fn show_prompt_stash(&mut self) {
+        match crate::prompt_stash::list_stash() {
+            Ok(entries) if entries.is_empty() => {
+                self.status = Some("Prompt stash is empty".to_string());
+            }
+            Ok(entries) => {
+                self.push_current_popup_to_stack();
+                self.prompt_stash_selector.show(entries);
+            }
+            Err(error) => self.status = Some(format!("Could not read prompt stash: {error}")),
+        }
+    }
+
+    fn restore_prompt_stash(&mut self, id: &str) {
+        match crate::prompt_stash::restore_stash(id, self.workspace().as_deref()) {
+            Ok(Some((draft, references_detached))) => {
+                self.close_all_popups();
+                let mut draft = draft;
+                draft.retain_valid_sources();
+                let cursor = draft.text.chars().count();
+                self.apply_draft_at_cursor(draft, cursor);
+                self.refresh_stash_non_empty();
+                self.status = Some(crate::prompt_stash::restored_status(
+                    "Restored stashed prompt",
+                    references_detached,
+                ));
+            }
+            Ok(None) => {
+                self.close_all_popups();
+                self.status = Some(
+                    "That stashed prompt is no longer available; the list was refreshed elsewhere"
+                        .to_string(),
+                );
+            }
+            Err(error) => self.status = Some(format!("Could not restore prompt: {error}")),
+        }
+    }
+
+    fn delete_prompt_stash(&mut self, id: &str) {
+        match crate::prompt_stash::delete_stash_entry(id) {
+            Ok(true) => {
+                self.refresh_stash_non_empty();
+                let entries = crate::prompt_stash::list_stash().unwrap_or_default();
+                if entries.is_empty() {
+                    self.close_all_popups();
+                    self.status = Some("Prompt stash is now empty".to_string());
+                } else {
+                    self.prompt_stash_selector.show(entries);
+                    self.status = Some("Stashed prompt deleted".to_string());
+                }
+            }
+            Ok(false) => {
+                self.status = Some(
+                    "That stashed prompt is no longer available; the list was refreshed elsewhere"
+                        .to_string(),
+                );
+            }
+            Err(error) => self.status = Some(format!("Could not delete prompt: {error}")),
+        }
     }
 
     fn show_session_selector(&mut self) {
@@ -1543,11 +1811,19 @@ impl StartupPage {
                         format!("{}d ago", elapsed.as_secs() / 86400)
                     }
                 };
+                let pinned = self
+                    .config
+                    .behavior
+                    .pinned_sessions
+                    .iter()
+                    .any(|id| id == &s.session_id);
                 SessionItem {
                     session_id: s.session_id,
                     session_name: s.session_name,
                     last_activity,
                     workspace: Some(self.workspace_display.clone()),
+                    pinned,
+                    last_active_at_ms: s.last_active_at_ms,
                 }
             })
             .collect();
@@ -1574,21 +1850,70 @@ impl StartupPage {
         }
     }
 
+    fn handle_session_rename(&mut self, item: &SessionItem, new_name: String) {
+        let agent = Arc::clone(&self.agent);
+        let sid = item.session_id.clone();
+
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { agent.rename_session(&sid, &new_name).await })
+        });
+
+        match result {
+            Ok(()) => {
+                self.session_selector
+                    .update_item_name(&item.session_id, &new_name);
+                self.status = Some(format!("Session renamed: {}", new_name));
+            }
+            Err(e) => {
+                self.status = Some(format!("Failed to rename session: {}", e));
+            }
+        }
+    }
+
+    fn handle_session_pin_toggle(&mut self, item: &SessionItem) {
+        // Reuse SessionSelectorState::toggle_pin (same path as chat mode via
+        // ChatView::session_selector_toggle_pin).
+        self.session_selector.toggle_pin(&item.session_id);
+        // Focused update: add/remove only this session ID from the latest
+        // on-disk snapshot so pins from other workspaces and concurrent Shared
+        // TUI clients are preserved.
+        let session_id = item.session_id.clone();
+        let now_pinned = !item.pinned;
+        if let Err(e) = self.config.update(|cfg| {
+            if now_pinned {
+                if !cfg
+                    .behavior
+                    .pinned_sessions
+                    .iter()
+                    .any(|id| id == &session_id)
+                {
+                    cfg.behavior.pinned_sessions.push(session_id.clone());
+                }
+            } else {
+                cfg.behavior.pinned_sessions.retain(|id| id != &session_id);
+            }
+        }) {
+            tracing::error!("Failed to persist pinned sessions: {}", e);
+        }
+        self.status = Some(format!("Toggled pin: {}", item.session_name));
+    }
+
     fn show_model_selector(&mut self) {
         self.push_current_popup_to_stack();
+        let profile_model_id = self.selected_agent_mode().and_then(|mode| mode.model_id);
+        let explicitly_selected_model_id = self.selected_model_id.clone();
 
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let config_service = GlobalConfigManager::get_service().await.ok()?;
-                let models: Vec<bitfun_core::service::config::AIModelConfig> =
-                    config_service.get_ai_models().await.ok()?;
-                let global_config: bitfun_core::service::config::GlobalConfig =
-                    config_service.get_config(None).await.ok()?;
-
-                let current_model_id =
-                    crate::model_selection::resolve_mode_model_id(&global_config.ai);
-
-                let model_items: Vec<ModelItem> = models
+                let catalog = self.agent.list_models().await.ok()?;
+                let current_model_id = resolve_startup_model_id(
+                    explicitly_selected_model_id,
+                    profile_model_id,
+                    catalog.mode_default_model_id.clone(),
+                );
+                let model_items: Vec<ModelItem> = catalog
+                    .models
                     .into_iter()
                     .filter(|m| m.enabled)
                     .map(|m| ModelItem {
@@ -1596,6 +1921,7 @@ impl StartupPage {
                         name: m.name,
                         provider: m.provider,
                         model_name: m.model_name,
+                        favorite: m.favorite,
                     })
                     .collect();
 
@@ -1605,7 +1931,8 @@ impl StartupPage {
 
         match result {
             Some((models, current_id)) if !models.is_empty() => {
-                self.model_selector.show(models, current_id, true, false);
+                self.model_selector
+                    .show(models, current_id, !self.agent.is_shared(), false);
             }
             _ => {
                 self.status = Some("No available models found.".to_string());
@@ -1616,19 +1943,24 @@ impl StartupPage {
     fn apply_model_selection(&mut self, selected: &ModelItem) {
         let selected_id = selected.id.clone();
         let selected_display_name = format!("{} / {}", selected.model_name, selected.name);
+        let selected_agent_mode = self.selected_agent_mode();
+        let persist_shared_default =
+            should_persist_shared_model_default(selected_agent_mode.as_ref());
 
         let success = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let config_service = match GlobalConfigManager::get_service().await {
-                    Ok(s) => s,
-                    Err(_) => return false,
-                };
-
-                if let Err(e) = config_service
-                    .set_config("ai.agent_model_defaults.mode", &selected_id)
+                if !persist_shared_default {
+                    return true;
+                }
+                if let Err(error) = self
+                    .agent
+                    .set_model_default(SetModelDefaultRequest {
+                        slot: ModelDefaultSlot::Mode,
+                        model_id: Some(selected_id.clone()),
+                    })
                     .await
                 {
-                    tracing::error!("Failed to set future mode model: {}", e);
+                    tracing::error!("Failed to set future mode model: {error}");
                     return false;
                 }
 
@@ -1637,9 +1969,15 @@ impl StartupPage {
         });
 
         if success {
+            self.selected_model_id = Some(selected_id);
             self.model_display_name = selected_display_name.clone();
             self.status = Some(format!("Model switched to: {}", selected_display_name));
-            crate::account_sync::notify_local_settings_changed();
+            if persist_shared_default {
+                let _ = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(self.agent.settings_sync_local_changed())
+                });
+            }
         } else {
             self.status = Some("Failed to switch model".to_string());
         }
@@ -1673,99 +2011,27 @@ impl StartupPage {
                 .as_millis()
         );
 
-        let custom_headers: Option<std::collections::HashMap<String, String>> =
-            if result.custom_headers.is_empty() {
-                None
-            } else {
-                serde_json::from_str(&result.custom_headers).ok()
-            };
-
-        let custom_request_body: Option<String> = if result.custom_request_body.is_empty() {
-            None
-        } else {
-            Some(result.custom_request_body.clone())
-        };
-
-        let model_config = bitfun_core::service::config::AIModelConfig {
-            id: model_id.clone(),
-            name: result.name.clone(),
-            provider: result.provider_format.clone(),
-            model_name: result.model_name.clone(),
-            base_url: result.base_url.clone(),
-            api_key: result.api_key.clone(),
-            context_window: Some(result.context_window),
-            max_tokens: Some(result.max_tokens),
-            enabled: true,
-            enable_thinking_process: result.enable_thinking || result.support_preserved_thinking,
-            skip_ssl_verify: result.skip_ssl_verify,
-            custom_headers,
-            custom_headers_mode: if result.custom_headers_mode.is_empty()
-                || result.custom_headers_mode == "merge"
-            {
-                None
-            } else {
-                Some(result.custom_headers_mode.clone())
-            },
-            custom_request_body,
-            ..Default::default()
-        };
-
         let result_name = result.name.clone();
         let result_model_display = format!("{} / {}", result.model_name, result.name);
+        let request = AddModelRequest {
+            model: result.to_mutation(model_id.clone()),
+            make_primary_if_empty: true,
+        };
 
         let success = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let config_service = match GlobalConfigManager::get_service().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!("Failed to get config service: {}", e);
-                        return false;
-                    }
-                };
-
-                if let Err(e) = config_service.add_ai_model(model_config).await {
-                    tracing::error!("Failed to add AI model: {}", e);
-                    return false;
-                }
-
-                // Auto-set as primary model if no primary model exists
-                match config_service
-                    .get_config::<bitfun_core::service::config::GlobalConfig>(None)
-                    .await
-                {
-                    Ok(global_config) => {
-                        let has_primary = global_config
-                            .ai
-                            .default_models
-                            .primary
-                            .as_ref()
-                            .map(|p| !p.is_empty())
-                            .unwrap_or(false);
-                        if !has_primary {
-                            if let Err(e) = config_service
-                                .set_config("ai.default_models.primary", &model_id)
-                                .await
-                            {
-                                tracing::warn!("Failed to auto-set primary model: {}", e);
-                            } else {
-                                tracing::info!("Auto-set primary model: {}", model_id);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to read config for auto-primary: {}", e);
-                    }
-                }
-
-                true
-            })
+            tokio::runtime::Handle::current()
+                .block_on(self.agent.add_model(request))
+                .map_err(|error| tracing::error!("Failed to add AI model: {error}"))
+                .is_ok()
         });
 
         if success {
             self.model_display_name = result_model_display;
             self.status = Some(format!("Model added: {}", result_name));
             tracing::info!("Added new AI model: {}", model_id);
-            crate::account_sync::notify_local_settings_changed();
+            let _ = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.agent.settings_sync_local_changed())
+            });
             // Reload model name display
             self.load_current_model_name();
         } else {
@@ -1777,41 +2043,16 @@ impl StartupPage {
     fn edit_model(&mut self, selected: &ModelItem) {
         let model_id = selected.id.clone();
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let config_service = GlobalConfigManager::get_service().await.ok()?;
-                let models: Vec<bitfun_core::service::config::AIModelConfig> =
-                    config_service.get_ai_models().await.ok()?;
-                models.into_iter().find(|m| m.id == model_id)
-            })
+            tokio::runtime::Handle::current().block_on(self.agent.get_model(model_id.clone()))
         });
 
         match result {
-            Some(model) => {
-                let form_data = ModelFormResult {
-                    editing_model_id: Some(model.id.clone()),
-                    name: model.name,
-                    model_name: model.model_name,
-                    base_url: model.base_url,
-                    api_key: model.api_key,
-                    provider_format: model.provider.clone(),
-                    context_window: model.context_window.unwrap_or(128000),
-                    max_tokens: model.max_tokens.unwrap_or(8192),
-                    enable_thinking: model.enable_thinking_process,
-                    support_preserved_thinking: model.inline_think_in_text,
-                    skip_ssl_verify: model.skip_ssl_verify,
-                    custom_headers: model
-                        .custom_headers
-                        .map(|h| serde_json::to_string(&h).unwrap_or_default())
-                        .unwrap_or_default(),
-                    custom_headers_mode: model
-                        .custom_headers_mode
-                        .unwrap_or_else(|| "merge".to_string()),
-                    custom_request_body: model.custom_request_body.unwrap_or_default(),
-                };
-                self.model_config_form.show_for_edit(&model.id, &form_data);
+            Ok(response) => {
+                let form_data = ModelFormResult::from_projection(response.model);
+                self.model_config_form.show_for_edit(&model_id, &form_data);
             }
-            None => {
-                self.status = Some("Failed to load model configuration".to_string());
+            Err(error) => {
+                self.status = Some(format!("Failed to load model configuration: {error}"));
             }
         }
     }
@@ -1823,73 +2064,27 @@ impl StartupPage {
             None => return,
         };
 
-        let custom_headers: Option<std::collections::HashMap<String, String>> =
-            if result.custom_headers.is_empty() {
-                None
-            } else {
-                serde_json::from_str(&result.custom_headers).ok()
-            };
-
-        let custom_request_body: Option<String> = if result.custom_request_body.is_empty() {
-            None
-        } else {
-            Some(result.custom_request_body.clone())
-        };
-
-        let model_config = bitfun_core::service::config::AIModelConfig {
-            id: model_id.clone(),
-            name: result.name.clone(),
-            provider: result.provider_format.clone(),
-            model_name: result.model_name.clone(),
-            base_url: result.base_url.clone(),
-            api_key: result.api_key.clone(),
-            context_window: Some(result.context_window),
-            max_tokens: Some(result.max_tokens),
-            enabled: true,
-            enable_thinking_process: result.enable_thinking || result.support_preserved_thinking,
-            skip_ssl_verify: result.skip_ssl_verify,
-            custom_headers,
-            custom_headers_mode: if result.custom_headers_mode.is_empty()
-                || result.custom_headers_mode == "merge"
-            {
-                None
-            } else {
-                Some(result.custom_headers_mode.clone())
-            },
-            custom_request_body,
-            ..Default::default()
-        };
-
         let result_name = result.name.clone();
         let result_model_display = format!("{} / {}", result.model_name, result.name);
+        let request = UpdateModelRequest {
+            model_id: model_id.clone(),
+            model: result.to_mutation(model_id.clone()),
+        };
 
         let success = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let config_service = match GlobalConfigManager::get_service().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!("Failed to get config service: {}", e);
-                        return false;
-                    }
-                };
-
-                if let Err(e) = config_service
-                    .update_ai_model(&model_id, model_config)
-                    .await
-                {
-                    tracing::error!("Failed to update AI model: {}", e);
-                    return false;
-                }
-
-                true
-            })
+            tokio::runtime::Handle::current()
+                .block_on(self.agent.update_model(request))
+                .map_err(|error| tracing::error!("Failed to update AI model: {error}"))
+                .is_ok()
         });
 
         if success {
             self.model_display_name = result_model_display;
             self.status = Some(format!("Model updated: {}", result_name));
             tracing::info!("Updated AI model: {}", model_id);
-            crate::account_sync::notify_local_settings_changed();
+            let _ = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.agent.settings_sync_local_changed())
+            });
             self.load_current_model_name();
         } else {
             self.status = Some("Failed to update model".to_string());
@@ -1920,13 +2115,8 @@ impl StartupPage {
             })
             .collect();
 
-        if self.agent.is_shared() {
-            self.agent_selector
-                .show_modes_only(agent_items, Some(self.agent_type.clone()), true);
-        } else {
-            self.agent_selector
-                .show(agent_items, Some(self.agent_type.clone()), false, true);
-        }
+        self.agent_selector
+            .show(agent_items, Some(self.agent_type.clone()), false, true);
     }
 
     fn handle_agent_selector_action(&mut self, action: AgentSelectorAction) {
@@ -2068,18 +2258,16 @@ impl StartupPage {
 
     fn show_available_skill_list(&mut self) {
         let skills = tokio::task::block_in_place(|| {
-            let workspace = self.workspace_path_buf();
-            let agent_type = self.agent_type.clone();
-            tokio::runtime::Handle::current().block_on(async {
-                let registry = SkillRegistry::global();
-                registry
-                    .get_user_invocable_skills_for_workspace(
-                        Some(workspace.as_path()),
-                        Some(&agent_type),
-                    )
-                    .await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(self.agent.list_skills(self.agent_type.clone(), false))
         });
+        let skills = match skills {
+            Ok(response) => response.skills,
+            Err(error) => {
+                self.status = Some(format!("Could not load skills: {error}"));
+                return;
+            }
+        };
 
         if skills.is_empty() {
             self.status = Some(format!(
@@ -2089,8 +2277,10 @@ impl StartupPage {
             return;
         }
 
-        let skill_items: Vec<SkillItem> =
-            skills.into_iter().map(Self::skill_item_from_info).collect();
+        let skill_items: Vec<SkillItem> = skills
+            .into_iter()
+            .map(Self::skill_item_from_summary)
+            .collect();
 
         if skill_items.is_empty() {
             self.status = Some("No skills found.".to_string());
@@ -2102,19 +2292,20 @@ impl StartupPage {
 
     fn show_skill_config_selector(&mut self) {
         let skills = tokio::task::block_in_place(|| {
-            let workspace = self.workspace_path_buf();
-            let agent_type = self.agent_type.clone();
-            tokio::runtime::Handle::current().block_on(async {
-                let registry = SkillRegistry::global();
-                registry
-                    .get_mode_skill_infos_for_workspace(Some(workspace.as_path()), &agent_type)
-                    .await
-            })
+            tokio::runtime::Handle::current()
+                .block_on(self.agent.list_skills(self.agent_type.clone(), true))
         });
+        let skills = match skills {
+            Ok(response) => response.skills,
+            Err(error) => {
+                self.status = Some(format!("Could not load skills: {error}"));
+                return;
+            }
+        };
 
         let skill_items: Vec<SkillItem> = skills
             .into_iter()
-            .map(Self::skill_item_from_mode_info)
+            .map(Self::skill_item_from_summary)
             .collect();
 
         if skill_items.is_empty() {
@@ -2141,49 +2332,21 @@ impl StartupPage {
     }
 
     fn set_skill_enabled(&mut self, selected: &SkillItem, enabled: bool) {
-        let workspace = self.workspace_path_buf();
         let mode_id = self.agent_type.clone();
         let skill = selected.clone();
 
-        let result: Result<(), String> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match skill.level.as_str() {
-                    "user" => {
-                        set_user_mode_skill_state(
-                            &mode_id,
-                            &skill.key,
-                            enabled,
-                            skill.default_enabled,
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    }
-                    "project" => {
-                        let mut document = load_project_mode_skills_document_local(&workspace)
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        set_mode_skill_disabled_in_document(
-                            &mut document,
-                            &mode_id,
-                            &skill.key,
-                            !enabled,
-                        )
-                        .map_err(|error| error.to_string())?;
-                        save_project_mode_skills_document_local(&workspace, &document)
-                            .await
-                            .map_err(|error| error.to_string())?;
-                    }
-                    other => {
-                        return Err(format!("Unsupported skill level '{}'", other));
-                    }
-                }
-
-                Ok(())
-            })
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.set_skill_enabled(
+                mode_id,
+                skill.key,
+                enabled,
+                skill.default_enabled,
+                skill.level,
+            ))
         });
 
         self.status = Some(match result {
-            Ok(()) => format!(
+            Ok(_) => format!(
                 "Skill '{}' {} for mode '{}'.",
                 selected.name,
                 if enabled { "enabled" } else { "disabled" },
@@ -2193,37 +2356,20 @@ impl StartupPage {
         });
     }
 
-    fn skill_item_from_info(info: SkillInfo) -> SkillItem {
+    fn skill_item_from_summary(info: SkillSummary) -> SkillItem {
         SkillItem {
             key: info.key,
             name: info.name,
             description: info.description,
-            level: info.level.as_str().to_string(),
-            source_slot: info.source_slot,
-            source_label: info.source_label,
-            enabled: true,
-            selected_for_runtime: true,
-            default_enabled: true,
+            level: info.level,
+            source_slot: info.source_slot.unwrap_or_default(),
+            source_label: info.source_label.unwrap_or_default(),
+            enabled: info.enabled,
+            selected_for_runtime: info.selected_for_runtime,
+            default_enabled: info.default_enabled,
             is_shadowed: info.is_shadowed,
             shadowed_by_key: info.shadowed_by_key,
             argument_hint: info.argument_hint,
-        }
-    }
-
-    fn skill_item_from_mode_info(info: ModeSkillInfo) -> SkillItem {
-        SkillItem {
-            key: info.skill.key,
-            name: info.skill.name,
-            description: info.skill.description,
-            level: info.skill.level.as_str().to_string(),
-            source_slot: info.skill.source_slot,
-            source_label: info.skill.source_label,
-            enabled: info.effective_enabled,
-            selected_for_runtime: info.selected_for_runtime,
-            default_enabled: info.default_enabled,
-            is_shadowed: info.skill.is_shadowed,
-            shadowed_by_key: info.skill.shadowed_by_key,
-            argument_hint: info.skill.argument_hint,
         }
     }
 
@@ -2233,20 +2379,17 @@ impl StartupPage {
     }
 
     fn show_available_subagent_list(&mut self) {
-        let registry = get_agent_registry();
         let subagents = tokio::task::block_in_place(|| {
-            let workspace = self.workspace_path_buf();
-            let agent_type = self.agent_type.clone();
-            tokio::runtime::Handle::current().block_on(registry.get_subagents_for_query(
-                &SubagentQueryContext {
-                    parent_agent_type: Some(&agent_type),
-                    workspace_root: Some(workspace.as_path()),
-                    list_scope: SubagentListScope::TaskVisible,
-                    include_disabled: false,
-                    external_sources_supported: false,
-                },
-            ))
+            tokio::runtime::Handle::current()
+                .block_on(self.agent.list_subagents(self.agent_type.clone(), false))
         });
+        let subagents = match subagents {
+            Ok(response) => response.subagents,
+            Err(error) => {
+                self.status = Some(format!("Could not load subagents: {error}"));
+                return;
+            }
+        };
 
         if subagents.is_empty() {
             self.status = Some(format!(
@@ -2258,7 +2401,7 @@ impl StartupPage {
 
         let subagent_items: Vec<SubagentItem> = subagents
             .into_iter()
-            .map(Self::subagent_item_from_info)
+            .map(Self::subagent_item_from_summary)
             .collect();
 
         if subagent_items.is_empty() {
@@ -2270,25 +2413,21 @@ impl StartupPage {
     }
 
     fn show_subagent_config_selector(&mut self) {
-        let registry = get_agent_registry();
         let subagents = tokio::task::block_in_place(|| {
-            let workspace = self.workspace_path_buf();
-            let agent_type = self.agent_type.clone();
-            tokio::runtime::Handle::current().block_on(registry.get_subagents_for_query(
-                &SubagentQueryContext {
-                    parent_agent_type: Some(&agent_type),
-                    workspace_root: Some(workspace.as_path()),
-                    list_scope: SubagentListScope::RegistryManagement,
-                    include_disabled: true,
-                    external_sources_supported: false,
-                },
-            ))
+            tokio::runtime::Handle::current()
+                .block_on(self.agent.list_subagents(self.agent_type.clone(), true))
         });
-
-        let subagent_items: Vec<SubagentItem> = subagents
+        let response = match subagents {
+            Ok(response) => response,
+            Err(error) => {
+                self.status = Some(format!("Could not load subagents: {error}"));
+                return;
+            }
+        };
+        let subagent_items: Vec<SubagentItem> = response
+            .subagents
             .into_iter()
-            .filter(|info| info.subagent_source != Some(SubAgentSource::External))
-            .map(Self::subagent_item_from_info)
+            .map(Self::subagent_item_from_summary)
             .collect();
 
         if subagent_items.is_empty() {
@@ -2318,27 +2457,19 @@ impl StartupPage {
     }
 
     fn set_subagent_enabled(&mut self, selected: &SubagentItem, enabled: bool) {
-        let registry = get_agent_registry();
-        let workspace = self.workspace_path_buf();
         let mode_id = self.agent_type.clone();
         let subagent = selected.clone();
 
-        let result: Result<(), String> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                registry
-                    .update_subagent_override(
-                        &mode_id,
-                        &subagent.id,
-                        enabled,
-                        Some(workspace.as_path()),
-                    )
-                    .await
-                    .map_err(|error| error.to_string())
-            })
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.set_subagent_enabled(
+                mode_id,
+                subagent.id,
+                enabled,
+            ))
         });
 
         self.status = Some(match result {
-            Ok(()) => format!(
+            Ok(_) => format!(
                 "Subagent '{}' {} for mode '{}'.",
                 selected.name,
                 if enabled { "enabled" } else { "disabled" },
@@ -2348,23 +2479,14 @@ impl StartupPage {
         });
     }
 
-    fn subagent_item_from_info(info: AgentInfo) -> SubagentItem {
-        let source = match info.subagent_source {
-            Some(SubAgentSource::Builtin) => "builtin",
-            Some(SubAgentSource::Project) => "project",
-            Some(SubAgentSource::User) => "user",
-            Some(SubAgentSource::External) => "external",
-            None => "builtin",
-        }
-        .to_string();
-
+    fn subagent_item_from_summary(info: SubagentSummary) -> SubagentItem {
         SubagentItem {
             key: info.key,
             id: info.id,
             name: info.name,
             description: info.description,
-            source,
-            enabled: info.effective_enabled,
+            source: info.source,
+            enabled: info.enabled,
         }
     }
 
@@ -2394,6 +2516,8 @@ impl StartupPage {
             self.model_config_form.hide();
         } else if self.login_form.is_visible() {
             self.login_form.hide();
+        } else if self.prompt_stash_selector.is_visible() {
+            self.prompt_stash_selector.hide();
         }
 
         // If there's a previous popup in the stack, re-show it
@@ -2409,6 +2533,7 @@ impl StartupPage {
                 PopupType::ProviderSelector => self.provider_selector.reshow(),
                 PopupType::ModelConfigForm => self.model_config_form.reshow(),
                 PopupType::LoginForm => self.login_form.show(),
+                PopupType::PromptStashSelector => self.prompt_stash_selector.reshow(),
             }
         }
     }
@@ -2427,15 +2552,25 @@ impl StartupPage {
         self.provider_selector.hide();
         self.model_config_form.hide();
         self.login_form.hide();
+        self.prompt_stash_selector.hide();
         self.popup_stack.clear();
     }
 
-    fn get_mode_agents(&self) -> Vec<AgentInfo> {
-        let registry = get_agent_registry();
-        let modes = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(registry.get_modes_info())
-        });
-        modes
+    fn get_mode_agents(&self) -> Vec<TuiAgentMode> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.agent.available_agent_modes())
+                .unwrap_or_else(|error| {
+                    tracing::warn!("Failed to load main agent modes: {error}");
+                    Vec::new()
+                })
+        })
+    }
+
+    fn selected_agent_mode(&self) -> Option<TuiAgentMode> {
+        self.get_mode_agents()
+            .into_iter()
+            .find(|mode| mode.id == self.agent_type)
     }
 
     fn cycle_agent(&mut self, offset: isize) {
@@ -2458,48 +2593,21 @@ impl StartupPage {
     }
 
     fn load_current_model_name(&mut self) {
+        let explicitly_selected_model_id = self.selected_model_id.clone();
+        let profile_model_id = self.selected_agent_mode().and_then(|mode| mode.model_id);
         let result: Option<String> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let config_service = GlobalConfigManager::get_service().await.ok()?;
-                let models: Vec<bitfun_core::service::config::AIModelConfig> =
-                    config_service.get_ai_models().await.ok()?;
-                let global_config: bitfun_core::service::config::GlobalConfig =
-                    config_service.get_config(None).await.ok()?;
-
-                let model_id = crate::model_selection::resolve_mode_model_id(&global_config.ai)?;
-
-                fn provider_display_name(
-                    model: &bitfun_core::service::config::AIModelConfig,
-                ) -> String {
-                    let raw_name = model.name.trim();
-                    let model_name = model.model_name.trim();
-                    if !raw_name.is_empty() && !model_name.is_empty() {
-                        let dashed_suffix = format!(" - {}", model_name);
-                        let slash_suffix = format!("/{}", model_name);
-                        if let Some(provider) = raw_name.strip_suffix(&dashed_suffix) {
-                            return provider.trim().to_string();
-                        }
-                        if let Some(provider) = raw_name.strip_suffix(&slash_suffix) {
-                            return provider.trim().to_string();
-                        }
-                    }
-                    if raw_name.is_empty() {
-                        model.provider.clone()
-                    } else {
-                        raw_name.to_string()
-                    }
-                }
-
-                fn model_display_name(
-                    model: &bitfun_core::service::config::AIModelConfig,
-                ) -> String {
-                    format!("{} / {}", model.model_name, provider_display_name(model))
-                }
-
-                models
+                let catalog = self.agent.list_models().await.ok()?;
+                let model_id = resolve_startup_model_id(
+                    explicitly_selected_model_id,
+                    profile_model_id,
+                    catalog.mode_default_model_id.clone(),
+                )?;
+                catalog
+                    .models
                     .iter()
                     .find(|model| model.id == model_id)
-                    .map(model_display_name)
+                    .map(crate::model_selection::tui_model_display_name)
             })
         });
 
@@ -2517,10 +2625,66 @@ impl StartupPage {
     }
 }
 
+fn resolve_startup_model_id(
+    explicitly_selected_model_id: Option<String>,
+    profile_model_id: Option<String>,
+    default_model_id: Option<String>,
+) -> Option<String> {
+    explicitly_selected_model_id
+        .or(profile_model_id)
+        .or(default_model_id)
+}
+
+fn should_persist_shared_model_default(mode: Option<&TuiAgentMode>) -> bool {
+    mode.is_some_and(|mode| !mode.is_external)
+}
+
 #[cfg(test)]
 mod logo_contract_tests {
     use super::*;
     use ratatui::style::Color;
+
+    #[test]
+    fn explicit_startup_model_overrides_profile_and_default() {
+        assert_eq!(
+            resolve_startup_model_id(
+                Some("explicit".to_string()),
+                Some("profile".to_string()),
+                Some("default".to_string()),
+            )
+            .as_deref(),
+            Some("explicit")
+        );
+        assert_eq!(
+            resolve_startup_model_id(
+                None,
+                Some("profile".to_string()),
+                Some("default".to_string()),
+            )
+            .as_deref(),
+            Some("profile")
+        );
+    }
+
+    #[test]
+    fn external_or_unknown_startup_modes_do_not_change_the_shared_default() {
+        let local = TuiAgentMode {
+            id: "agentic".to_string(),
+            description: String::new(),
+            model_id: None,
+            is_external: false,
+        };
+        let external = TuiAgentMode {
+            id: "reviewer".to_string(),
+            description: String::new(),
+            model_id: None,
+            is_external: true,
+        };
+
+        assert!(should_persist_shared_model_default(Some(&local)));
+        assert!(!should_persist_shared_model_default(Some(&external)));
+        assert!(!should_persist_shared_model_default(None));
+    }
 
     #[test]
     fn fancy_logo_keeps_line_order_and_color_style_mapping() {

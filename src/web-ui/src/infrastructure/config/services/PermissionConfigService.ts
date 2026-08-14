@@ -7,6 +7,7 @@ const log = createLogger('PermissionConfig');
 const CONFIG_PATH = 'tool_permissions';
 
 export const DEFAULT_TOOL_PERMISSION_CONFIG: ToolPermissionConfig = {
+  default_permission: 'ask',
   policy: {
     preset: 'ask',
     rules: [],
@@ -26,21 +27,39 @@ function normalizeRule(value: unknown): PermissionRule | null {
 
 export function normalizeToolPermissionConfig(value: unknown): ToolPermissionConfig {
   const input = value && typeof value === 'object'
-    ? value as { policy?: { preset?: unknown; rules?: unknown }; interaction?: { auto_approve_ask?: unknown } }
+    ? value as { default_permission?: unknown; policy?: { preset?: unknown; rules?: unknown }; interaction?: { auto_approve_ask?: unknown } }
     : {};
   const policy = input.policy ?? {};
   const interaction = input.interaction ?? {};
+  const hasDefaultPermission = Object.prototype.hasOwnProperty.call(input, 'default_permission');
+  const hasValidDefaultPermission = input.default_permission === 'ask'
+    || input.default_permission === 'allow'
+    || input.default_permission === 'deny';
+  const defaultPermission: PermissionEffect = input.default_permission === 'allow' || input.default_permission === 'deny'
+    ? input.default_permission
+    : hasDefaultPermission
+      ? 'ask'
+      : policy.preset === 'full_access'
+      ? 'allow'
+      : policy.preset === 'deny'
+        ? 'deny'
+        : 'ask';
   const rules = Array.isArray(policy.rules)
     ? policy.rules.map(normalizeRule).filter((rule): rule is PermissionRule => rule !== null)
     : [];
 
   return {
+    default_permission: defaultPermission,
     policy: {
-      preset: policy.preset === 'full_access' ? 'full_access' : 'ask',
+      preset: hasDefaultPermission && !hasValidDefaultPermission
+        ? 'ask'
+        : policy.preset === 'full_access' || policy.preset === 'deny' ? policy.preset : 'ask',
       rules,
     },
     interaction: {
-      auto_approve_ask: interaction.auto_approve_ask === true,
+      auto_approve_ask: hasDefaultPermission && !hasValidDefaultPermission
+        ? false
+        : interaction.auto_approve_ask === true,
     },
   };
 }
@@ -52,6 +71,7 @@ export class PermissionConfigService {
     } catch (error) {
       log.warn('Failed to load tool permission config, using safe defaults', error);
       return {
+        default_permission: DEFAULT_TOOL_PERMISSION_CONFIG.default_permission,
         policy: { preset: DEFAULT_TOOL_PERMISSION_CONFIG.policy.preset, rules: [] },
         interaction: { auto_approve_ask: DEFAULT_TOOL_PERMISSION_CONFIG.interaction.auto_approve_ask },
       };
@@ -67,6 +87,10 @@ export class PermissionConfigService {
 
   async setPreset(preset: ToolPermissionConfig['policy']['preset']): Promise<ToolPermissionConfig> {
     await configManager.setConfig(`${CONFIG_PATH}.policy.preset`, preset);
+    await configManager.setConfig(
+      `${CONFIG_PATH}.default_permission`,
+      preset === 'full_access' ? 'allow' : preset === 'deny' ? 'deny' : 'ask',
+    );
     globalEventBus.emit('permission:config:updated');
     return this.getConfig();
   }

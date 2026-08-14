@@ -88,6 +88,10 @@ pub(crate) struct BehaviorConfig {
     pub default_agent: String,
     /// Check the official Linux release and fallback mirror for CLI updates.
     pub auto_update: bool,
+    /// Session IDs pinned in the session selector (Ctrl+F). Persisted so pins
+    /// survive closing and reopening the selector or restarting the CLI.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pinned_sessions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +115,12 @@ pub(crate) struct ShortcutsConfig {
     /// Explicit legacy override for opening the command palette.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub menu: Option<String>,
+    /// Terminal suspend key binding (Ctrl+Z on Unix; "none" on Windows)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_suspend: Option<String>,
+    /// Input undo key bindings (list of keys)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub input_undo: Vec<String>,
 }
 
 impl Default for UiConfig {
@@ -137,6 +147,7 @@ impl Default for BehaviorConfig {
             confirm_dangerous: true,
             default_agent: "agentic".to_string(),
             auto_update: true,
+            pinned_sessions: Vec::new(),
         }
     }
 }
@@ -198,13 +209,41 @@ impl CliConfig {
     /// Load configuration
     pub(crate) fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
-        let config = Self::load_at(&config_path)?;
+        let mut config = Self::load_at(&config_path)?;
         if !config_path.exists() {
             tracing::info!("Config file not found, using defaults");
         } else {
             tracing::info!("Loaded config: {:?}", config_path);
         }
+        config.resolve();
         Ok(config)
+    }
+
+    /// Resolve platform-specific shortcut assignments.
+    ///
+    /// On Windows: `terminal_suspend` is forced to `"none"` (disabled), and
+    /// `Ctrl+Z` is added to `input_undo` unless the user already configured it.
+    ///
+    /// On Unix: `terminal_suspend` keeps the user/default value (`"Ctrl+Z"`).
+    pub(crate) fn resolve(&mut self) {
+        if cfg!(target_os = "windows") {
+            self.shortcuts.terminal_suspend = Some("none".to_string());
+            let has_ctrl_z = self
+                .shortcuts
+                .input_undo
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case("Ctrl+Z"));
+            if !has_ctrl_z {
+                self.shortcuts.input_undo.insert(0, "Ctrl+Z".to_string());
+            }
+        } else if self
+            .shortcuts
+            .terminal_suspend
+            .as_deref()
+            .map_or(true, |v| v.is_empty())
+        {
+            self.shortcuts.terminal_suspend = Some("Ctrl+Z".to_string());
+        }
     }
 
     /// Save configuration
@@ -316,6 +355,7 @@ mod tests {
         assert!(config.behavior.confirm_dangerous);
         assert_eq!(config.behavior.default_agent, "agentic");
         assert!(config.behavior.auto_update);
+        assert!(config.behavior.pinned_sessions.is_empty());
         assert_eq!(config.workspace.default_path, ".");
         assert_eq!(
             config.workspace.exclude_patterns,
@@ -324,6 +364,8 @@ mod tests {
         assert_eq!(config.shortcuts.send_message, None);
         assert_eq!(config.shortcuts.interrupt, None);
         assert_eq!(config.shortcuts.menu, None);
+        assert_eq!(config.shortcuts.terminal_suspend, None);
+        assert!(config.shortcuts.input_undo.is_empty());
         assert!(serialized.contains("timestamps = false"), "{serialized}");
         assert!(serialized.contains("thinking = \"hide\""), "{serialized}");
         assert!(serialized.contains("tool_details = true"), "{serialized}");
@@ -393,6 +435,46 @@ mod tests {
         assert_eq!(config.shortcuts.send_message.as_deref(), Some("Ctrl+S"));
         assert_eq!(config.shortcuts.interrupt.as_deref(), Some("Ctrl+X"));
         assert_eq!(config.shortcuts.menu.as_deref(), Some("Alt+M"));
+    }
+
+    #[test]
+    fn resolve_keeps_unix_terminal_suspend() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        let mut config = CliConfig::default();
+        config.shortcuts.terminal_suspend = Some("Ctrl+Z".to_string());
+        config.resolve();
+        assert_eq!(config.shortcuts.terminal_suspend.as_deref(), Some("Ctrl+Z"));
+    }
+
+    #[test]
+    fn resolve_disables_terminal_suspend_on_windows() {
+        if !cfg!(target_os = "windows") {
+            return;
+        }
+        let mut config = CliConfig::default();
+        config.resolve();
+        assert_eq!(config.shortcuts.terminal_suspend.as_deref(), Some("none"));
+        assert!(config.shortcuts.input_undo.contains(&"Ctrl+Z".to_string()));
+    }
+
+    #[test]
+    fn resolve_does_not_duplicate_ctrl_z_on_windows() {
+        if !cfg!(target_os = "windows") {
+            return;
+        }
+        let mut config = CliConfig::default();
+        // Simulate user already configuring Ctrl+Z in input_undo
+        config.shortcuts.input_undo = vec!["Ctrl+Z".to_string()];
+        config.resolve();
+        let count = config
+            .shortcuts
+            .input_undo
+            .iter()
+            .filter(|k| k.eq_ignore_ascii_case("Ctrl+Z"))
+            .count();
+        assert_eq!(count, 1);
     }
 
     #[test]

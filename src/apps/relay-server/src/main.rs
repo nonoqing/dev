@@ -24,6 +24,29 @@ async fn main() -> anyhow::Result<()> {
     let cfg = RelayConfig::from_env();
     info!("BitFun Relay Server v{}", env!("CARGO_PKG_VERSION"));
 
+    let telemetry_runtime = bitfun_observability_otel::TelemetryRuntimeHandle::new(
+        bitfun_observability_otel::TelemetryRuntimeMetadata::new(
+            bitfun_observability::TelemetryEntrypoint::Relay,
+            std::path::PathBuf::from(&cfg.room_web_dir).join("runtime"),
+        ),
+        Arc::new(bitfun_observability_otel::ReadOnlySecretFileProvider::new(
+            bitfun_observability_otel::telemetry_secret_dir_from_env(),
+        )),
+    );
+    let _telemetry_shutdown = telemetry_runtime.shutdown_guard();
+    let telemetry_level = bitfun_observability_otel::telemetry_level_from_env();
+    let user_telemetry = bitfun_observability::TelemetryUserConfig::with_sensitive_content_consent(
+        telemetry_level,
+        telemetry_level == bitfun_observability::TelemetryLevel::Debug,
+    );
+    if let Err(error) = telemetry_runtime.apply_config(
+        &user_telemetry,
+        &bitfun_observability_otel::TelemetryDeploymentConfig::from_deployment_env(),
+    ) {
+        tracing::warn!("Telemetry is unavailable; effective level is off: {error}");
+    }
+    let startup_observation = telemetry_runtime.startup_guard();
+
     let room_manager = RoomManager::new();
     let asset_store = Arc::new(DiskAssetStore::new_with_max_bytes(
         &cfg.room_web_dir,
@@ -114,10 +137,18 @@ async fn main() -> anyhow::Result<()> {
     info!("Relay server listening on {}", cfg.listen_addr);
     info!("WebSocket endpoint: ws://{}/ws", cfg.listen_addr);
 
+    startup_observation.complete();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        tracing::warn!("Failed to install Ctrl+C handler");
+    }
 }

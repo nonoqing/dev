@@ -6,6 +6,7 @@ import {
   ImageAttachment,
   RemoteModelCatalog,
   RemoteModelConfig,
+  RemoteReasoningCatalogProjection,
   RemoteQuestionAnswerPayload,
   SelectedImageAttachment,
   SessionSummary,
@@ -29,9 +30,7 @@ export interface ConversationUiModel {
   context_window?: number;
   enabled: boolean;
   capabilities: string[];
-  enable_thinking_process?: boolean;
-  reasoning_mode?: string;
-  reasoning_effort?: string;
+  reasoning?: RemoteReasoningCatalogProjection;
 }
 
 export interface ConversationUiDefaultModels {
@@ -101,8 +100,11 @@ export interface ConversationUiMessage {
 }
 
 export interface ConversationUiQuestionAnswer {
-  answer: string;
-  '0': string;
+  answer?: string;
+  '0'?: string | string[];
+  '1'?: string | string[];
+  '2'?: string | string[];
+  '3'?: string | string[];
 }
 
 export function toConversationUiSession(source: SessionSummary): ConversationUiSession {
@@ -125,9 +127,7 @@ export function toConversationUiModel(source: RemoteModelConfig): ConversationUi
     context_window: source.context_window,
     enabled: source.enabled,
     capabilities: source.capabilities.slice(),
-    enable_thinking_process: source.enable_thinking_process,
-    reasoning_mode: source.reasoning_mode,
-    reasoning_effort: source.reasoning_effort
+    reasoning: source.reasoning
   };
 }
 
@@ -208,5 +208,22 @@ export function toConversationUiMessage(source: ChatMessage): ConversationUiMess
 }
 
 export function toRemoteQuestionAnswer(source: ConversationUiQuestionAnswer): RemoteQuestionAnswerPayload {
-  return { answer: source.answer, '0': source.answer };
+  const result: Record<string, Object> = {};
+  const values = source as Record<string, Object>;
+  if (source.answer !== undefined) {
+    result['answer'] = source.answer as Object;
+  }
+  if (values['0'] !== undefined) {
+    result['0'] = values['0'];
+  }
+  if (values['1'] !== undefined) {
+    result['1'] = values['1'];
+  }
+  if (values['2'] !== undefined) {
+    result['2'] = values['2'];
+  }
+  if (values['3'] !== undefined) {
+    result['3'] = values['3'];
+  }
+  return result as RemoteQuestionAnswerPayload;
 }

@@ -7,17 +7,21 @@ use std::collections::BinaryHeap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
+/// Function pointer for creating a `Command` with platform-specific flags
+/// (e.g. `CREATE_NO_WINDOW` on Windows). Injected by Assembly via
+/// `LocalGlobRequest::command_creator`.
+pub type CommandCreator = fn(&str) -> Command;
 
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
+fn default_command_creator(program: &str) -> Command {
+    Command::new(program)
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LocalGlobRequest {
     pub search_path: PathBuf,
     pub pattern: String,
     pub limit: usize,
+    pub command_creator: Option<CommandCreator>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,10 +53,12 @@ pub fn extract_glob_base_directory(pattern: &str) -> (String, String) {
                 if base_dir.is_empty() && separator_index == 0 {
                     base_dir = static_prefix[..1].to_string();
                 }
-                #[cfg(windows)]
-                if base_dir.len() == 2
-                    && base_dir.as_bytes()[1] == b':'
-                    && base_dir.as_bytes()[0].is_ascii_alphabetic()
+                // `Component::Prefix` is only returned on Windows for drive
+                // letters (e.g. `C:`), so this is a no-op on Unix.
+                if Path::new(&base_dir)
+                    .components()
+                    .next()
+                    .is_some_and(|component| matches!(component, Component::Prefix(_)))
                 {
                     base_dir.push(
                         static_prefix[separator_index..]
@@ -168,19 +174,6 @@ fn build_rg_args(
     }
 
     args
-}
-
-#[cfg(windows)]
-fn create_command(program: &str) -> Command {
-    let mut command = Command::new(program);
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-}
-
-#[cfg(not(windows))]
-fn create_command(program: &str) -> Command {
-    
-    Command::new(program)
 }
 
 fn build_fallback_matcher(relative_pattern: &str) -> Result<GlobMatcher, String> {
@@ -419,6 +412,7 @@ pub fn execute_local_glob(request: LocalGlobRequest) -> Result<LocalGlobResult, 
     }
 
     let args = build_rg_args(&relative_pattern, apply_gitignore, ignore_hidden_files);
+    let create_command = request.command_creator.unwrap_or(default_command_creator);
     let output = create_command("rg")
         .current_dir(&walk_root)
         .args(&args)

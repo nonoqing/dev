@@ -3,6 +3,7 @@ import { ExternalSourceApiError, externalSourcesAPI } from './ExternalSourcesAPI
 import { webSocketResponseError } from '../adapters/websocket-adapter';
 import { PeerProductCommandError } from '../adapters/peer-device-adapter';
 import { ApiClient } from './ApiClient';
+import { globalEventBus } from '@/infrastructure/event-bus';
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const adapterMocks = vi.hoisted(() => ({
@@ -63,6 +64,29 @@ describe('ExternalSourcesAPI', () => {
     vi.clearAllMocks();
     invokeMock.mockResolvedValue(surface({}));
     adapterMocks.isConnected.mockReturnValue(true);
+  });
+
+  it('reads and acknowledges backend-owned ecosystem awareness', async () => {
+    invokeMock
+      .mockResolvedValueOnce({ unacknowledgedEcosystemIds: ['opencode', 'codex'] })
+      .mockResolvedValueOnce(undefined);
+
+    await expect(externalSourcesAPI.getEcosystemAwareness('D:/workspace/project'))
+      .resolves.toEqual(['opencode', 'codex']);
+    await externalSourcesAPI.acknowledgeEcosystems(
+      'D:/workspace/project',
+      ['opencode', 'codex'],
+    );
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'get_external_ecosystem_awareness_command', {
+      request: { workspacePath: 'D:/workspace/project' },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'acknowledge_external_ecosystems_command', {
+      request: {
+        workspacePath: 'D:/workspace/project',
+        ecosystemIds: ['opencode', 'codex'],
+      },
+    });
   });
 
   it('keeps workspace ownership and refresh intent in the public snapshot request', async () => {
@@ -433,7 +457,54 @@ describe('ExternalSourcesAPI', () => {
     });
   });
 
+  it('sends exact owner-scoped decision sets for bulk resource changes', async () => {
+    const toolDecisions = [{ approvalKey: 'tool-approval-v1', decisionKey: 'tool-v1' }];
+    const subagentDecisions = [{ candidateId: 'agent-review', decisionKey: 'agent-v1' }];
+    const mcpDecisions = [{ candidateId: 'mcp-docs', decisionKey: 'mcp-v1' }];
+
+    await externalSourcesAPI.setToolTargetsEnabled(
+      'D:/workspace/project', toolDecisions, true, 11, 7,
+    );
+    await externalSourcesAPI.setSubagentsEnabled(
+      'D:/workspace/project', subagentDecisions, false, 12, 8,
+    );
+    await externalSourcesAPI.setMcpServersEnabled(
+      'D:/workspace/project', mcpDecisions, true, 13, 9,
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith('set_external_tool_targets_enabled_command', {
+      request: {
+        workspacePath: 'D:/workspace/project',
+        decisions: toolDecisions,
+        enabled: true,
+        expectedCatalogGeneration: 11,
+        expectedPreferenceRevision: 7,
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith('set_external_subagents_enabled_command', {
+      request: {
+        workspacePath: 'D:/workspace/project',
+        decisions: subagentDecisions,
+        enabled: false,
+        expectedSubagentGeneration: 12,
+        expectedPreferenceRevision: 8,
+      },
+    });
+    expect(invokeMock).toHaveBeenCalledWith('set_external_mcp_servers_enabled_command', {
+      request: {
+        workspacePath: 'D:/workspace/project',
+        decisions: mcpDecisions,
+        enabled: true,
+        expectedMcpGeneration: 13,
+        expectedPreferenceRevision: 9,
+      },
+    });
+  });
+
   it('sends policy scope and optimistic revision as one atomic mutation', async () => {
+    const catalogUpdated = vi.fn();
+    const unsubscribe = globalEventBus.on('mode:config:updated', catalogUpdated);
+
     await externalSourcesAPI.updateIntegrationPolicy('D:/workspace/project', {
       expectedPreferenceRevision: 8,
       scope: 'workspace',
@@ -460,6 +531,11 @@ describe('ExternalSourcesAPI', () => {
         },
       },
     });
+    expect(catalogUpdated).toHaveBeenCalledWith({
+      reason: 'external-agent-catalog-updated',
+      workspacePath: 'D:/workspace/project',
+    });
+    unsubscribe();
   });
 
   it('normalizes typed host errors without matching user-visible strings', async () => {
@@ -571,7 +647,7 @@ describe('ExternalSourcesAPI', () => {
     );
   });
 
-  it('normalizes omitted subagent model-binding collections at the API boundary', async () => {
+  it('normalizes legacy subagent role and model-binding fields at the API boundary', async () => {
     invokeMock.mockResolvedValue(surface({
       generation: 2,
       discoveryPending: false,
@@ -602,6 +678,7 @@ describe('ExternalSourcesAPI', () => {
     expect(result.subagentModelBindingGroups).toEqual([]);
     expect(result.subagentModelBindingOptions).toEqual([]);
     expect(result.subagents?.[0]).toMatchObject({
+      mode: 'subagent',
       requestedModel: { kind: 'default' },
       modelBindingMethod: 'default',
     });

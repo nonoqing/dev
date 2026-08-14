@@ -637,43 +637,8 @@ impl FileOperationService {
     }
 
     async fn get_permissions_string(&self, path: &Path) -> Option<String> {
-        if let Ok(metadata) = fs::metadata(path).await {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = metadata.permissions();
-                let mode = perms.mode();
-
-                let user = format!(
-                    "{}{}{}",
-                    if mode & 0o400 != 0 { "r" } else { "-" },
-                    if mode & 0o200 != 0 { "w" } else { "-" },
-                    if mode & 0o100 != 0 { "x" } else { "-" }
-                );
-                let group = format!(
-                    "{}{}{}",
-                    if mode & 0o040 != 0 { "r" } else { "-" },
-                    if mode & 0o020 != 0 { "w" } else { "-" },
-                    if mode & 0o010 != 0 { "x" } else { "-" }
-                );
-                let other = format!(
-                    "{}{}{}",
-                    if mode & 0o004 != 0 { "r" } else { "-" },
-                    if mode & 0o002 != 0 { "w" } else { "-" },
-                    if mode & 0o001 != 0 { "x" } else { "-" }
-                );
-
-                Some(format!("{}{}{}", user, group, other))
-            }
-
-            #[cfg(windows)]
-            {
-                let readonly = metadata.permissions().readonly();
-                Some(if readonly { "r--" } else { "rw-" }.to_string())
-            }
-        } else {
-            None
-        }
+        let metadata = fs::metadata(path).await.ok()?;
+        Some(crate::path_utils::permissions_string(&metadata))
     }
 }
 

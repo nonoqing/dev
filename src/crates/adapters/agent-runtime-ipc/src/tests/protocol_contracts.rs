@@ -1,9 +1,9 @@
 use crate::operation::RuntimeIpcSessionRequirement;
 use crate::{
-    serialize_frame_with_limit, InitializeRequest, RuntimeIpcError, RuntimeIpcErrorCode,
-    RuntimeIpcFrame, RuntimeIpcOperation, RuntimeIpcOperationResult, RuntimeSessionForkRequest,
-    RuntimeSessionRenameRequest, RuntimeUserAnswersRequest, MAX_REQUEST_FRAME_BYTES,
-    PROTOCOL_VERSION,
+    serialize_frame_with_limit, InitializeRequest, RuntimeAgentModeSummary, RuntimeIpcError,
+    RuntimeIpcErrorCode, RuntimeIpcFrame, RuntimeIpcOperation, RuntimeIpcOperationResult,
+    RuntimeSessionForkRequest, RuntimeSessionRenameRequest, RuntimeUserAnswersRequest,
+    MAX_REQUEST_FRAME_BYTES, PROTOCOL_VERSION,
 };
 
 use bitfun_product_domains::tool_permissions::PermissionReply;
@@ -17,6 +17,11 @@ use bitfun_runtime_ports::{
     WorkspaceDiffFile, WorkspaceDiffFileStatus, WorkspaceDiffSnapshot,
 };
 use serde_json::{json, Map};
+
+#[test]
+fn shared_runtime_protocol_stays_at_version_17() {
+    assert_eq!(PROTOCOL_VERSION, 17);
+}
 
 #[test]
 fn protocol_rejects_unknown_fields_and_operations() {
@@ -74,14 +79,71 @@ fn protocol_round_trips_reviewed_permission_and_user_input_operations() {
 }
 
 #[test]
+fn protocol_round_trips_read_only_main_agent_catalog() {
+    assert_eq!(PROTOCOL_VERSION, 17);
+    let operation = RuntimeIpcOperation::ListAgentModes {
+        session_id: Some("session-1".to_string()),
+    };
+    let result = RuntimeIpcOperationResult::AgentModes {
+        modes: vec![RuntimeAgentModeSummary {
+            id: "review".to_string(),
+            description: "Review the current workspace".to_string(),
+            model_id: Some("provider/model".to_string()),
+            is_external: true,
+        }],
+    };
+
+    let operation_json =
+        serde_json::to_value(&operation).expect("serialize mode catalog operation");
+    assert_eq!(
+        operation_json,
+        json!({"operation": "list_agent_modes", "sessionId": "session-1"})
+    );
+    let decoded_operation: RuntimeIpcOperation =
+        serde_json::from_value(operation_json).expect("deserialize mode catalog operation");
+    assert_eq!(decoded_operation, operation);
+    assert_eq!(decoded_operation.session_id(), Some("session-1"));
+    let rules = decoded_operation.rules();
+    assert_eq!(
+        rules.session_requirement,
+        RuntimeIpcSessionRequirement::CurrentController
+    );
+    assert!(!rules.requires_idle);
+    assert!(!rules.serializes_session_selection);
+    assert!(!rules.side_effecting);
+
+    let result_json = serde_json::to_value(&result).expect("serialize mode catalog result");
+    assert_eq!(result_json["result"], "agent_modes");
+    assert_eq!(result_json["modes"][0]["id"], "review");
+    assert_eq!(result_json["modes"][0]["modelId"], "provider/model");
+    assert_eq!(result_json["modes"][0]["isExternal"], true);
+    let decoded_result: RuntimeIpcOperationResult =
+        serde_json::from_value(result_json).expect("deserialize mode catalog result");
+    assert_eq!(decoded_result, result);
+
+    let startup_operation = RuntimeIpcOperation::ListAgentModes { session_id: None };
+    assert_eq!(startup_operation.session_id(), None);
+    assert_eq!(
+        startup_operation.rules().session_requirement,
+        RuntimeIpcSessionRequirement::None
+    );
+    assert_eq!(
+        serde_json::to_value(startup_operation).expect("serialize startup mode catalog"),
+        json!({"operation": "list_agent_modes"})
+    );
+}
+
+#[test]
 fn protocol_round_trips_exact_turn_steering_without_replacing_turn_admission() {
-    assert_eq!(PROTOCOL_VERSION, 15);
+    assert_eq!(PROTOCOL_VERSION, 17);
     let operation = RuntimeIpcOperation::SteerTurn {
         request: AgentDialogSteerRequest {
             session_id: "session-1".to_string(),
             turn_id: "turn-1".to_string(),
             content: "check tests".to_string(),
             display_content: Some("Check tests".to_string()),
+            attachments: Vec::new(),
+            metadata: serde_json::Map::new(),
         },
     };
     let result = RuntimeIpcOperationResult::TurnSteered {
@@ -191,7 +253,7 @@ fn protocol_round_trips_root_scoped_lineage_operations() {
 
 #[test]
 fn protocol_round_trips_workspace_diff_as_a_read_only_workspace_operation() {
-    assert_eq!(PROTOCOL_VERSION, 15);
+    assert_eq!(PROTOCOL_VERSION, 17);
 
     let operation = RuntimeIpcOperation::WorkspaceDiff;
     let encoded = serde_json::to_value(&operation).expect("serialize workspace diff operation");
@@ -312,7 +374,7 @@ fn protocol_round_trips_the_reviewed_session_model_operation() {
 
 #[test]
 fn protocol_round_trips_the_current_session_rename_operation() {
-    assert_eq!(PROTOCOL_VERSION, 15);
+    assert_eq!(PROTOCOL_VERSION, 17);
 
     let operation = RuntimeIpcOperation::RenameSession {
         request: RuntimeSessionRenameRequest {

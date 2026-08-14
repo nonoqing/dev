@@ -22,10 +22,12 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(feature = "external-sources")]
 pub(crate) use external::external_subagent_runtime_key;
 pub use external::{
-    ExternalSubagentGenerationLease, ExternalSubagentInvocationBinding,
-    ExternalSubagentModelBinding, ExternalSubagentRegistration, ExternalSubagentRoute,
+    ExternalPrimaryAgentTurnBinding, ExternalSubagentGenerationLease,
+    ExternalSubagentInvocationBinding, ExternalSubagentModelBinding, ExternalSubagentRegistration,
+    ExternalSubagentRoute,
 };
 
 /// Full file-backed custom agent definition for editing.
@@ -146,6 +148,21 @@ impl AgentRegistry {
     ) -> Option<Arc<dyn Agent>> {
         self.find_agent_entry(agent_type, workspace_root)
             .map(|entry| entry.agent)
+    }
+
+    pub(crate) fn observability_mode_class(
+        &self,
+        agent_type: &str,
+        workspace_root: Option<&Path>,
+    ) -> bitfun_observability::domains::AgentModeClass {
+        let Some(entry) = self.find_agent_entry(agent_type, workspace_root) else {
+            return bitfun_observability::domains::AgentModeClass::Other;
+        };
+        crate::agentic::observability::agent_mode_class(
+            entry.category,
+            entry.source,
+            self::types::is_review_agent_entry(&entry),
+        )
     }
 
     /// Check if an agent exists

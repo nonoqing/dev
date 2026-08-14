@@ -47,6 +47,7 @@ import {
   pickSshCertificatePath,
   pickSshPrivateKeyPath,
 } from './pickSshPrivateKeyPath';
+import { getMotionAwareScrollBehavior } from '@/shared/utils/motionPreference';
 import './SSHConnectionDialog.scss';
 
 interface SSHConnectionDialogProps {
@@ -111,7 +112,10 @@ export const SSHConnectionDialog: React.FC<SSHConnectionDialogProps> = ({
   const revealConnectionForm = useCallback(() => {
     const el = formRef.current;
     if (!el) return;
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    el.scrollIntoView({
+      behavior: getMotionAwareScrollBehavior('smooth'),
+      block: 'start',
+    });
     setFormHighlighted(true);
     if (formHighlightTimerRef.current != null) {
       window.clearTimeout(formHighlightTimerRef.current);
@@ -710,8 +714,6 @@ export const SSHConnectionDialog: React.FC<SSHConnectionDialogProps> = ({
     clearError();
   };
 
-  if (!open) return null;
-
   return (
     <>
       <Modal
@@ -897,6 +899,7 @@ export const SSHConnectionDialog: React.FC<SSHConnectionDialogProps> = ({
                 value={formData.targetType}
                 onChange={(value) => handleInputChange('targetType', String(value))}
                 size="medium"
+                dropdownClassName="ssh-connection-dialog__select-dropdown"
               />
             </div>
 
@@ -969,6 +972,7 @@ export const SSHConnectionDialog: React.FC<SSHConnectionDialogProps> = ({
                       value={formData.containerName}
                       onChange={(value) => handleInputChange('containerName', String(value))}
                       size="medium"
+                      dropdownClassName="ssh-connection-dialog__select-dropdown"
                     />
                   ) : (
                     <Input
@@ -990,6 +994,7 @@ export const SSHConnectionDialog: React.FC<SSHConnectionDialogProps> = ({
                         value={formData.containerAccess}
                         onChange={(value) => handleInputChange('containerAccess', String(value))}
                         size="medium"
+                        dropdownClassName="ssh-connection-dialog__select-dropdown"
                       />
                       <div className="ssh-connection-dialog__hint">
                         {t('ssh.remote.containerAccessHint')}
@@ -1048,6 +1053,7 @@ export const SSHConnectionDialog: React.FC<SSHConnectionDialogProps> = ({
                 value={formData.authType}
                 onChange={(value) => handleInputChange('authType', String(value))}
                 size="medium"
+                dropdownClassName="ssh-connection-dialog__select-dropdown"
               />
             </div>
 
@@ -1372,7 +1378,7 @@ export const SSHConnectionDialog: React.FC<SSHConnectionDialogProps> = ({
         </div>
       </Modal>
 
-      {credentialsPrompt && (
+      {open && credentialsPrompt && (
         <SSHAuthPromptDialog
           open
           targetDescription={`${credentialsPrompt.username}@${credentialsPrompt.host}:${credentialsPrompt.port}`}

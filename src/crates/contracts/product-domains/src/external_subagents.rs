@@ -200,12 +200,23 @@ impl ExternalSubagentProviderIdentity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalSubagentMode {
+    #[default]
     Subagent,
     All,
     Primary,
+}
+
+impl ExternalSubagentMode {
+    pub fn supports_subagent(self) -> bool {
+        matches!(self, Self::Subagent | Self::All)
+    }
+
+    pub fn supports_primary(self) -> bool {
+        matches!(self, Self::Primary | Self::All)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,12 +417,24 @@ pub fn external_subagent_model_binding_key(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalSubagentToolCapability {
+    DirectoryList,
+    ReadFile,
+    GlobFiles,
+    SearchText,
+    ExecuteCommand,
+    EditFile,
+    WriteFile,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExternalSubagentToolSelector {
     pub source_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canonical_host_name: Option<String>,
+    pub canonical_capability: Option<ExternalSubagentToolCapability>,
     pub allowed: bool,
 }
 
@@ -560,14 +583,8 @@ impl ExternalSubagentDefinition {
                     && !value.chars().any(char::is_control)
             };
             if !valid_name(&selector.source_name)
-                || selector
-                    .canonical_host_name
-                    .as_deref()
-                    .is_some_and(|name| !valid_name(name))
-                || !tool_selectors.insert((
-                    selector.source_name.as_str(),
-                    selector.canonical_host_name.as_deref(),
-                ))
+                || !tool_selectors
+                    .insert((selector.source_name.as_str(), selector.canonical_capability))
             {
                 return Err(ExternalSourceContractError::InvalidText(
                     "external subagent tool selector",
@@ -733,6 +750,8 @@ pub struct ExternalSubagentSummary {
     pub source_keys: Vec<SourceKey>,
     pub source_location_labels: Vec<String>,
     pub source_count: usize,
+    #[serde(default)]
+    pub mode: ExternalSubagentMode,
     #[serde(default, skip_serializing_if = "is_default_model_request")]
     pub requested_model: ExternalSubagentModelRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]

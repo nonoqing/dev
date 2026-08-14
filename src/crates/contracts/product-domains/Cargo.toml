@@ -4,10 +4,15 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 description = "BitFun product domain owner crate"
+autotests = false
 
 [lib]
 name = "bitfun_product_domains"
 crate-type = ["rlib"]
+
+[[test]]
+name = "product_domain_contracts"
+path = "tests/product_domain_contracts.rs"
 
 [[test]]
 name = "plugin_source_contracts"
@@ -20,26 +25,13 @@ path = "tests/external_source_contracts.rs"
 required-features = ["external-sources"]
 
 [[test]]
-name = "external_hook_contribution_contracts"
-path = "tests/external_hook_contribution_contracts.rs"
-required-features = ["external-sources"]
-
-[[test]]
-name = "external_hook_catalog_contracts"
-path = "tests/external_hook_catalog_contracts.rs"
-required-features = ["external-sources"]
-
-[[test]]
-name = "workspace_reference_contracts"
-path = "tests/workspace_reference_contracts.rs"
-required-features = ["external-sources"]
-
-[[test]]
 name = "function_agent_contracts"
+path = "tests/function_agent_contracts.rs"
 required-features = ["function-agents"]
 
 [[test]]
 name = "miniapp_contracts"
+path = "tests/miniapp_contracts.rs"
 required-features = ["miniapp"]
 
 [dependencies]
@@ -52,6 +44,7 @@ hex = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 which = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
+ts-rs = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -61,6 +54,10 @@ miniapp = ["dirs", "hex", "sha2", "which"]
 function-agents = ["log"]
 external-sources = ["hex", "hmac", "sha2", "url"]
 product-full = ["appearance-market", "plugin-source", "miniapp", "function-agents", "external-sources"]
+# Derive `ts_rs::TS` on the wire types (permissions, etc.) for downstream
+# TypeScript binding export. Orthogonal to the product feature groups; does not
+# pull any optional integration dependency.
+ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

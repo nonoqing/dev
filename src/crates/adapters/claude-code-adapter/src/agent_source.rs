@@ -14,8 +14,8 @@ use bitfun_product_domains::external_subagents::{
 };
 use bitfun_services_core::markdown::FrontMatterMarkdown;
 use bitfun_static_hook_support::{
-    collect_bounded_regular_files, read_bounded_text, BoundedDirectoryWalkError,
-    BoundedDirectoryWalkLimits, BoundedTextRead,
+    collect_bounded_regular_files, common_external_subagent_tool_capability, read_bounded_text,
+    BoundedDirectoryWalkError, BoundedDirectoryWalkLimits, BoundedTextRead,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -27,7 +27,6 @@ const ECOSYSTEM_ID: &str = "claude-code";
 const MAX_AGENT_FILES: usize = 2048;
 const MAX_AGENT_FILE_BYTES: usize = 256 * 1024;
 const MAX_TOTAL_PROMPT_BYTES: usize = 8 * 1024 * 1024;
-
 const KNOWN_FIELDS: &[&str] = &[
     "name",
     "description",
@@ -569,7 +568,10 @@ fn materialize_definition(
         display_name: logical_id,
         description,
         prompt: SecretText::new(winner.prompt.clone()),
-        mode: ExternalSubagentMode::Subagent,
+        // Claude Code uses the same agent definition for delegated work and
+        // whole-session `--agent` selection. Keep that role fact in the
+        // provider-neutral definition and let Product Assembly project it.
+        mode: ExternalSubagentMode::All,
         disabled: false,
         hidden: false,
         requested_model,
@@ -627,7 +629,7 @@ fn tool_request(
         selectors: selectors
             .into_iter()
             .map(|(source_name, allowed)| ExternalSubagentToolSelector {
-                canonical_host_name: canonical_tool_name(&source_name).map(str::to_string),
+                canonical_capability: common_external_subagent_tool_capability(&source_name),
                 source_name,
                 allowed,
             })
@@ -650,16 +652,6 @@ fn string_list(value: &Value) -> Option<Vec<String>> {
             .iter()
             .map(|value| value.as_str().map(str::to_string))
             .collect(),
-        _ => None,
-    }
-}
-
-fn canonical_tool_name(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "ls" | "list" => Some("LS"),
-        "read" => Some("Read"),
-        "glob" => Some("Glob"),
-        "grep" => Some("Grep"),
         _ => None,
     }
 }

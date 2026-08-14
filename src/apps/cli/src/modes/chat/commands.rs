@@ -2,9 +2,7 @@ fn session_update_blocks_typed_submission(pending_for_current_session: bool, inp
     pending_for_current_session && !input.trim().starts_with('/')
 }
 
-fn steering_unsupported_reason(
-    draft: &crate::ui::composer::ComposerDraft,
-) -> Option<&'static str> {
+fn steering_unsupported_reason(draft: &crate::ui::composer::ComposerDraft) -> Option<&'static str> {
     if draft.has_images() {
         return Some(
             "Images cannot steer an active turn yet. Wait for it to finish to send this draft.",
@@ -46,6 +44,65 @@ fn parse_reload_invocation(
         });
     }
     None
+}
+
+fn slash_command_class(
+    command_name: &str,
+    builtin: Option<&crate::actions::ActionSpec>,
+    external: bool,
+) -> bitfun_observability::domains::SlashCommandClass {
+    use bitfun_observability::domains::SlashCommandClass;
+
+    if external && builtin.is_none() {
+        return SlashCommandClass::External;
+    }
+    if command_name.eq_ignore_ascii_case("auto") {
+        return SlashCommandClass::Configuration;
+    }
+    if command_name.eq_ignore_ascii_case("worktree") {
+        return SlashCommandClass::Workspace;
+    }
+    let Some(action) = builtin else {
+        return SlashCommandClass::Other;
+    };
+    match action.handler {
+        ActionHandler::NewSession
+        | ActionHandler::Sessions
+        | ActionHandler::ViewSubagents
+        | ActionHandler::Timeline
+        | ActionHandler::ForkSession
+        | ActionHandler::UndoSession
+        | ActionHandler::RedoSession
+        | ActionHandler::RenameSession
+        | ActionHandler::CompactSession => SlashCommandClass::Session,
+        ActionHandler::SelectModel | ActionHandler::AddModel => SlashCommandClass::Model,
+        ActionHandler::OpenAgentSelector
+        | ActionHandler::SwitchAgent
+        | ActionHandler::SwitchAgentReverse => SlashCommandClass::Agent,
+        ActionHandler::Init
+        | ActionHandler::Status
+        | ActionHandler::WorkspaceDiff
+        | ActionHandler::Editor
+        | ActionHandler::ToggleWorktree => SlashCommandClass::Workspace,
+        ActionHandler::SelectTheme
+        | ActionHandler::Skills
+        | ActionHandler::Reload
+        | ActionHandler::McpServers
+        | ActionHandler::Tools
+        | ActionHandler::Extensions
+        | ActionHandler::NativeHooks
+        | ActionHandler::ExternalHooks
+        | ActionHandler::ToggleTimestamps
+        | ActionHandler::ToggleThinking
+        | ActionHandler::ToggleToolDetails
+        | ActionHandler::ToggleAutoApprove => SlashCommandClass::Configuration,
+        ActionHandler::Help
+        | ActionHandler::AcpHelp
+        | ActionHandler::Usage
+        | ActionHandler::CopyTranscript
+        | ActionHandler::ExportTranscript => SlashCommandClass::Diagnostic,
+        _ => SlashCommandClass::Other,
+    }
 }
 
 fn pending_session_operation_blocks_runtime_action(
@@ -260,7 +317,11 @@ impl ChatMode {
         if action_id == "toggle_auto_approve" || action_id.starts_with("toggle_auto_approve:") {
             let action = action_by_id("toggle_auto_approve", ActionContext::Chat)
                 .expect("Auto mode action must remain registered");
-            let state = self.action_state(displayed_is_processing, false);
+            let state = self.action_state(
+                displayed_is_processing,
+                false,
+                !chat_view.input_text().trim().is_empty(),
+            );
             if !action.available(state) {
                 chat_view.set_status(Some(action.unavailable_message(state)));
                 return Ok(None);
@@ -360,7 +421,11 @@ impl ChatMode {
         }
         self.dispatch_action(
             action,
-            self.action_state(displayed_is_processing, false),
+            self.action_state(
+                displayed_is_processing,
+                false,
+                !chat_view.input_text().trim().is_empty(),
+            ),
             chat_view,
             chat_state,
             rt_handle,
@@ -387,6 +452,32 @@ impl ChatMode {
             .map(str::trim_start)
             .unwrap_or("");
         let command_name = entered_command_name;
+        let builtin_alias = format!("/{command_name}");
+        let builtin_action = action_for_alias(&builtin_alias, ActionContext::Chat);
+        let has_external_projection = self.external_command_projection(command_name).is_some();
+        let source = if builtin_action.is_some()
+            || command_name.eq_ignore_ascii_case("auto")
+            || command_name.eq_ignore_ascii_case("worktree")
+            || command_name.eq_ignore_ascii_case("reload-skills")
+        {
+            bitfun_observability::domains::SlashCommandSource::BuiltIn
+        } else if has_external_projection {
+            bitfun_observability::domains::SlashCommandSource::External
+        } else {
+            bitfun_observability::domains::SlashCommandSource::Unknown
+        };
+        bitfun_observability::domains::record_slash_command(
+            &crate::cli_telemetry(),
+            bitfun_observability::domains::SlashCommandFacts {
+                command_class: slash_command_class(
+                    command_name,
+                    builtin_action,
+                    has_external_projection,
+                ),
+                source,
+                has_arguments: !arguments.trim().is_empty(),
+            },
+        );
         let selected_native_once = consume_selected_native_command_once(
             &mut self.selected_native_command_once,
             command_name,
@@ -426,44 +517,11 @@ impl ChatMode {
                 rt_handle,
             );
         }
-        let builtin_alias = format!("/{command_name}");
-        let builtin_action = action_for_alias(&builtin_alias, ActionContext::Chat);
-        if self.agent.is_shared() {
-            if let Some(action) = builtin_action {
-                let state = self.action_state(chat_state.is_processing, false);
-                if let Some(usage) =
-                    builtin_arguments_error(CommandRoute::Builtin, action.handler, arguments)
-                {
-                    chat_view.set_status(Some(usage.to_string()));
-                    return Ok(None);
-                }
-                if builtin_arguments_route(CommandRoute::Builtin, action.handler) {
-                    if !action.available(state) {
-                        chat_view.set_status(Some(action.unavailable_message(state)));
-                        return Ok(None);
-                    }
-                    return self.start_session_rename(arguments, chat_view, chat_state, rt_handle);
-                }
-                if action.handler == ActionHandler::Reload {
-                    return self.handle_reload_invocation(
-                        reload_invocation.expect("reload action requires a parsed invocation"),
-                        chat_view,
-                        chat_state,
-                        rt_handle,
-                    );
-                }
-                return self.dispatch_action(action, state, chat_view, chat_state, rt_handle);
-            }
-            chat_state.add_system_message(format!(
-                "External prompt command /{command_name} is unavailable in Shared TUI preview. {SHARED_TUI_EMBEDDED_HANDOFF}."
-            ));
-            return Ok(None);
-        }
         let mut external = self.external_command_projection(command_name);
         let authoritative_preferences = tokio::task::block_in_place(|| {
             rt_handle
-                .block_on(external_source_conflict_choices())
-                .map(Into::into)
+                .block_on(self.agent.external_source_snapshot(false))
+                .map(|response| response.preferences.into())
         });
         if let Ok(authoritative_preferences) = authoritative_preferences {
             if authoritative_preferences != self.external_conflict_preferences() {
@@ -513,7 +571,11 @@ impl ChatMode {
         }
         if let Some(action) = builtin_action {
             if builtin_arguments_route(route, action.handler) {
-                let state = self.action_state(chat_state.is_processing, false);
+                let state = self.action_state(
+                    chat_state.is_processing,
+                    false,
+                    !chat_view.input_text().trim().is_empty(),
+                );
                 if !action.available(state) {
                     chat_view.set_status(Some(action.unavailable_message(state)));
                     return Ok(None);
@@ -592,7 +654,11 @@ impl ChatMode {
                 }
                 self.dispatch_action(
                     action,
-                    self.action_state(chat_state.is_processing, false),
+                    self.action_state(
+                        chat_state.is_processing,
+                        false,
+                        !chat_view.input_text().trim().is_empty(),
+                    ),
                     chat_view,
                     chat_state,
                     rt_handle,
@@ -733,29 +799,23 @@ impl ChatMode {
             return;
         }
         let native_commands = cli_native_prompt_command_descriptors(command_name);
-        let workspace = self.agent.workspace_path_buf();
         let expected_preference_revision = self
             .external_source_snapshot
             .as_ref()
             .map(|snapshot| snapshot.preference_revision)
             .unwrap_or(0);
         let persisted = tokio::task::block_in_place(|| {
-            rt_handle.block_on(set_native_prompt_command_conflict_choice(
-                Some(&workspace),
+            rt_handle.block_on(self.agent.set_native_command_choice(
                 native_commands,
-                candidate_id,
+                candidate_id.to_string(),
                 expected_preference_revision,
             ))
         });
         match persisted {
-            Ok(projection) => {
-                if let Ok(preferences) = tokio::task::block_in_place(|| {
-                    rt_handle.block_on(external_source_conflict_choices())
-                }) {
-                    self.replace_external_conflict_preferences(preferences.into());
-                }
+            Ok(response) => {
+                self.replace_external_conflict_preferences(response.preferences.into());
                 if let Some(snapshot) = &mut self.external_source_snapshot {
-                    snapshot.preference_revision = projection.preference_revision;
+                    snapshot.preference_revision = response.conflicts.preference_revision;
                 }
             }
             Err(error) => {
@@ -790,22 +850,25 @@ impl ChatMode {
             return Ok(None);
         }
         if let Some(provider_conflict_key) = &projection.provider_conflict_key {
-            let workspace = self.agent.workspace_path_buf();
             let expected_preference_revision = self
                 .external_source_snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.preference_revision)
                 .unwrap_or(0);
             let snapshot = tokio::task::block_in_place(|| {
-                rt_handle.block_on(set_external_prompt_command_conflict_choice(
-                    Some(&workspace),
-                    provider_conflict_key,
-                    &projection.candidate_id,
-                    expected_preference_revision,
+                rt_handle.block_on(self.agent.external_source_review(
+                    ExternalSourceReviewAction::SetPromptCommandConflictChoice {
+                        conflict_key: provider_conflict_key.clone(),
+                        candidate_id: projection.candidate_id.clone(),
+                        expected_preference_revision,
+                    },
                 ))
             });
             let snapshot = match snapshot {
-                Ok(snapshot) => snapshot,
+                Ok(response) => {
+                    self.replace_external_conflict_preferences(response.preferences.into());
+                    response.snapshot
+                }
                 Err(error) => {
                     chat_state.add_system_message(format!(
                         "Could not select {}: {error}",
@@ -909,25 +972,25 @@ impl ChatMode {
         chat_state: &mut ChatState,
         rt_handle: &tokio::runtime::Handle,
     ) -> Result<Option<ChatExitReason>> {
-        let workspace = self.agent.workspace_path_buf();
         let expanded = tokio::task::block_in_place(|| {
-            rt_handle.block_on(expand_external_prompt_command(
-                Some(&workspace),
-                &invocation.command_name,
-                &invocation.arguments,
+            rt_handle.block_on(self.agent.expand_external_command(
+                invocation.command_name.clone(),
+                invocation.arguments.clone(),
                 invocation.native_commands.clone(),
-                invocation.candidate_id.as_deref(),
-                invocation.content_version.as_deref(),
-                invocation.native_conflict_key.as_deref(),
+                invocation.candidate_id.clone(),
+                invocation.content_version.clone(),
+                invocation.native_conflict_key.clone(),
                 invocation.expected_preference_revision,
-                shell_review_decision.as_ref(),
+                shell_review_decision,
             ))
         });
         match expanded {
-            Ok(PromptCommandInvocationOutcome::Ready {
-                content,
-                execution_target,
-            }) => {
+            Ok(bitfun_app_server_protocol::external_source::ExpandExternalCommandResponse(
+                PromptCommandInvocationOutcome::Ready {
+                    content,
+                    execution_target,
+                },
+            )) => {
                 match execution_target {
                     PromptCommandExecutionTarget::Inline => {
                         self.send_message_to_agent(content, chat_view, chat_state, rt_handle);
@@ -954,13 +1017,15 @@ impl ChatMode {
                 }
                 Ok(None)
             }
-            Ok(PromptCommandInvocationOutcome::ReviewRequired { review }) => {
+            Ok(bitfun_app_server_protocol::external_source::ExpandExternalCommandResponse(
+                PromptCommandInvocationOutcome::ReviewRequired { review },
+            )) => {
                 chat_view.show_prompt_command_shell_review(review.clone());
                 self.pending_prompt_command_shell_invocation =
                     Some(PendingPromptCommandShellInvocation { invocation, review });
                 Ok(None)
             }
-            Err(error) if error.contains("command not found") => Err(anyhow!(error)),
+            Err(error) if error.detail.contains("command not found") => Err(anyhow!(error.detail)),
             Err(error) => {
                 chat_state.add_system_message(format!(
                     "External command /{} is unavailable: {error}",
@@ -1054,7 +1119,17 @@ impl ChatMode {
                     "Theme selector: ↑↓ preview, Enter apply, Esc cancel".to_string(),
                 ));
             }
-            ActionHandler::AddModel => chat_view.show_provider_selector(),
+            ActionHandler::AddModel => {
+                if !self.agent.is_shared() {
+                    let agent = self.agent.clone();
+                    match tokio::task::block_in_place(|| rt_handle.block_on(agent.model_catalog()))
+                    {
+                        Ok(catalog) => chat_view.show_provider_selector(catalog.provider_catalog),
+                        Err(error) => chat_view
+                            .set_status(Some(format!("Failed to load model providers: {error}"))),
+                    }
+                }
+            }
             ActionHandler::NewSession => {
                 return Ok(Some(ChatExitReason::NewSession));
             }
@@ -1065,7 +1140,9 @@ impl ChatMode {
                 self.show_session_lineage(chat_view, chat_state, rt_handle);
             }
             ActionHandler::Timeline => {
-                let points = self.displayed_chat_state(chat_state).session_timeline_points();
+                let points = self
+                    .displayed_chat_state(chat_state)
+                    .session_timeline_points();
                 if points.is_empty() {
                     chat_view.set_status(Some(
                         "No user messages are available in the current timeline".to_string(),
@@ -1240,6 +1317,12 @@ impl ChatMode {
                     if self.agent.is_shared() {
                         return Ok(None);
                     }
+                    return Ok(Some(ChatExitReason::Quit));
+                }
+                if !chat_view.input_text().is_empty() {
+                    chat_view.clear_input();
+                    chat_view.set_status(Some("Input cleared".to_string()));
+                    return Ok(None);
                 }
                 return Ok(Some(ChatExitReason::Quit));
             }
@@ -1248,7 +1331,10 @@ impl ChatMode {
                 self.open_login_or_account_panel(chat_view, chat_state, rt_handle);
             }
             ActionHandler::Logout => self.logout(chat_state, rt_handle),
-            ActionHandler::OpenPalette => chat_view.show_command_palette(state),
+            ActionHandler::OpenPalette => {
+                self.refresh_stash_non_empty();
+                chat_view.show_command_palette(state);
+            }
             ActionHandler::SubmitInput => {
                 return self.submit_input(chat_view, chat_state, rt_handle);
             }
@@ -1660,10 +1746,8 @@ impl ChatMode {
     ) {
         let agent = self.agent.clone();
         let result = tokio::task::block_in_place(|| {
-            rt_handle.block_on(agent.steer_current_turn(
-                draft.text.clone(),
-                Some(draft.text.clone()),
-            ))
+            rt_handle
+                .block_on(agent.steer_current_turn(draft.text.clone(), Some(draft.text.clone())))
         });
         match result {
             Ok(steering_id) => {

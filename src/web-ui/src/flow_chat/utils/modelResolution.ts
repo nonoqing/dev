@@ -11,6 +11,8 @@ import type {
   AgentModelDefaultsConfig,
   DefaultModelsConfig,
 } from '@/infrastructure/config/types';
+import { aiApi } from '@/infrastructure/api/service-api/AIApi';
+import { getRecentReasoningPreset } from './reasoningPresets';
 
 const log = createLogger('ModelResolution');
 
@@ -90,19 +92,23 @@ export async function getModelMaxTokens(modelName?: string, agentType?: string):
   }
 }
 
-export async function resolveModelForSessionCreation(modelName?: string): Promise<string> {
-  const explicitModelName = modelName?.trim();
-  if (explicitModelName) {
-    return explicitModelName;
-  }
-
+export async function resolveReasoningPresetForSessionCreation(
+  modelName: string,
+): Promise<string | undefined> {
   try {
-    const configManager = await import('@/infrastructure/config/services/ConfigManager').then(m => m.configManager);
-    const configData = await configManager.getConfigs(['ai.agent_model_defaults']);
-    const agentModelDefaults = configData['ai.agent_model_defaults'] as AgentModelDefaultsConfig | undefined;
-    return agentModelDefaults?.mode?.trim() || 'auto';
+    const catalog = await aiApi.getModelCatalog();
+    const concreteModelId = modelName === 'auto' || modelName === 'primary'
+      ? catalog.default_models.primary ?? undefined
+      : modelName === 'fast'
+        ? catalog.default_models.fast ?? catalog.default_models.primary ?? undefined
+        : modelName;
+    if (!concreteModelId) return undefined;
+    const projection = catalog.models.find(model => model.id === concreteModelId)?.reasoning;
+    if (projection?.status !== 'known') return undefined;
+    const preset = getRecentReasoningPreset(concreteModelId);
+    return projection.presets?.some(item => item.id === preset) ? preset : undefined;
   } catch (error) {
-    log.warn('Failed to resolve model default during session creation', { error });
-    return 'auto';
+    log.warn('Failed to resolve recent reasoning preset during session creation', { error });
+    return undefined;
   }
 }

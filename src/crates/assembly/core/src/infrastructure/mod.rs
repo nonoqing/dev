@@ -5,19 +5,22 @@
 #[cfg(feature = "ai-adapter-runtime")]
 pub mod ai;
 pub mod app_paths;
-#[cfg(feature = "product-full")]
+#[cfg(feature = "debug-log")]
 pub mod debug_log;
 pub mod events;
 #[cfg(feature = "filesystem")]
 pub mod filesystem;
 #[cfg(feature = "local-storage")]
 pub mod storage;
-#[cfg(feature = "ai-adapter-runtime")]
+#[cfg(all(feature = "ai-adapter-runtime", feature = "subscription-auth"))]
 pub mod subscription_auth;
 
 #[cfg(feature = "ai-adapter-runtime")]
 pub use ai::AIClient;
 pub use app_paths::{get_path_manager_arc, try_get_path_manager_arc, PathManager, StorageLevel};
+pub use bitfun_services_core::path_utils::{
+    executable_candidates, path_search_key, system_executable_search_paths,
+};
 #[cfg(feature = "runtime-services")]
 pub use events::BackendEventManager;
 #[cfg(feature = "filesystem")]

@@ -27,6 +27,27 @@ Codex 自己的文档，它把这些写得很完整：
 
 本文其余部分只讲 BitFun 特有的内容：文件放在哪、怎么打开、以及目前哪里有差异。
 
+## 运行时归属与 Hook 命名空间
+
+可移植的 Codex-compatible 引擎位于 `bitfun-agent-runtime::native_hooks`。它负责配置解析、
+matcher 与事件语义、stdin 载荷、进程执行、超时行为和决策合并。它只接收已经加载的配置层
+与完整载荷，不发现 BitFun 配置或产品状态。
+
+`bitfun-core::native_hooks` 负责用户/项目配置发现、feature 与 scope 开关、引擎缓存、
+各事件的载荷组装，以及 coordinator、execution engine 和 tool pipeline 调用的类型化
+dispatch helper。调用点必须使用这些 helper，不能自行解析配置或启动 Hook 进程。
+
+以下三个命名空间必须保持独立：
+
+| 命名空间 | 用途 | 用户配置 / 是否执行 |
+| --- | --- | --- |
+| 原生用户 Hooks | 由 `AgentHookEngine` 执行的 Codex-compatible 生命周期 Hooks | 是 / 是 |
+| 编译内置 `post_call_hooks` | 工具调用成功后的内部 Rust 回调 | 否 / 是，在 Runtime 内执行 |
+| 外部 Hook 目录 | 对其他 AI 应用 Hook 声明的只读发现与投影 | 否 / 否 |
+
+外部声明只有经过下文的显式审阅导入流程，复制为私有原生 Hook 快照后才可执行。
+仅完成发现绝不能把它路由给 `AgentHookEngine`。
+
 ## BitFun 从哪里读取 Hooks
 
 Codex 读 `~/.codex/hooks.json`，BitFun 改为读自己的配置目录。文件内部结构完全相同。

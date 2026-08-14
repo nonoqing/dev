@@ -2,16 +2,16 @@
  * Local session driver: the default flavor backed by this machine's (or the
  * attached peer's) agent runtime via `agentAPI`.
  *
- * Bodies were moved verbatim from SessionModule/MessageModule; behavior is
- * unchanged. Peer Device Mode is invisible here by design — it swaps the
- * transport underneath `api.invoke`, so this driver must never consult it.
+ * Peer Device Mode is invisible here by design: it swaps the transport
+ * underneath `api.invoke`, so this driver must never consult it. Session
+ * creation sends only an explicit model selection and projects the Runtime's
+ * authoritative resolved model from the response.
  */
 
 import { agentAPI } from '@/infrastructure/api/service-api/AgentAPI';
 import { ACPClientAPI } from '@/infrastructure/api/service-api/ACPClientAPI';
 import { sessionAPI } from '@/infrastructure/api/service-api/SessionAPI';
 import { worktreeAPI } from '@/infrastructure/api/service-api/WorktreeAPI';
-import { globalEventBus } from '@/infrastructure/event-bus';
 import { createLogger } from '@/shared/utils/logger';
 import { stateMachineManager } from '../../state-machine';
 import { SessionExecutionEvent, SessionExecutionState } from '../../state-machine/types';
@@ -27,12 +27,8 @@ import type {
   UsageReportUiParams,
 } from '../types';
 import {
-  FLOWCHAT_PIN_TURN_TO_TOP_EVENT,
-  type FlowChatPinTurnToTopRequest,
-} from '../../events/flowchatNavigation';
-import {
   getModelMaxTokens,
-  resolveModelForSessionCreation,
+  resolveReasoningPresetForSessionCreation,
 } from '../../utils/modelResolution';
 import { syncSessionModelSelection } from '../../utils/modelSync';
 import { markCurrentTurnItemsAsCancelled } from '../../utils/turnCancellation';
@@ -63,13 +59,11 @@ export const localSessionDriver: SessionDriver = {
       remoteSshHost,
     } = seed;
 
-    const sessionModelName = await resolveModelForSessionCreation(config.modelName);
-    const maxContextTokens = await getModelMaxTokens(sessionModelName, agentType);
-    const mergedConfig: SessionConfig = {
-      ...config,
-      modelName: sessionModelName,
-      workspaceId: workspaceId ?? config.workspaceId,
-    };
+    const explicitModelName = config.modelName?.trim() || undefined;
+    const reasoningPreset = config.reasoningPreset
+      ?? (explicitModelName
+        ? await resolveReasoningPresetForSessionCreation(explicitModelName)
+        : undefined);
 
     const response = await agentAPI.createSession({
       sessionName,
@@ -78,20 +72,29 @@ export const localSessionDriver: SessionDriver = {
       projectWorkspacePath,
       executionTarget: config.executionTargetRequest,
       requestId: globalThis.crypto?.randomUUID?.() ?? `worktree-${Date.now()}-${Math.random()}`,
-      workspaceId: mergedConfig.workspaceId,
+      workspaceId: workspaceId ?? config.workspaceId,
       remoteConnectionId,
       remoteSshHost,
       config: {
-        modelName: sessionModelName,
+        modelName: explicitModelName,
+        reasoningPreset,
         enableTools: true,
         safeMode: true,
         autoCompact: true,
-        maxContextTokens: maxContextTokens,
         enableContextCompression: true,
         remoteConnectionId,
         remoteSshHost,
       }
     });
+
+    const sessionModelName = response.modelId ?? explicitModelName;
+    const maxContextTokens = await getModelMaxTokens(sessionModelName, agentType);
+    const mergedConfig: SessionConfig = {
+      ...config,
+      modelName: sessionModelName,
+      reasoningPreset,
+      workspaceId: workspaceId ?? config.workspaceId,
+    };
 
     const effectiveWorkspacePath =
       response.workspacePath || response.executionTarget?.rootPath || workspacePath;
@@ -238,14 +241,14 @@ export const localSessionDriver: SessionDriver = {
     context: FlowChatContext,
     sessionId: string,
     uiParams: UsageReportUiParams,
-  ): Promise<{ inserted: boolean }> {
+  ): Promise<{ shown: boolean }> {
     const session = context.flowChatStore.getState().sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session does not exist: ${sessionId}`);
     }
     const { runUsageReportCommand } = await import('../../services/usageReportService');
     const result = await runUsageReportCommand({ session, ...uiParams });
-    return { inserted: result.inserted };
+    return { shown: result.shown };
   },
 
   permissionRequestSource(): 'live' {
@@ -315,15 +318,6 @@ export const localSessionDriver: SessionDriver = {
 
     context.flowChatStore.addDialogTurn(sessionId, dialogTurn);
     tracker.createdLocalTurnId = dialogTurnId;
-    const pinRequest: FlowChatPinTurnToTopRequest = {
-      sessionId,
-      turnId: dialogTurnId,
-      behavior: 'auto',
-      source: 'send-message',
-      pinMode: 'sticky-latest',
-    };
-    globalEventBus.emit(FLOWCHAT_PIN_TURN_TO_TOP_EVENT, pinRequest, 'MessageModule');
-
     const isRestoringHistoricalSession =
       readySession.isHistorical || context.pendingHistoryLoads.has(sessionId);
     if (isRestoringHistoricalSession) {

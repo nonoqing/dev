@@ -1,7 +1,7 @@
 //! In-app subscription authentication.
 //!
 //! Lets BitFun sign in to another product's subscription (Codex/ChatGPT,
-//! Antigravity/Google, OpenCode Zen) with an OpenCode-style in-app OAuth flow,
+//! Antigravity/Google, OpenCode) with an OpenCode-style in-app OAuth flow,
 //! and use the resulting tokens to authenticate AI requests. Secret material
 //! is stored in the operating-system credential vault; the local JSON file
 //! contains non-secret account metadata only.
@@ -18,7 +18,8 @@ pub mod store;
 
 pub use store::{set_store_path_for_test, StoredCredential};
 
-use anyhow::{anyhow, Result};
+use crate::types::ProxyConfig;
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -37,6 +38,25 @@ pub enum SubscriptionProvider {
     Codex,
     Antigravity,
     Opencode,
+}
+
+/// Transport policy shared by subscription-auth requests.
+///
+/// The proxy is owned because login flows keep these options in a background
+/// future while token refresh and credential resolution only borrow them.
+#[derive(Debug, Clone, Default)]
+pub struct SubscriptionHttpOptions {
+    proxy_config: Option<ProxyConfig>,
+    skip_ssl_verify: bool,
+}
+
+impl SubscriptionHttpOptions {
+    pub fn new(proxy_config: Option<ProxyConfig>, skip_ssl_verify: bool) -> Self {
+        Self {
+            proxy_config,
+            skip_ssl_verify,
+        }
+    }
 }
 
 impl SubscriptionProvider {
@@ -66,7 +86,7 @@ impl SubscriptionProvider {
         match self {
             Self::Codex => "Codex (ChatGPT)",
             Self::Antigravity => "Antigravity (Google)",
-            Self::Opencode => "OpenCode Zen",
+            Self::Opencode => "OpenCode",
         }
         .to_string()
     }
@@ -78,6 +98,40 @@ impl SubscriptionProvider {
             Self::Opencode => opencode::suggested(),
         }
     }
+}
+
+/// Billing/API product selected for an OpenCode-backed model.
+///
+/// The OAuth identity is shared by both plans; this value only chooses the
+/// trusted API namespace used for model discovery and inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenCodePlan {
+    Zen,
+    Go,
+}
+
+/// One model exposed by an OpenCode plan + wire-format offering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionOfferingModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// A homogeneous group of models that share one OpenCode plan and wire format.
+///
+/// OpenCode's catalog mixes Chat Completions, Responses, and Messages models
+/// within the same plan. Keeping those groups separate lets the UI create a
+/// model configuration whose protocol and endpoint are always paired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionApiOffering {
+    pub plan: OpenCodePlan,
+    pub format: String,
+    pub base_url: String,
+    pub suggested_model: String,
+    #[serde(default)]
+    pub models: Vec<SubscriptionOfferingModel>,
 }
 
 /// A subscription account entry surfaced to the UI.
@@ -100,6 +154,10 @@ pub struct SubscriptionAccount {
     pub suggested_format: String,
     pub suggested_base_url: String,
     pub suggested_model: String,
+    /// OpenCode plan/format groups available through this single account.
+    /// Empty for subscription providers that expose only one fixed endpoint.
+    #[serde(default)]
+    pub api_offerings: Vec<SubscriptionApiOffering>,
 }
 
 /// Structured sign-out result. Metadata removal determines connection state;
@@ -208,6 +266,46 @@ fn validate_session_id(session_id: &str) -> Result<()> {
         .map_err(|_| anyhow!("subscription login session_id must be a valid UUID"))
 }
 
+/// Builds the HTTP client used by proxy-aware subscription-auth requests.
+///
+/// Subscription providers perform token exchange, refresh, or account
+/// discovery outside the normal AI request client, so they must receive the
+/// same explicit proxy configuration from the host. Keep environment proxy
+/// discovery disabled to match the main AI client, which is controlled by
+/// `ai.proxy`.
+pub(crate) fn build_http_client(
+    options: &SubscriptionHttpOptions,
+    provider: &str,
+) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .tls_backend_rustls()
+        .timeout(Duration::from_secs(30))
+        .danger_accept_invalid_certs(options.skip_ssl_verify);
+
+    if options.skip_ssl_verify {
+        log::warn!(
+            "SSL certificate verification disabled for {provider} subscription authentication"
+        );
+    }
+
+    if let Some(proxy_config) = options
+        .proxy_config
+        .as_ref()
+        .filter(|config| config.enabled && !config.url.trim().is_empty())
+    {
+        let proxy = crate::client::http::build_proxy(proxy_config)
+            .map_err(|error| anyhow!("build {provider} subscription proxy: {error}"))?;
+        builder = builder.proxy(proxy);
+        log::info!("Using configured proxy for {provider} subscription authentication");
+    } else {
+        builder = builder.no_proxy();
+    }
+
+    builder
+        .build()
+        .with_context(|| format!("build {provider} subscription http client"))
+}
+
 /// Per-provider commit barrier for login cancellation/replacement and logout.
 /// Refresh deliberately does not hold this across an external request: its
 /// durable revision CAS lets logout commit immediately and reject stale tokens.
@@ -261,11 +359,39 @@ pub(crate) fn require_current_store_revision(
 ) -> Result<u64> {
     match outcome {
         store::ConditionalCommitOutcome::Committed { revision } => Ok(revision),
-        store::ConditionalCommitOutcome::Conflict { current_revision } => Err(anyhow!(
-            "{} credentials changed in another BitFun process (current revision {current_revision}); retry the operation",
-            provider.display_label()
-        )),
+        store::ConditionalCommitOutcome::Conflict { current_revision } => {
+            Err(store_revision_conflict(provider, current_revision))
+        }
     }
+}
+
+pub(crate) fn store_revision_conflict(
+    provider: SubscriptionProvider,
+    current_revision: u64,
+) -> anyhow::Error {
+    anyhow!(
+        "{} credentials changed in another BitFun process (current revision {current_revision}); retry the operation",
+        provider.display_label()
+    )
+}
+
+/// Reloads the credential after a refresh lost its conditional commit race.
+///
+/// The revision returned by the CAS conflict is the revision observed while
+/// holding the store lock. Reloading after releasing that lock gives the
+/// caller the credential that won the race, which may be safely reused when it
+/// is still valid.
+pub(crate) async fn load_current_store_after_conflict(
+    provider: SubscriptionProvider,
+    current_revision: u64,
+) -> Result<store::VersionedCredential> {
+    let current = store::load_entry_with_revision(provider.key()).await?;
+    log::debug!(
+        "{} refresh commit lost CAS at revision {current_revision}; reloaded current revision {}",
+        provider.display_label(),
+        current.revision
+    );
+    Ok(current)
 }
 
 fn build_account(
@@ -275,9 +401,9 @@ fn build_account(
     vault_unavailable: bool,
 ) -> SubscriptionAccount {
     let (format, base_url, model) = provider.suggested();
-    let (connected, account, expires_at) = match entry {
-        None => (false, None, None),
-        Some(StoredCredential::Api { .. }) => (true, None, None),
+    let (connected, account, expires_at, metadata) = match entry {
+        None => (false, None, None, None),
+        Some(StoredCredential::Api { metadata, .. }) => (true, None, None, metadata.as_ref()),
         Some(StoredCredential::Oauth {
             expires,
             account_id,
@@ -290,8 +416,13 @@ fn build_account(
                 .and_then(|value| value.as_str())
                 .map(str::to_string);
             let account = email.or_else(|| account_id.clone());
-            (true, account, Some(expires / 1000))
+            (true, account, Some(expires / 1000), metadata.as_ref())
         }
+    };
+    let api_offerings = if connected && provider == SubscriptionProvider::Opencode {
+        opencode::offerings_from_metadata(metadata)
+    } else {
+        Vec::new()
     };
     SubscriptionAccount {
         provider,
@@ -304,6 +435,7 @@ fn build_account(
         suggested_format: format.to_string(),
         suggested_base_url: base_url.to_string(),
         suggested_model: model.to_string(),
+        api_offerings,
     }
 }
 
@@ -355,6 +487,15 @@ pub async fn start_login(
     provider: SubscriptionProvider,
     session_id: String,
 ) -> Result<LoginStartResult> {
+    start_login_with_options(provider, session_id, SubscriptionHttpOptions::default()).await
+}
+
+/// Starts a subscription login with an explicit transport policy.
+pub async fn start_login_with_options(
+    provider: SubscriptionProvider,
+    session_id: String,
+    options: SubscriptionHttpOptions,
+) -> Result<LoginStartResult> {
     validate_session_id(&session_id)?;
     let cancel = CancellationToken::new();
     let generation = next_generation();
@@ -389,16 +530,18 @@ pub async fn start_login(
 
     // The placeholder above makes cancellation visible even while a provider
     // is still binding its callback listener or requesting a device code.
-    let begin = async {
+    let begin_cancel = cancel.clone();
+    let begin = async move {
         match provider {
             SubscriptionProvider::Codex => {
-                codex::begin_login(cancel.clone(), expected_revision).await
+                codex::begin_login(begin_cancel.clone(), expected_revision, options.clone()).await
             }
             SubscriptionProvider::Antigravity => {
-                antigravity::begin_login(cancel.clone(), expected_revision).await
+                antigravity::begin_login(begin_cancel.clone(), expected_revision, options.clone())
+                    .await
             }
             SubscriptionProvider::Opencode => {
-                opencode::begin_login(cancel.clone(), expected_revision).await
+                opencode::begin_login(begin_cancel.clone(), expected_revision, options).await
             }
         }
     };
@@ -646,16 +789,53 @@ pub async fn logout(provider: SubscriptionProvider) -> Result<SubscriptionLogout
 
 /// Resolves a runtime credential for a provider, refreshing tokens if needed.
 pub async fn resolve(provider: SubscriptionProvider) -> Result<ResolvedCredential> {
+    resolve_with_options(provider, &SubscriptionHttpOptions::default()).await
+}
+
+/// Resolves a subscription credential with an explicit transport policy.
+pub async fn resolve_with_options(
+    provider: SubscriptionProvider,
+    options: &SubscriptionHttpOptions,
+) -> Result<ResolvedCredential> {
     match provider {
-        SubscriptionProvider::Codex => codex::resolve().await,
-        SubscriptionProvider::Antigravity => antigravity::resolve().await,
-        SubscriptionProvider::Opencode => opencode::resolve().await,
+        SubscriptionProvider::Codex => codex::resolve(options).await,
+        SubscriptionProvider::Antigravity => antigravity::resolve(options).await,
+        SubscriptionProvider::Opencode => opencode::resolve(options).await,
     }
+}
+
+/// Resolves an OpenCode credential for a concrete plan and request format.
+/// The adapter owns the endpoint mapping so an OAuth token can never be sent
+/// to an arbitrary URL supplied by model configuration.
+pub async fn resolve_opencode(plan: OpenCodePlan, format: &str) -> Result<ResolvedCredential> {
+    resolve_opencode_with_options(plan, format, &SubscriptionHttpOptions::default()).await
+}
+
+/// Resolves an OpenCode credential with an explicit transport policy.
+pub async fn resolve_opencode_with_options(
+    plan: OpenCodePlan,
+    format: &str,
+    options: &SubscriptionHttpOptions,
+) -> Result<ResolvedCredential> {
+    opencode::resolve_for(plan, format, options).await
 }
 
 /// Forces a resolve (which refreshes and saves), then returns the account entry.
 pub async fn refresh_account(provider: SubscriptionProvider) -> Result<SubscriptionAccount> {
-    resolve(provider).await?;
+    refresh_account_with_options(provider, &SubscriptionHttpOptions::default()).await
+}
+
+/// Refreshes a subscription account with an explicit transport policy.
+pub async fn refresh_account_with_options(
+    provider: SubscriptionProvider,
+    options: &SubscriptionHttpOptions,
+) -> Result<SubscriptionAccount> {
+    match provider {
+        SubscriptionProvider::Opencode => opencode::refresh_profile(options).await?,
+        _ => {
+            resolve_with_options(provider, options).await?;
+        }
+    }
     Ok(account_snapshot(provider).await)
 }
 

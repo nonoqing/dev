@@ -25,6 +25,7 @@ describe('PermissionConfigService', () => {
     const { permissionConfigService } = await import('./PermissionConfigService');
 
     await expect(permissionConfigService.getConfig()).resolves.toEqual({
+      default_permission: 'ask',
       policy: { preset: 'ask', rules: [] },
       interaction: { auto_approve_ask: false },
     });
@@ -34,6 +35,7 @@ describe('PermissionConfigService', () => {
     const { permissionConfigService } = await import('./PermissionConfigService');
 
     await permissionConfigService.saveConfig({
+      default_permission: 'allow',
       policy: {
         preset: 'full_access',
         rules: [{ action: 'file.read', resource: '*', effect: 'allow' }],
@@ -42,6 +44,7 @@ describe('PermissionConfigService', () => {
     });
 
     expect(configManagerMock.setConfig).toHaveBeenCalledWith('tool_permissions', {
+      default_permission: 'allow',
       policy: {
         preset: 'full_access',
         rules: [{ action: 'file.read', resource: '*', effect: 'allow' }],
@@ -68,6 +71,7 @@ describe('PermissionConfigService', () => {
     const { permissionConfigService } = await import('./PermissionConfigService');
 
     await expect(permissionConfigService.getConfig()).resolves.toEqual({
+      default_permission: 'ask',
       policy: {
         preset: 'ask',
         rules: [{ action: 'file.read', resource: '*', effect: 'ask' }],
@@ -76,8 +80,24 @@ describe('PermissionConfigService', () => {
     });
   });
 
+  it('falls back to ask when default_permission is explicitly invalid', async () => {
+    configManagerMock.getConfig.mockResolvedValue({
+      default_permission: 'unexpected',
+      policy: { preset: 'full_access', rules: [] },
+      interaction: { auto_approve_ask: true },
+    });
+    const { permissionConfigService } = await import('./PermissionConfigService');
+
+    await expect(permissionConfigService.getConfig()).resolves.toEqual({
+      default_permission: 'ask',
+      policy: { preset: 'ask', rules: [] },
+      interaction: { auto_approve_ask: false },
+    });
+  });
+
   it('uses a narrow nested write for quick interaction changes', async () => {
     configManagerMock.getConfig.mockResolvedValue({
+      default_permission: 'allow',
       policy: { preset: 'full_access', rules: [] },
       interaction: { auto_approve_ask: true },
     });

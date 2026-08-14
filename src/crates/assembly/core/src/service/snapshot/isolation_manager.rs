@@ -83,14 +83,7 @@ impl IsolationManager {
 
     /// Sets directory permissions.
     async fn set_directory_permissions(&self) -> SnapshotResult<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let permissions = fs::Permissions::from_mode(0o755);
-            fs::set_permissions(&self.runtime_context.runtime_root, permissions)?;
-        }
-
+        bitfun_services_core::path_utils::set_mode(&self.runtime_context.runtime_root, 0o755)?;
         Ok(())
     }
 

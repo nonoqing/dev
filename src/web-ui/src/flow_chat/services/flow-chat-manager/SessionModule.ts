@@ -15,7 +15,7 @@ import { i18nService } from '@/infrastructure/i18n';
 import { workspaceManager } from '@/infrastructure/services/business/workspaceManager';
 import { isPeerDeviceModeActive } from '@/infrastructure/peer-device/peerModeFlag';
 import { normalizeRemoteWorkspacePath } from '@/shared/utils/pathUtils';
-import { WorkspaceKind, type WorkspaceInfo } from '@/shared/types';
+import { isRemoteWorkspace, WorkspaceKind, type WorkspaceInfo } from '@/shared/types';
 import type {
   FlowChatContext,
   SessionConfig,
@@ -49,6 +49,10 @@ import {
   sessionProjectWorkspacePath,
 } from '../../utils/sessionWorkspace';
 import { driverForCreation, driverForSession } from '../../session-drivers/registry';
+import {
+  isProjectedFirstRuntimeTurn,
+  isProjectedSessionEmpty,
+} from '../../utils/flowChatTurnIdentity';
 
 const log = createLogger('SessionModule');
 const pendingSessionCreations = new Map<string, Promise<string>>();
@@ -507,7 +511,11 @@ export const resolveAgentTypeForSessionCreation = async (
       return normalizedRequestedMode || 'agentic';
     }
 
-    const availableModes = await agentAPI.getAvailableModes();
+    const availableModes = await agentAPI.getAvailableModes({
+      workspacePath: workspace?.rootPath,
+      remoteConnectionId: isRemoteWorkspace(workspace) ? workspace?.connectionId : undefined,
+      remoteSshHost: isRemoteWorkspace(workspace) ? workspace?.sshHost : undefined,
+    });
     if (availableModes.some(mode => mode.id === configuredDefaultMode)) {
       return configuredDefaultMode;
     }
@@ -966,17 +974,17 @@ export async function ensureBackendSession(
   );
 
   const isHistoricalSession = latestSession.isHistorical === true;
-  const isFirstTurn = latestSession.dialogTurns.length <= 1;
+  const isFirstTurn = isProjectedFirstRuntimeTurn(latestSession);
   const requiresContextRestore =
     latestSession.contextRestoreState === 'pending' ||
     latestSession.contextRestoreState === 'failed';
   const needsBackendSetup = isHistoricalSession || isFirstTurn || requiresContextRestore;
-  const hasLoadedTurns = latestSession.dialogTurns.length > 0;
+  const hasProjectedTurns = !isProjectedSessionEmpty(latestSession);
   /** Avoid createSession when historical data is already loaded but backend files are missing (e.g. new SSH connection id). */
   const allowRecreateOnCoordinatorFailure =
     needsBackendSetup &&
-    !(requiresContextRestore && hasLoadedTurns) &&
-    !(isHistoricalSession && hasLoadedTurns);
+    !(requiresContextRestore && hasProjectedTurns) &&
+    !(isHistoricalSession && hasProjectedTurns);
 
   const markBackendContextReady = () => {
     if (!isHistoricalSession && !requiresContextRestore) return;

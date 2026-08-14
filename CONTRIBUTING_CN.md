@@ -59,8 +59,8 @@ pnpm run desktop:preview:debug      # 预构建二进制 + Vite HMR；Rust 不�
 
 日常开发优先 `desktop:dev`；只迭代前端、或希望冷启动更快时用 `desktop:preview:debug`。
 
-完整命令列表：[`docs/development/common-commands-CN.md`](docs/development/common-commands-CN.md)（亦可查 [`package.json`](package.json)）。  
-改完代码后，按 [`docs/development/verification-CN.md`](docs/development/verification-CN.md) 选**最小**检查。  
+完整命令列表：[`docs/development/common-commands.zh-CN.md`](docs/development/common-commands.zh-CN.md)（亦可查 [`package.json`](package.json)）。
+改完代码后，按 [`docs/development/verification.zh-CN.md`](docs/development/verification.zh-CN.md) 选**最小**检查。
 架构与编码规范：[`AGENTS-CN.md`](AGENTS-CN.md)。
 
 ### 桌面端调试
@@ -71,7 +71,7 @@ dev 构建会打开 `devtools`：`F12` 打开原生 webview DevTools；`Cmd/Ctrl
 
 架构、模块边界、i18n / 主题 / 日志、宿主与远程规则、验证矩阵，一律以 [`AGENTS-CN.md`](AGENTS-CN.md)（以及就近模块 `AGENTS.md`）为准。PR 对齐那些索引即可，不要把细则再抄进本文。
 
-文档如何存放（Spec / Design / Plan）：[`docs/development/docs-governance-CN.md`](docs/development/docs-governance-CN.md)、[`docs/specs/README.md`](docs/specs/README.md)。
+文档如何存放（Spec / Design / Plan）：[`docs/development/docs-governance.zh-CN.md`](docs/development/docs-governance.zh-CN.md)、[`docs/specs/README.md`](docs/specs/README.md)。
 
 ## 欢迎的贡献方向
 
@@ -112,7 +112,7 @@ UI 改动请附前后对比截图或短录屏。若借助了 AI，请注明，�
 
 ## 测试与验证
 
-按改动文件选**最小**检查。完整矩阵见 [`docs/development/verification-CN.md`](docs/development/verification-CN.md)。宽范围套件交给 CI；只有影响构建 / 打包，或 CI 覆盖不到时，再在本地跑更重的命令。
+按改动文件选**最小**检查。完整矩阵见 [`docs/development/verification.zh-CN.md`](docs/development/verification.zh-CN.md)。宽范围套件交给 CI；只有影响构建 / 打包，或 CI 覆盖不到时，再在本地跑更重的命令。
 
 跑不了相关检查时，在 PR 里说明原因，并给出风险更低的手动验证办法。
 

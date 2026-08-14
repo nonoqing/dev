@@ -10,7 +10,6 @@
  */
 
 import { createLogger } from '@/shared/utils/logger';
-import { globalEventBus } from '@/infrastructure/event-bus';
 import { i18nService } from '@/infrastructure/i18n';
 import type {
   PermissionReplyKind,
@@ -32,10 +31,6 @@ import type {
   TurnTracker,
   UsageReportUiParams,
 } from '../types';
-import {
-  FLOWCHAT_PIN_TURN_TO_TOP_EVENT,
-  type FlowChatPinTurnToTopRequest,
-} from '../../events/flowchatNavigation';
 import {
   isDispatchJobTerminal,
   isNonLocalDispatchTarget,
@@ -117,25 +112,12 @@ function dispatchAttachments(
   return attachments;
 }
 
-function pinTurnToTop(sessionId: string, turnId: string): void {
-  globalEventBus.emit(
-    FLOWCHAT_PIN_TURN_TO_TOP_EVENT,
-    {
-      sessionId,
-      turnId,
-      behavior: 'auto',
-      source: 'send-message',
-      pinMode: 'sticky-latest',
-    } satisfies FlowChatPinTurnToTopRequest,
-    'DispatchSessionDriver',
-  );
-}
-
 async function appendToDispatchJob(
   sessionId: string,
   jobId: string,
   message: string,
   displayMessage: string | undefined,
+  attachments?: import('@/features/dispatch/dispatchApi').DispatchInlineAttachment[],
 ): Promise<void> {
   // Keep the id stable across an ambiguous transport failure. A retry with
   // the same message can then ask the target mailbox for the same idempotent
@@ -154,6 +136,7 @@ async function appendToDispatchJob(
     message,
     displayMessage,
     retry.id,
+    attachments,
   );
   if (!response.accepted) {
     releaseSubmissionRetry(APPEND_RETRY_SCOPE, sessionId, retry.id);
@@ -185,6 +168,7 @@ async function continueDispatchJob(
   // The composer edits these between turns; the follow-up carries them as
   // per-turn overrides which the target persists onto the job.
   const turnModel = followUpSession.config.dispatchModel?.trim() || undefined;
+  const turnReasoningPreset = followUpSession.config.dispatchReasoningPreset?.trim() || undefined;
   const turnApprovalPolicy = followUpSession.config.dispatchApprovalPolicy;
   const turnAttachments = dispatchAttachments(followUpSession, input.options?.imageContexts);
   // Reused across retries so a lost response cannot start two turns. The
@@ -197,6 +181,7 @@ async function continueDispatchJob(
     JSON.stringify([
       message,
       turnModel ?? null,
+      turnReasoningPreset ?? null,
       turnApprovalPolicy ?? null,
       turnAttachments?.map(attachment => attachment.id) ?? null,
     ]),
@@ -226,7 +211,6 @@ async function continueDispatchJob(
     status: 'pending',
     startTime: Date.now(),
   });
-  pinTurnToTop(sessionId, optimisticTurnId);
 
   try {
     const response = await dispatchApi.continueJob(
@@ -236,6 +220,7 @@ async function continueDispatchJob(
       displayMessage,
       {
         model: turnModel,
+        reasoningPreset: turnReasoningPreset,
         approvalPolicy: turnApprovalPolicy,
         ...(turnAttachments ? { attachments: turnAttachments } : {}),
       },
@@ -401,6 +386,8 @@ export const dispatchSessionDriver: SessionDriver = {
       // Do not inherit the controller's model selector. An omitted target
       // model lets the probed target use its own configured default.
       model: config.dispatchModel?.trim() || undefined,
+      reasoningPreset: config.dispatchReasoningPreset?.trim() || undefined,
+      modelCatalog: config.dispatchModelCatalog,
       availableModels: config.dispatchAvailableModels,
       defaultModel: config.dispatchDefaultModel,
       cursor: 0,
@@ -535,7 +522,7 @@ export const dispatchSessionDriver: SessionDriver = {
     context: FlowChatContext,
     sessionId: string,
     uiParams: UsageReportUiParams,
-  ): Promise<{ inserted: boolean }> {
+  ): Promise<{ shown: boolean }> {
     const session = context.flowChatStore.getState().sessions.get(sessionId);
     if (!session) {
       throw new Error(
@@ -552,16 +539,14 @@ export const dispatchSessionDriver: SessionDriver = {
     const result = await runUsageReportCommand({
       session,
       ...uiParams,
-      // The target computes the report from its persisted session; the
-      // rendered turn stays in the projection (transcript cache), never in
-      // local session persistence.
+      // The target computes the report from its persisted session; nothing is
+      // written back, here or there.
       fetchReport: async () => {
         const response = await dispatchApi.query(jobId, 'usageReport');
         return response.report as SessionUsageReport;
       },
-      persistTurn: false,
     });
-    return { inserted: result.inserted };
+    return { shown: result.shown };
   },
 
   permissionRequestSource(sessionId: string) {
@@ -624,11 +609,7 @@ export const dispatchSessionDriver: SessionDriver = {
     return [];
   },
 
-  planSubmission(
-    context: FlowChatContext,
-    sessionId: string,
-    draft: SubmissionDraft,
-  ): SubmissionPlan {
+  planSubmission(context: FlowChatContext, sessionId: string): SubmissionPlan {
     const session = context.flowChatStore.getState().sessions.get(sessionId);
     if (
       !isNonLocalDispatchTarget(session?.config.dispatchTarget)
@@ -639,16 +620,6 @@ export const dispatchSessionDriver: SessionDriver = {
       )
     ) {
       return { kind: 'queue' };
-    }
-    if (draft.hasImages) {
-      // Steering has no attachment channel; the runtime accepts images only
-      // at turn boundaries.
-      return {
-        kind: 'reject',
-        reason: i18nService.t(
-          'flow-chat:chatInput.dispatch.errors.imagesWhileRunning',
-        ),
-      };
     }
     return { kind: 'steer' };
   },
@@ -665,7 +636,13 @@ export const dispatchSessionDriver: SessionDriver = {
         i18nService.t('flow-chat:chatInput.dispatch.errors.sessionUnavailable'),
       );
     }
-    await appendToDispatchJob(sessionId, jobId, draft.message, draft.displayMessage);
+    await appendToDispatchJob(
+      sessionId,
+      jobId,
+      draft.message,
+      draft.displayMessage,
+      dispatchAttachments(session, draft.imageContexts),
+    );
   },
 
   async startTurn(
@@ -693,15 +670,15 @@ export const dispatchSessionDriver: SessionDriver = {
     }
     const dispatchState = readySession.config.dispatchJobState;
     if (dispatchState === 'queued' || dispatchState === 'running') {
-      if ((options?.imageContexts?.length ?? 0) > 0) {
-        // Steering has no attachment channel; images ride turn boundaries.
-        throw new Error(
-          i18nService.t('flow-chat:chatInput.dispatch.errors.imagesWhileRunning'),
-        );
-      }
       // A turn is already in flight; this message steers it rather than
-      // starting another one underneath it.
-      await appendToDispatchJob(sessionId, jobId, message, displayMessage);
+      // starting another one underneath it. Attachments ride along.
+      await appendToDispatchJob(
+        sessionId,
+        jobId,
+        message,
+        displayMessage,
+        dispatchAttachments(readySession, options?.imageContexts),
+      );
       return 'detached';
     }
     if (dispatchState && isDispatchJobTerminal(dispatchState)) {
@@ -746,7 +723,6 @@ export const dispatchSessionDriver: SessionDriver = {
     };
     context.flowChatStore.addDialogTurn(sessionId, optimisticTurn);
     tracker.createdLocalTurnId = optimisticTurnId;
-    pinTurnToTop(sessionId, optimisticTurnId);
 
     const includeUncommitted = readySession.config.dispatchIncludeUncommitted ?? false;
     const baseRef = readySession.config.dispatchBaseRef?.trim() || 'HEAD';
@@ -775,6 +751,7 @@ export const dispatchSessionDriver: SessionDriver = {
         prompt: message,
         approvalPolicy,
         model: readySession.config.dispatchModel?.trim() || undefined,
+        reasoningPreset: readySession.config.dispatchReasoningPreset?.trim() || undefined,
         ...(sourceWorkspacePath ? { sourceWorkspacePath } : {}),
         ...(sourceWorkspaceId ? { sourceWorkspaceId } : {}),
         ...(submitAttachments ? { attachments: submitAttachments } : {}),

@@ -11,8 +11,11 @@ use ratatui::{
     Frame,
 };
 
-use crate::ui::responsive_popup::{render_too_small, responsive_popup, ResponsivePopup};
 use crate::ui::theme::{StyleKind, Theme};
+use crate::ui::{
+    responsive_popup::{render_too_small, responsive_popup, ResponsivePopup},
+    selector_common::PagedSelector,
+};
 
 /// A subagent item for display in the selector
 #[derive(Debug, Clone)]
@@ -143,6 +146,14 @@ impl SubagentSelectorState {
         let selected = self.list_state.selected().unwrap_or(0);
         let next = (selected + 1) % self.len();
         self.list_state.select(Some(next));
+    }
+
+    pub(super) fn move_page_up(&mut self) {
+        PagedSelector::move_page_up(self)
+    }
+
+    pub(super) fn move_page_down(&mut self) {
+        PagedSelector::move_page_down(self)
     }
 
     /// Get the selected action.
@@ -401,5 +412,23 @@ mod tests {
         assert!(state.confirm_selection().is_none());
         state.move_down();
         assert!(state.confirm_selection().is_none());
+    }
+}
+
+impl PagedSelector for SubagentSelectorState {
+    fn last_area(&self) -> Option<Rect> {
+        self.last_area
+    }
+
+    fn list_state_mut(&mut self) -> &mut ListState {
+        &mut self.list_state
+    }
+
+    fn item_count(&self) -> usize {
+        self.len()
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
     }
 }

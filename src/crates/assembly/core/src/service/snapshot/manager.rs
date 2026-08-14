@@ -215,6 +215,17 @@ impl SnapshotManager {
             .await
     }
 
+    pub async fn turn_diff_aggregate(
+        &self,
+        session_id: &str,
+        turn_index: usize,
+    ) -> SnapshotResult<crate::service::snapshot::types::TurnDiffAggregate> {
+        let snapshot_service = self.snapshot_service.read().await;
+        snapshot_service
+            .turn_diff_aggregate(session_id, turn_index)
+            .await
+    }
+
     /// Returns the diff content for a file.
     pub async fn get_file_diff(
         &self,
@@ -757,7 +768,7 @@ impl WrappedTool {
         }
 
         match std::fs::symlink_metadata(&resolved.resolved_path) {
-            Ok(metadata) if is_symlink_or_reparse_point(&metadata) => {
+            Ok(metadata) if bitfun_services_core::path_utils::is_symlink_or_reparse_point(&metadata) => {
                 Err(crate::util::errors::BitFunError::Tool(format!(
                     "Snapshot-tracked Delete cannot remove a symbolic link or reparse point because rollback cannot restore the link object: {}. The delete was not performed",
                     resolved.logical_path
@@ -952,22 +963,6 @@ impl WrappedTool {
             _ => OperationType::Modify,
         }
     }
-}
-
-fn is_symlink_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    }
-
-    #[cfg(not(windows))]
-    false
 }
 
 pub async fn get_or_create_snapshot_manager(

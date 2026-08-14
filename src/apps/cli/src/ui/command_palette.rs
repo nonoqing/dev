@@ -68,7 +68,6 @@ const DEFAULT_ITEM_ORDER: &[&str] = &[
     "mcp_servers",
     "extensions",
     "hooks",
-    "hooks_external",
     "login",
     "logout",
     "status",
@@ -759,7 +758,9 @@ mod tests {
 
     #[test]
     fn registry_projection_preserves_palette_order() {
-        let idle = ActionState::chat(false, false);
+        let idle = ActionState::chat(false, false)
+            .with_has_input(true)
+            .with_stash_non_empty(true);
         let ids = default_palette_items(idle)
             .into_iter()
             .map(|item| item.id)

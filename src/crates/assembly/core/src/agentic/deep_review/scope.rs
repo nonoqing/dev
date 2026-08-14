@@ -61,15 +61,18 @@ pub fn ensure_focused_review_resolved_path_allowed(
     })?;
     let resolved_path = Path::new(resolved_path);
     ensure_focused_local_path_syntax_safe(resolved_path)?;
-    let path = local_workspace_relative_path(resolved_path, root).ok_or_else(|| {
-        BitFunError::tool(
-            "Focused Review file access is limited to the current workspace".to_string(),
-        )
-    })?;
+    let path = bitfun_services_core::path_utils::local_workspace_relative_path(resolved_path, root)
+        .ok_or_else(|| {
+            BitFunError::tool(
+                "Focused Review file access is limited to the current workspace".to_string(),
+            )
+        })?;
     ensure_focused_relative_path_syntax_safe(&path)?;
-    if tool_runtime::fs::path_has_multiple_hard_links(resolved_path).map_err(|_| {
-        BitFunError::tool("Focused Review could not verify the local file identity".to_string())
-    })? {
+    if bitfun_services_core::filesystem::path_has_multiple_hard_links(resolved_path).map_err(
+        |_| {
+            BitFunError::tool("Focused Review could not verify the local file identity".to_string())
+        },
+    )? {
         return Err(BitFunError::tool(
             "Focused Review file access cannot use a hard-link alias".to_string(),
         ));
@@ -80,15 +83,19 @@ pub fn ensure_focused_review_resolved_path_allowed(
         std::fs::canonicalize(root),
         std::fs::canonicalize(resolved_path),
     ) {
-        let canonical_relative = local_workspace_relative_path(&canonical_path, &canonical_root)
-            .ok_or_else(|| {
-                BitFunError::tool(
-                    "Focused Review file access cannot follow links outside the current workspace"
-                        .to_string(),
-                )
-            })?;
+        let canonical_relative = bitfun_services_core::path_utils::local_workspace_relative_path(
+            &canonical_path,
+            &canonical_root,
+        )
+        .ok_or_else(|| {
+            BitFunError::tool(
+                "Focused Review file access cannot follow links outside the current workspace"
+                    .to_string(),
+            )
+        })?;
         ensure_local_path_allowed(&assignment, &evidence, &canonical_relative)?;
-        if !workspace_relative_path_eq(&path, &canonical_relative) {
+        if !bitfun_services_core::path_utils::workspace_relative_path_eq(&path, &canonical_relative)
+        {
             return Err(BitFunError::tool(
                 "Focused Review file access cannot use a linked path alias".to_string(),
             ));
@@ -98,29 +105,20 @@ pub fn ensure_focused_review_resolved_path_allowed(
 }
 
 fn ensure_focused_local_path_syntax_safe(path: &Path) -> BitFunResult<()> {
-    #[cfg(windows)]
-    {
-        let normalized = path.to_string_lossy().replace('/', "\\");
-        if normalized.starts_with(r"\\?\") || normalized.starts_with(r"\\.\") {
-            return Err(BitFunError::tool(
-                "Focused Review file access cannot use a Windows device path".to_string(),
-            ));
-        }
+    if bitfun_services_core::path_utils::is_device_path(path) {
+        return Err(BitFunError::tool(
+            "Focused Review file access cannot use a Windows device path".to_string(),
+        ));
     }
-    #[cfg(not(windows))]
-    let _ = path;
     Ok(())
 }
 
 fn ensure_focused_relative_path_syntax_safe(path: &str) -> BitFunResult<()> {
-    #[cfg(windows)]
-    if path.split('/').any(|component| component.contains(':')) {
+    if bitfun_services_core::path_utils::has_alternate_data_stream(path) {
         return Err(BitFunError::tool(
             "Focused Review file access cannot use a Windows alternate data stream".to_string(),
         ));
     }
-    #[cfg(not(windows))]
-    let _ = path;
     Ok(())
 }
 
@@ -150,42 +148,6 @@ fn ensure_access_allowed(access: FocusedReviewPathAccess, path: &str) -> BitFunR
         )));
     }
     Ok(())
-}
-
-fn local_workspace_relative_path(path: &Path, root: &Path) -> Option<String> {
-    if let Ok(relative) = path.strip_prefix(root) {
-        return Some(relative.to_string_lossy().replace('\\', "/"));
-    }
-
-    #[cfg(windows)]
-    {
-        let path = path.to_string_lossy().replace('\\', "/");
-        let root = root
-            .to_string_lossy()
-            .replace('\\', "/")
-            .trim_end_matches('/')
-            .to_string();
-        if path.eq_ignore_ascii_case(&root) {
-            return Some(String::new());
-        }
-        let prefix = format!("{root}/");
-        if path
-            .get(..prefix.len())
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&prefix))
-        {
-            return path.get(prefix.len()..).map(str::to_string);
-        }
-    }
-
-    None
-}
-
-fn workspace_relative_path_eq(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
-        left.to_lowercase() == right.to_lowercase()
-    } else {
-        left == right
-    }
 }
 
 pub fn focused_review_excluded_changed_paths(

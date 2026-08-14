@@ -5,7 +5,7 @@ use crate::stream::types::unified::UnifiedResponse;
 use anyhow::{anyhow, Result};
 use bitfun_core_types::errors::AiProviderError;
 use eventsource_stream::Eventsource;
-use log::{error, trace};
+use log::{error, trace, warn};
 use reqwest::Response;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -200,6 +200,7 @@ pub async fn handle_gemini_stream(
             }
         };
 
+        let has_usage = sse_data.usage_metadata.is_some();
         let mut unified_responses = sse_data.into_unified_responses();
         if unified_responses.is_empty() {
             stats.increment("skip:empty_unified_responses");
@@ -217,10 +218,18 @@ pub async fn handle_gemini_stream(
             }
         }
 
+        let has_usage_in_response = unified_responses.iter().any(|r| r.usage.is_some());
+        if has_usage && !has_usage_in_response {
+            warn!(
+                "Gemini SSE chunk has usageMetadata but none in unified responses: raw={}",
+                raw
+            );
+        }
+
         trace!(
             target: AI_STREAM_RESPONSE_TARGET,
-            "Gemini unified responses: {:?}",
-            unified_responses
+            "Gemini unified responses: {:?}, has_usage_in_sse={}",
+            unified_responses, has_usage
         );
 
         for unified_response in unified_responses {

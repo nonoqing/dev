@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use bitfun_agent_runtime::sdk::{PermissionReply, PermissionRequest};
+use bitfun_core::AIModelCatalog;
 
 // The wire contract (version, capability names, attachment shape and
 // limits) has one source of truth shared with the controller side.
@@ -34,7 +35,7 @@ pub(crate) struct DispatchWorkspaceProbe {
     pub(crate) behind: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DispatchProbeResponse {
     pub(crate) protocol_version: u32,
@@ -44,6 +45,7 @@ pub(crate) struct DispatchProbeResponse {
     pub(crate) capabilities: Vec<String>,
     pub(crate) model_configured: bool,
     pub(crate) available_models: Vec<String>,
+    pub(crate) model_catalog: AIModelCatalog,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) default_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,6 +85,9 @@ pub(crate) struct DispatchSubmitRequest {
     pub(crate) approval_policy: DispatchApprovalPolicy,
     #[serde(default)]
     pub(crate) model: Option<String>,
+    /// Explicit canonical preset id. `auto` clears the session override.
+    #[serde(default)]
+    pub(crate) reasoning_preset: Option<String>,
     #[serde(default)]
     pub(crate) title: Option<String>,
     #[serde(default)]
@@ -160,6 +165,10 @@ pub(crate) struct DispatchAppendRequest {
     pub(crate) content: String,
     #[serde(default)]
     pub(crate) display_content: Option<String>,
+    /// Attachments injected into the running turn with the message. An older
+    /// controller omits the field entirely, which decodes to an empty list.
+    #[serde(default)]
+    pub(crate) attachments: Vec<DispatchAttachment>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -214,6 +223,13 @@ pub(crate) struct DispatchWorkspaceProvisionResponse {
     /// difference instead of the whole history.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) have_tips: Vec<String>,
+    /// Why the target could not pull `base_commit` from the project's remote,
+    /// when it tried and failed. Absent when the remote served the commit, and
+    /// when there is no remote to try. Bundle delivery costs the whole history
+    /// on a cold cache, so the reason it was chosen belongs in the record rather
+    /// than only in the target's log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fetch_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -360,6 +376,10 @@ pub(crate) struct DispatchContinueRequest {
     /// it also becomes the job's model for later turns.
     #[serde(default)]
     pub(crate) model: Option<String>,
+    /// Per-turn preset override. Absent keeps the job's current selection;
+    /// `auto` clears it and uses the target model default.
+    #[serde(default)]
+    pub(crate) reasoning_preset: Option<String>,
     /// Per-turn approval-policy override with the same carry-forward rule.
     #[serde(default)]
     pub(crate) approval_policy: Option<DispatchApprovalPolicy>,
@@ -576,6 +596,8 @@ pub(crate) struct DispatchJobListEntry {
     pub(crate) approval_policy: DispatchApprovalPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning_preset: Option<String>,
 }
 
 #[cfg(test)]
@@ -604,5 +626,20 @@ mod tests {
             serde_json::to_value(DispatchJobState::Running).expect("serialize state"),
             "running"
         );
+
+        let list_entry = DispatchJobListEntry {
+            job_id: "job-1".to_string(),
+            session_id: "session-1".to_string(),
+            state: DispatchJobState::Running,
+            started_at: None,
+            workspace_path: "/repo".to_string(),
+            title: "Reasoning job".to_string(),
+            agent_type: "agentic".to_string(),
+            approval_policy: DispatchApprovalPolicy::Remote,
+            model: Some("model-1".to_string()),
+            reasoning_preset: Some("high".to_string()),
+        };
+        let value = serde_json::to_value(list_entry).expect("serialize list entry");
+        assert_eq!(value["reasoningPreset"], "high");
     }
 }

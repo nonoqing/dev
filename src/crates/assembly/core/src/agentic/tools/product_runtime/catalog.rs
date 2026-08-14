@@ -283,22 +283,32 @@ pub(crate) async fn resolve_product_tool_manifest(
 }
 
 async fn contextual_tool_snapshot(context: &ToolUseContext) -> Vec<ToolRef> {
-    if !context.is_remote() {
-        crate::external_sources::ensure_external_source_workspace_runtime(context.workspace_root())
+    #[cfg(feature = "external-sources")]
+    {
+        if !context.is_remote() {
+            crate::external_sources::ensure_external_source_workspace_runtime(
+                context.workspace_root(),
+            )
             .await;
+        }
+        let registry = get_global_tool_registry();
+        let tools = registry.read().await.get_all_tools();
+        let route_root = crate::external_tools::external_tool_route_root(
+            context.workspace_root(),
+            context.is_remote(),
+        );
+        return tools
+            .into_iter()
+            .filter_map(|tool| {
+                crate::external_tools::resolve_external_tool_for_workspace(tool, route_root)
+            })
+            .collect();
     }
-    let route_root = crate::external_tools::external_tool_route_root(
-        context.workspace_root(),
-        context.is_remote(),
-    );
-    let registry = get_global_tool_registry();
-    let tools = registry.read().await.get_all_tools();
-    tools
-        .into_iter()
-        .filter_map(|tool| {
-            crate::external_tools::resolve_external_tool_for_workspace(tool, route_root)
-        })
-        .collect()
+    #[cfg(not(feature = "external-sources"))]
+    {
+        let _ = context;
+        get_global_tool_registry().read().await.get_all_tools()
+    }
 }
 
 pub(crate) async fn resolve_product_resolved_visible_tools(
@@ -358,6 +368,7 @@ mod tests {
     use crate::agentic::tools::registry::create_tool_registry;
     use crate::agentic::tools::tool_context_runtime::ToolUseContext;
     use crate::agentic::tools::ToolRuntimeRestrictions;
+    #[cfg(feature = "external-sources")]
     use crate::agentic::WorkspaceBinding;
     use bitfun_agent_tools::{
         GetToolSpecCatalogProvider, ToolCatalogSnapshotProvider, CALL_DEFERRED_TOOL_NAME,
@@ -365,6 +376,7 @@ mod tests {
     };
     use serde_json::{json, Value};
     use std::collections::HashMap;
+    #[cfg(feature = "external-sources")]
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -446,6 +458,7 @@ mod tests {
         tool_context(None)
     }
 
+    #[cfg(feature = "external-sources")]
     #[test]
     fn remote_workspace_route_root_isolated_from_same_local_path() {
         let root = std::env::current_dir().expect("absolute test workspace root");
@@ -540,6 +553,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tools-browser-web")]
     #[tokio::test]
     async fn product_catalog_facade_resolves_manifest_from_same_provider_owner() {
         let allowed_tools = vec!["Read".to_string(), "WebFetch".to_string()];
@@ -605,6 +619,7 @@ mod tests {
         assert!(!deferred_names.iter().any(|name| name == "WebFetch"));
     }
 
+    #[cfg(feature = "tools-browser-web")]
     #[tokio::test]
     async fn product_resolved_manifest_owner_matches_legacy_shape() {
         let allowed_tools = vec!["Read".to_string(), "WebFetch".to_string()];
@@ -713,6 +728,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "tools-browser-web", feature = "tools-mcp"))]
     #[tokio::test]
     async fn disabled_deferred_tool_loading_exposes_builtin_and_mcp_tools_directly() {
         let registry = create_tool_registry();
@@ -789,6 +805,7 @@ mod tests {
         assert_eq!(mcp_tool.parameters["required"], json!(["query"]));
     }
 
+    #[cfg(feature = "tools-browser-web")]
     #[tokio::test]
     async fn product_resolved_visible_tools_owner_matches_registry_visibility() {
         let visible = resolve_product_resolved_visible_tools(
@@ -820,6 +837,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tools-browser-web")]
     #[tokio::test]
     async fn product_catalog_facade_resolves_get_tool_spec_results_from_same_provider_owner() {
         let results = resolve_product_get_tool_spec_results(
@@ -840,6 +858,7 @@ mod tests {
         assert!(data["catalog_generation"].as_u64().is_some());
     }
 
+    #[cfg(feature = "tools-browser-web")]
     #[tokio::test]
     async fn product_get_tool_spec_returns_assistant_hint_for_direct_webfetch_in_agentic_mode() {
         let results = resolve_product_get_tool_spec_results(
@@ -871,6 +890,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "product-full")]
     #[tokio::test]
     async fn product_agentic_manifest_exposes_default_product_tools() {
         let policy = crate::agentic::agents::get_agent_registry()
@@ -963,6 +983,7 @@ mod tests {
             .any(|tool| tool.name == GET_TOOL_SPEC_TOOL_NAME));
     }
 
+    #[cfg(feature = "tools-image-analysis")]
     #[tokio::test]
     async fn product_manifest_keeps_view_image_for_multimodal_anthropic_context() {
         let allowed_tools = vec!["Read".to_string(), "view_image".to_string()];
@@ -981,6 +1002,7 @@ mod tests {
             .any(|tool| tool.name == "view_image"));
     }
 
+    #[cfg(feature = "tools-browser-web")]
     #[tokio::test]
     async fn product_manifest_snapshot_preserves_deferred_tool_discovery_contract() {
         let allowed_tools = vec![
@@ -1025,6 +1047,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "tools-browser-web", feature = "tools-git"))]
     #[tokio::test]
     async fn product_manifest_guard_preserves_deferred_gateway_surface() {
         let allowed_tools = vec![
@@ -1083,6 +1106,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tools-browser-web")]
     #[tokio::test]
     async fn product_manifest_preserves_explicit_get_tool_spec_runtime_contract() {
         let allowed_tools = vec![GET_TOOL_SPEC_TOOL_NAME.to_string(), "WebFetch".to_string()];
@@ -1114,6 +1138,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tools-browser-web")]
     #[tokio::test]
     async fn product_manifest_expands_tool_when_agent_override_requests_it() {
         let allowed_tools = vec!["Read".to_string(), "WebFetch".to_string()];

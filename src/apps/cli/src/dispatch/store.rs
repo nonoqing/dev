@@ -167,6 +167,8 @@ pub(crate) struct StoredFollowUpTurn {
     #[serde(default)]
     pub(crate) model: Option<String>,
     #[serde(default)]
+    pub(crate) reasoning_preset: Option<String>,
+    #[serde(default)]
     pub(crate) approval_policy: Option<DispatchApprovalPolicy>,
     #[serde(default)]
     pub(crate) kind: DispatchTurnKind,
@@ -181,6 +183,7 @@ impl StoredFollowUpTurn {
         self.prompt == other.prompt
             && self.display_content == other.display_content
             && self.model == other.model
+            && self.reasoning_preset == other.reasoning_preset
             && self.approval_policy == other.approval_policy
             && self.kind == other.kind
             && self.attachments == other.attachments
@@ -736,6 +739,7 @@ impl DispatchStore {
             prompt: request.prompt.clone(),
             display_content: request.display_content.clone(),
             model: request.model.clone(),
+            reasoning_preset: request.reasoning_preset.clone(),
             approval_policy: request.approval_policy,
             kind: request.kind,
             attachments: request.attachments.clone(),
@@ -806,21 +810,25 @@ impl DispatchStore {
         &self,
         job_id: &str,
         model: Option<&str>,
+        reasoning_preset: Option<&str>,
         approval_policy: DispatchApprovalPolicy,
-    ) -> Result<(bool, bool)> {
+    ) -> Result<(bool, bool, bool)> {
         let job_dir = self.existing_job_dir(job_id)?;
         let _lock = JobLock::exclusive(&job_dir.join(".lock"))?;
         let mut job = self.load_job(job_id)?;
         let model = model.map(str::to_string);
         let model_changed = job.request.model != model;
+        let reasoning_preset = reasoning_preset.map(str::to_string);
+        let reasoning_changed = job.request.reasoning_preset != reasoning_preset;
         let policy_changed = job.request.approval_policy != approval_policy;
-        if !model_changed && !policy_changed {
-            return Ok((false, false));
+        if !model_changed && !reasoning_changed && !policy_changed {
+            return Ok((false, false, false));
         }
         job.request.model = model;
+        job.request.reasoning_preset = reasoning_preset;
         job.request.approval_policy = approval_policy;
         atomic_write_json(&job_dir.join(JOB_RECORD_FILE), &job)?;
-        Ok((model_changed, policy_changed))
+        Ok((model_changed, reasoning_changed, policy_changed))
     }
 
     /// Take the next queued turn and bind it to the runtime turn the worker is
@@ -948,6 +956,27 @@ impl DispatchStore {
             let Ok(state) = self.load_state(&job_id) else {
                 continue;
             };
+            // A newly accepted follow-up is durable in the pending mailbox
+            // before its worker rewrites the job record. Project those options
+            // immediately so controller recovery cannot briefly restore stale
+            // model or reasoning selections during that window.
+            let pending_turn = if state.state.is_terminal() {
+                None
+            } else {
+                self.peek_follow_up_turn(&job_id).ok().flatten()
+            };
+            let model = pending_turn
+                .as_ref()
+                .and_then(|turn| turn.model.clone())
+                .or(job.request.model);
+            let reasoning_preset = pending_turn
+                .as_ref()
+                .and_then(|turn| turn.reasoning_preset.clone())
+                .or(job.request.reasoning_preset);
+            let approval_policy = pending_turn
+                .as_ref()
+                .and_then(|turn| turn.approval_policy)
+                .unwrap_or(job.request.approval_policy);
             entries.push(DispatchJobListEntry {
                 job_id,
                 session_id: job.request.session_id,
@@ -956,8 +985,9 @@ impl DispatchStore {
                 workspace_path: job.request.workspace_path,
                 title: job.title,
                 agent_type: job.request.agent_type,
-                approval_policy: job.request.approval_policy,
-                model: job.request.model,
+                approval_policy,
+                model,
+                reasoning_preset,
             });
         }
         entries.sort_by(|left, right| right.started_at.cmp(&left.started_at));
@@ -2043,24 +2073,14 @@ fn ensure_private_file(path: &Path) -> Result<()> {
 
 pub(super) fn create_private_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("set private permissions on {}", path.display()))?;
-    }
+    bitfun_services_core::path_utils::set_mode(path, 0o700)
+        .with_context(|| format!("set private permissions on {}", path.display()))?;
     Ok(())
 }
 
 pub(super) fn set_private_file_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("set private permissions on {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
+    bitfun_services_core::path_utils::set_mode(path, 0o600)
+        .with_context(|| format!("set private permissions on {}", path.display()))?;
     Ok(())
 }
 
@@ -2127,6 +2147,7 @@ mod tests {
             prompt: "do the work".to_string(),
             approval_policy: DispatchApprovalPolicy::RejectAndReport,
             model: Some("model-1".to_string()),
+            reasoning_preset: Some("medium".to_string()),
             title: None,
             attachments: Vec::new(),
             setup_audit: Vec::new(),
@@ -2242,6 +2263,7 @@ mod tests {
             prompt: prompt.to_string(),
             display_content: None,
             model: None,
+            reasoning_preset: None,
             approval_policy: None,
             kind: DispatchTurnKind::Prompt,
             attachments: Vec::new(),
@@ -2298,6 +2320,7 @@ mod tests {
 
         let mut follow_up = continue_request("job-1", "turn-2", "with new options");
         follow_up.model = Some("model-2".to_string());
+        follow_up.reasoning_preset = Some("high".to_string());
         follow_up.approval_policy = Some(DispatchApprovalPolicy::Remote);
         store
             .queue_follow_up_turn(&follow_up)
@@ -2309,22 +2332,40 @@ mod tests {
             .expect("peek")
             .expect("a queued turn");
         assert_eq!(peeked.model.as_deref(), Some("model-2"));
+        assert_eq!(peeked.reasoning_preset.as_deref(), Some("high"));
         assert_eq!(peeked.approval_policy, Some(DispatchApprovalPolicy::Remote));
+
+        let listed = store.list_jobs().expect("list queued job");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].model.as_deref(), Some("model-2"));
+        assert_eq!(listed[0].reasoning_preset.as_deref(), Some("high"));
+        assert_eq!(listed[0].approval_policy, DispatchApprovalPolicy::Remote);
 
         // A retried turnId bound to different options must be refused.
         let mut conflicting = follow_up.clone();
-        conflicting.model = Some("model-3".to_string());
+        conflicting.reasoning_preset = Some("low".to_string());
         assert!(store.queue_follow_up_turn(&conflicting).is_err());
 
         // Applying the effective options rewrites the job record...
-        let (model_changed, policy_changed) = store
-            .update_job_request_options("job-1", Some("model-2"), DispatchApprovalPolicy::Remote)
+        let (model_changed, reasoning_changed, policy_changed) = store
+            .update_job_request_options(
+                "job-1",
+                Some("model-2"),
+                Some("high"),
+                DispatchApprovalPolicy::Remote,
+            )
             .expect("apply options");
         assert!(model_changed);
+        assert!(reasoning_changed);
         assert!(policy_changed);
         let job = store.load_job("job-1").expect("job");
         assert_eq!(job.request.model.as_deref(), Some("model-2"));
+        assert_eq!(job.request.reasoning_preset.as_deref(), Some("high"));
         assert_eq!(job.request.approval_policy, DispatchApprovalPolicy::Remote);
+
+        let listed = store.list_jobs().expect("list applied job");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].reasoning_preset.as_deref(), Some("high"));
 
         // ...without breaking submit idempotency: the ORIGINAL submit retry
         // still matches its stored fingerprint after the rewrite.
@@ -2340,10 +2381,11 @@ mod tests {
                 .update_job_request_options(
                     "job-1",
                     Some("model-2"),
+                    Some("high"),
                     DispatchApprovalPolicy::Remote
                 )
                 .expect("idempotent apply"),
-            (false, false)
+            (false, false, false)
         );
     }
 
@@ -2478,6 +2520,7 @@ mod tests {
             message_id: "message-1".to_string(),
             content: "Continue with tests".to_string(),
             display_content: None,
+            attachments: Vec::new(),
         };
 
         assert!(store

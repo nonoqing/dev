@@ -2,13 +2,14 @@ import { MarkdownContent } from './MarkdownContent';
 
 const STREAMING_MARKDOWN_CACHE: Map<string, string> = new Map<string, string>();
 
-@Component
+@ComponentV2
 export struct StreamingMarkdownContent {
-  @Prop @Watch('handleTextChanged') text: string = '';
-  @Prop @Watch('handleTextChanged') active: boolean = false;
-  @Prop @Watch('handleTextChanged') streamKey: string = '';
-  onCopyText: (text: string) => void = (_text: string) => {};
-  @State renderedText: string = '';
+  @Param text: string = '';
+  @Param active: boolean = false;
+  @Param streamKey: string = '';
+  @Event onCopyText: (text: string) => void = (_text: string) => {};
+  @Event onOpenLink: (reference: string, label: string) => void = (_reference: string, _label: string) => {};
+  @Local renderedText: string = '';
   private targetText: string = '';
   private timerId: number = 0;
   private frameIntervalMs: number = 40;
@@ -34,10 +35,14 @@ export struct StreamingMarkdownContent {
       text: this.renderedText,
       onCopyText: (_body: string) => {
         this.onCopyText(this.text);
+      },
+      onOpenLink: (reference: string, label: string) => {
+        this.onOpenLink(reference, label);
       }
     })
   }
 
+  @Monitor('text', 'active', 'streamKey')
   private handleTextChanged(): void {
     if (!this.active) {
       this.clearTimer();

@@ -683,6 +683,140 @@ describe('FlowChatStore token usage', () => {
       totalTokens: 425,
     });
   });
+
+  it('falls back safely when deleting the turn that sourced current usage', () => {
+    const previousTurn = {
+      id: 'turn-1',
+      sessionId: 'session-1',
+      userMessage: { id: 'user-1', content: 'first', timestamp: 1_000 },
+      modelRounds: [{ id: 'round-1' }],
+      tokenUsage: {
+        inputTokens: 600,
+        outputTokens: 100,
+        totalTokens: 700,
+        timestamp: 1_500,
+      },
+      status: 'completed' as const,
+      startTime: 1_000,
+    };
+    const sourceTurn = {
+      id: 'turn-2',
+      sessionId: 'session-1',
+      userMessage: { id: 'user-2', content: 'second', timestamp: 2_000 },
+      modelRounds: [{ id: 'round-2' }],
+      status: 'completed' as const,
+      startTime: 2_000,
+    };
+    const session = createSession({
+      dialogTurns: [previousTurn, sourceTurn],
+      currentTokenUsage: {
+        inputTokens: 1_200,
+        outputTokens: 320,
+        totalTokens: 1_520,
+        timestamp: 2_500,
+        turnId: 'turn-2',
+        source: 'model_request',
+      },
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([[session.sessionId, session]]),
+      activeSessionId: session.sessionId,
+    }));
+
+    flowChatStore.deleteDialogTurn(session.sessionId, 'turn-2');
+
+    expect(flowChatStore.getState().sessions.get(session.sessionId)?.currentTokenUsage).toEqual({
+      ...previousTurn.tokenUsage,
+      turnId: 'turn-1',
+    });
+  });
+
+  it('does not derive a stale fallback from partial history after deleting the usage source', () => {
+    const previousTurn = {
+      id: 'turn-1',
+      sessionId: 'session-1',
+      userMessage: { id: 'user-1', content: 'partial older turn', timestamp: 1_000 },
+      modelRounds: [{ id: 'round-1' }],
+      tokenUsage: {
+        inputTokens: 600,
+        outputTokens: 100,
+        totalTokens: 700,
+        timestamp: 1_500,
+      },
+      status: 'completed' as const,
+      startTime: 1_000,
+    };
+    const sourceTurn = {
+      id: 'turn-2',
+      sessionId: 'session-1',
+      userMessage: { id: 'user-2', content: 'source', timestamp: 2_000 },
+      modelRounds: [{ id: 'round-2' }],
+      status: 'completed' as const,
+      startTime: 2_000,
+    };
+    const session = createSession({
+      dialogTurns: [previousTurn, sourceTurn],
+      isPartial: true,
+      currentTokenUsage: {
+        inputTokens: 1_200,
+        outputTokens: 320,
+        totalTokens: 1_520,
+        timestamp: 2_500,
+        turnId: 'turn-2',
+        source: 'model_request',
+      },
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([[session.sessionId, session]]),
+      activeSessionId: session.sessionId,
+    }));
+
+    flowChatStore.deleteDialogTurn(session.sessionId, 'turn-2');
+
+    expect(
+      flowChatStore.getState().sessions.get(session.sessionId)?.currentTokenUsage,
+    ).toBeUndefined();
+  });
+
+  it('clears usage when truncation removes its source and no safe fallback exists', () => {
+    const retainedTurn = {
+      id: 'turn-1',
+      sessionId: 'session-1',
+      userMessage: { id: 'user-1', content: 'first', timestamp: 1_000 },
+      modelRounds: [],
+      status: 'completed' as const,
+      startTime: 1_000,
+    };
+    const sourceTurn = {
+      id: 'turn-2',
+      sessionId: 'session-1',
+      userMessage: { id: 'user-2', content: 'second', timestamp: 2_000 },
+      modelRounds: [{ id: 'round-2' }],
+      status: 'completed' as const,
+      startTime: 2_000,
+    };
+    const session = createSession({
+      dialogTurns: [retainedTurn, sourceTurn],
+      currentTokenUsage: {
+        inputTokens: 1_200,
+        outputTokens: 320,
+        totalTokens: 1_520,
+        timestamp: 2_500,
+        turnId: 'turn-2',
+        source: 'model_request',
+      },
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([[session.sessionId, session]]),
+      activeSessionId: session.sessionId,
+    }));
+
+    flowChatStore.truncateDialogTurnsFrom(session.sessionId, 1);
+
+    expect(
+      flowChatStore.getState().sessions.get(session.sessionId)?.currentTokenUsage,
+    ).toBeUndefined();
+  });
 });
 
 describe('FlowChatStore round attempts', () => {
@@ -1047,104 +1181,6 @@ describe('FlowChatStore round attempts', () => {
   });
 });
 
-describe('FlowChatStore local usage reports', () => {
-  afterEach(() => {
-    resetStore();
-  });
-
-  it('inserts a local usage report as user-visible content', () => {
-    const session = createSession({ lastActiveAt: 1234 });
-    flowChatStore.setState(() => ({
-      sessions: new Map([[session.sessionId, session]]),
-      activeSessionId: session.sessionId,
-    }));
-
-    const turn = flowChatStore.addLocalUsageReportTurn({
-      sessionId: session.sessionId,
-      markdown: '# Session Usage Report',
-      reportId: 'usage-1',
-      schemaVersion: 1,
-      generatedAt: 10,
-    });
-
-    const stored = flowChatStore.getState().sessions.get(session.sessionId)?.dialogTurns[0];
-    expect(turn).not.toBeNull();
-    expect(stored?.kind).toBe('local_command');
-    expect(stored?.userMessage.content).toBe('# Session Usage Report');
-    expect(stored?.userMessage.metadata).toMatchObject({
-      localCommandKind: 'usage_report',
-      modelVisible: false,
-    });
-    expect(flowChatStore.getState().sessions.get(session.sessionId)?.lastActiveAt)
-      .toBe(1234);
-  });
-
-  it('can update local usage reports without touching session activity', () => {
-    const session = createSession({ lastActiveAt: 4321 });
-    flowChatStore.setState(() => ({
-      sessions: new Map([[session.sessionId, session]]),
-      activeSessionId: session.sessionId,
-    }));
-
-    const turn = flowChatStore.addLocalUsageReportTurn({
-      sessionId: session.sessionId,
-      markdown: '# Loading',
-      reportId: 'usage-1',
-      schemaVersion: 1,
-      generatedAt: 10,
-      status: 'loading',
-    });
-
-    expect(turn).not.toBeNull();
-    flowChatStore.updateDialogTurn(
-      session.sessionId,
-      turn!.id,
-      current => ({
-        ...current,
-        status: 'completed',
-        userMessage: {
-          ...current.userMessage,
-          content: '# Complete',
-        },
-      }),
-      { touchActivity: false },
-    );
-
-    const stored = flowChatStore.getState().sessions.get(session.sessionId);
-    expect(stored?.dialogTurns[0].userMessage.content).toBe('# Complete');
-    expect(stored?.lastActiveAt).toBe(4321);
-  });
-
-  it('appends repeated usage reports as separate snapshots', () => {
-    const session = createSession();
-    flowChatStore.setState(() => ({
-      sessions: new Map([[session.sessionId, session]]),
-      activeSessionId: session.sessionId,
-    }));
-
-    flowChatStore.addLocalUsageReportTurn({
-      sessionId: session.sessionId,
-      markdown: '# Usage 1',
-      reportId: 'usage-1',
-      schemaVersion: 1,
-      generatedAt: 10,
-    });
-    flowChatStore.addLocalUsageReportTurn({
-      sessionId: session.sessionId,
-      markdown: '# Usage 2',
-      reportId: 'usage-2',
-      schemaVersion: 1,
-      generatedAt: 20,
-    });
-
-    const turns = flowChatStore.getState().sessions.get(session.sessionId)?.dialogTurns || [];
-    expect(turns).toHaveLength(2);
-    expect(turns.map(turn => turn.id)).toEqual([
-      'local-usage-usage-1',
-      'local-usage-usage-2',
-    ]);
-  });
-});
 
 describe('FlowChatStore ACP context usage', () => {
   afterEach(() => {
@@ -1191,6 +1227,26 @@ describe('FlowChatStore session model selection', () => {
     flowChatStore.updateSessionModelName(session.sessionId, 'auto');
 
     expect(flowChatStore.getState().sessions.get(session.sessionId)?.config.modelName).toBe('auto');
+  });
+
+  it('sets and clears the session reasoning preset independently of the model', () => {
+    const session = createSession({
+      config: { agentType: 'agentic', modelName: 'model-a' },
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([[session.sessionId, session]]),
+      activeSessionId: session.sessionId,
+    }));
+
+    flowChatStore.updateSessionReasoningPreset(session.sessionId, '  high  ');
+    expect(flowChatStore.getState().sessions.get(session.sessionId)?.config).toMatchObject({
+      modelName: 'model-a',
+      reasoningPreset: 'high',
+    });
+
+    flowChatStore.updateSessionReasoningPreset(session.sessionId, null);
+    expect(flowChatStore.getState().sessions.get(session.sessionId)?.config.reasoningPreset)
+      .toBeUndefined();
   });
 
   it('applies an auto-migration notice that matches the stored model', () => {
@@ -1258,6 +1314,41 @@ describe('FlowChatStore session model selection', () => {
     expect(
       flowChatStore.applySessionModelAutoMigration('missing-session', 'removed-model', 'auto'),
     ).toBe(false);
+  });
+
+  it('clears an invalidated reasoning preset when the notice matches', () => {
+    const session = createSession({
+      config: { agentType: 'agentic', modelName: 'model-a', reasoningPreset: 'high' },
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([[session.sessionId, session]]),
+      activeSessionId: session.sessionId,
+    }));
+
+    expect(
+      flowChatStore.applySessionReasoningPresetAutoClear(session.sessionId, 'high'),
+    ).toBe(true);
+    expect(
+      flowChatStore.getState().sessions.get(session.sessionId)?.config.reasoningPreset,
+    ).toBeUndefined();
+  });
+
+  it('ignores a stale reasoning preset clear after a newer selection', () => {
+    const session = createSession({
+      config: { agentType: 'agentic', modelName: 'model-a', reasoningPreset: 'high' },
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([[session.sessionId, session]]),
+      activeSessionId: session.sessionId,
+    }));
+    flowChatStore.updateSessionReasoningPreset(session.sessionId, 'low');
+
+    expect(
+      flowChatStore.applySessionReasoningPresetAutoClear(session.sessionId, 'high'),
+    ).toBe(false);
+    expect(
+      flowChatStore.getState().sessions.get(session.sessionId)?.config.reasoningPreset,
+    ).toBe('low');
   });
 });
 
@@ -1792,6 +1883,224 @@ describe('FlowChatStore historical session hydration state', () => {
     });
   });
 
+  it('clears Peer usage whose source turn is absent even when the running snapshot is unchanged', async () => {
+    peerModeFlagMock.active = true;
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'history-1',
+        sessionName: 'History 1',
+        agentType: 'agentic',
+        state: 'Processing { current_turn_id: "turn-live", phase: Streaming }',
+        turnCount: 1,
+        createdAt: 1,
+      },
+      turns: [{
+        turnId: 'turn-live',
+        turnIndex: 0,
+        sessionId: 'history-1',
+        timestamp: 1,
+        userMessage: { id: 'user-live', content: 'continue', timestamp: 1 },
+        modelRounds: [{
+          id: 'round-live',
+          turnId: 'turn-live',
+          roundIndex: 0,
+          timestamp: 1,
+          textItems: [{
+            id: 'host-text-id',
+            content: 'partial answer',
+            isStreaming: true,
+            timestamp: 2,
+            status: 'streaming',
+          }],
+          toolItems: [],
+          thinkingItems: [],
+          startTime: 1,
+          status: 'streaming',
+        }],
+        startTime: 1,
+        status: 'inprogress',
+      }],
+      contextRestoreState: 'pending',
+      isPartial: false,
+      loadedTurnCount: 1,
+      totalTurnCount: 1,
+    });
+    const localTurn = {
+      id: 'turn-live',
+      sessionId: 'history-1',
+      userMessage: { id: 'user-live', content: 'continue', timestamp: 1 },
+      modelRounds: [{
+        id: 'round-live',
+        index: 0,
+        items: [{
+          id: 'controller-text-id',
+          type: 'text' as const,
+          content: 'partial answer plus live data',
+          isStreaming: true,
+          isMarkdown: true,
+          timestamp: 3,
+          status: 'streaming' as const,
+        }],
+        isStreaming: true,
+        isComplete: false,
+        status: 'streaming' as const,
+        startTime: 1,
+      }],
+      status: 'processing' as const,
+      startTime: 1,
+      backendTurnIndex: 0,
+    };
+    flowChatStore.setState(() => ({
+      sessions: new Map([
+        ['history-1', createSession({
+          sessionId: 'history-1',
+          historyState: 'ready',
+          dialogTurns: [localTurn],
+          currentTokenUsage: {
+            inputTokens: 42_000,
+            outputTokens: 1_000,
+            totalTokens: 43_000,
+            timestamp: 3,
+            turnId: 'turn-no-longer-visible',
+            source: 'model_request',
+          },
+        })],
+      ]),
+      activeSessionId: 'history-1',
+    }));
+
+    const result = await flowChatStore.refreshPeerSessionSnapshot(
+      'history-1',
+      '/Users/host/project',
+      { replaceRunningSnapshot: false },
+    );
+
+    expect(result.applied).toBe(true);
+    const refreshedSession = flowChatStore.getState().sessions.get('history-1');
+    expect(refreshedSession?.currentTokenUsage).toBeUndefined();
+    expect(refreshedSession?.dialogTurns[0].modelRounds[0].items[0]).toMatchObject({
+      id: 'controller-text-id',
+      content: 'partial answer plus live data',
+    });
+  });
+
+  it('replaces stale local usage with authoritative Peer usage for a multi-round turn', async () => {
+    peerModeFlagMock.active = true;
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'history-1',
+        sessionName: 'History 1',
+        agentType: 'agentic',
+        state: 'Idle',
+        turnCount: 1,
+        createdAt: 1,
+      },
+      turns: [{
+        turnId: 'turn-live',
+        turnIndex: 0,
+        sessionId: 'history-1',
+        timestamp: 1,
+        userMessage: { id: 'user-live', content: 'continue', timestamp: 1 },
+        modelRounds: [
+          {
+            id: 'round-1',
+            turnId: 'turn-live',
+            roundIndex: 0,
+            timestamp: 1,
+            textItems: [],
+            toolItems: [],
+            thinkingItems: [],
+            startTime: 1,
+            status: 'completed',
+          },
+          {
+            id: 'round-2',
+            turnId: 'turn-live',
+            roundIndex: 1,
+            timestamp: 2,
+            textItems: [],
+            toolItems: [],
+            thinkingItems: [],
+            startTime: 2,
+            status: 'completed',
+          },
+        ],
+        tokenUsage: {
+          inputTokens: 90_000,
+          outputTokens: 2_000,
+          totalTokens: 92_000,
+          timestamp: 3,
+        },
+        startTime: 1,
+        endTime: 3,
+        status: 'completed',
+      }],
+      currentContextUsage: {
+        inputTokens: 42_000,
+        outputTokens: 1_500,
+        totalTokens: 43_500,
+        timestamp: 4,
+        turnId: 'turn-live',
+        source: 'model_request',
+      },
+      contextRestoreState: 'ready',
+      isPartial: false,
+      loadedTurnCount: 1,
+      totalTurnCount: 1,
+    });
+    const localTurn = {
+      id: 'turn-live',
+      sessionId: 'history-1',
+      userMessage: { id: 'user-live', content: 'continue', timestamp: 1 },
+      modelRounds: [{
+        id: 'round-1',
+        index: 0,
+        items: [],
+        isStreaming: false,
+        isComplete: true,
+        status: 'completed' as const,
+        startTime: 1,
+      }],
+      status: 'completed' as const,
+      startTime: 1,
+      backendTurnIndex: 0,
+    };
+    flowChatStore.setState(() => ({
+      sessions: new Map([
+        ['history-1', createSession({
+          sessionId: 'history-1',
+          historyState: 'ready',
+          dialogTurns: [localTurn],
+          currentTokenUsage: {
+            inputTokens: 12_000,
+            outputTokens: 500,
+            totalTokens: 12_500,
+            timestamp: 2,
+            turnId: 'turn-live',
+            source: 'model_request',
+          },
+        })],
+      ]),
+      activeSessionId: 'history-1',
+    }));
+
+    const result = await flowChatStore.refreshPeerSessionSnapshot(
+      'history-1',
+      '/Users/host/project',
+      { replaceRunningSnapshot: false },
+    );
+
+    expect(result.applied).toBe(true);
+    expect(flowChatStore.getState().sessions.get('history-1')?.currentTokenUsage).toEqual({
+      inputTokens: 42_000,
+      outputTokens: 1_500,
+      totalTokens: 43_500,
+      timestamp: 4,
+      turnId: 'turn-live',
+      source: 'model_request',
+    });
+  });
+
   it('replaces a stale running projection after the Peer Host has completed', async () => {
     peerModeFlagMock.active = true;
     apiMocks.restoreSessionView.mockResolvedValueOnce({
@@ -2284,13 +2593,14 @@ describe('FlowChatStore historical session hydration state', () => {
     expect(stateMachineManagerMock.reset).not.toHaveBeenCalled();
   });
 
-  it('merges restored session model selection into an existing subagent shell', async () => {
+  it('merges restored model and reasoning selections into an existing subagent shell', async () => {
     apiMocks.restoreSessionView.mockResolvedValueOnce({
       session: {
         sessionId: 'subagent-1',
         sessionName: 'Subagent 1',
         agentType: 'Explore',
         modelName: 'model-subagent',
+        reasoningPreset: 'high',
         state: 'Idle',
         turnCount: 0,
         createdAt: 1,
@@ -2322,6 +2632,49 @@ describe('FlowChatStore historical session hydration state', () => {
 
     expect(flowChatStore.getState().sessions.get('subagent-1')?.config.modelName)
       .toBe('model-subagent');
+    expect(flowChatStore.getState().sessions.get('subagent-1')?.config.reasoningPreset)
+      .toBe('high');
+  });
+
+  it('normalizes a restored null reasoning preset to Auto', async () => {
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'subagent-auto',
+        sessionName: 'Subagent Auto',
+        agentType: 'Explore',
+        modelName: 'model-subagent',
+        reasoningPreset: null,
+        state: 'Idle',
+        turnCount: 0,
+        createdAt: 1,
+      },
+      turns: [],
+      contextRestoreState: 'ready',
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([
+        ['subagent-auto', createSession({
+          sessionId: 'subagent-auto',
+          sessionKind: 'subagent',
+          mode: 'Explore',
+          config: { agentType: 'Explore', reasoningPreset: 'high' },
+          workspacePath: 'D:/workspace/BitFun',
+        })],
+      ]),
+      activeSessionId: 'parent-1',
+    }));
+
+    await flowChatStore.loadSessionHistory(
+      'subagent-auto',
+      'D:/workspace/BitFun',
+      undefined,
+      undefined,
+      undefined,
+      { includeInternal: true },
+    );
+
+    expect(flowChatStore.getState().sessions.get('subagent-auto')?.config.reasoningPreset)
+      .toBeUndefined();
   });
 
   it('starts backend restore before notifying hydrating state', async () => {
@@ -4303,23 +4656,24 @@ describe('FlowChatStore historical session hydration state', () => {
     expect(apiMocks.loadSessionTurnWindow).toHaveBeenCalledTimes(1);
   });
 
-  it('commits a provisional usage report at its authoritative ordinal without corrupting the restored tail', async () => {
-    const catalog = createTurnCatalog(7);
+
+  it('caches an optimistic turn after a partial restored tail at its absolute ordinal', async () => {
+    const catalog = createTurnCatalog(23);
     apiMocks.restoreSessionView.mockResolvedValueOnce({
       session: {
         sessionId: 'history-1',
         sessionName: 'History 1',
         agentType: 'agentic',
         state: 'Idle',
-        turnCount: 7,
+        turnCount: 23,
         createdAt: 1,
       },
-      turns: [4, 5, 6].map(index => createPersistedTurn(index)),
+      turns: [20, 21, 22].map(index => createPersistedTurn(index)),
       turnCatalog: catalog,
       contextRestoreState: 'pending',
       isPartial: true,
       loadedTurnCount: 3,
-      totalTurnCount: 7,
+      totalTurnCount: 23,
     });
     flowChatStore.setState(() => ({
       sessions: new Map([[
@@ -4334,76 +4688,151 @@ describe('FlowChatStore historical session hydration state', () => {
     }));
 
     await flowChatStore.loadSessionHistory('history-1', 'D:/workspace/BitFun');
-    const provisional = flowChatStore.addLocalUsageReportTurn({
+    flowChatStore.addDialogTurn('history-1', {
+      id: 'turn-23',
       sessionId: 'history-1',
-      markdown: '# Session Usage Report',
-      reportId: 'usage-1',
-      schemaVersion: 1,
-      generatedAt: 10,
+      userMessage: { id: 'user-23', content: 'new prompt', timestamp: 24 },
+      modelRounds: [],
+      status: 'pending',
+      startTime: 24,
     });
-    expect(provisional?.backendTurnIndex).toBeUndefined();
-    expect(provisional?.userMessage.metadata?.usageReportProvisional).toBe(true);
-    expect(flowChatStore.getSessionHistoryViewState('history-1')?.loadedRanges).toMatchObject([{
-      startOrdinal: 4,
-      endOrdinalExclusive: 7,
-    }]);
 
-    const authoritativeCatalog = {
-      ...createTurnCatalog(8, 'catalog-2'),
-      entries: [
-        ...createTurnCatalog(8, 'catalog-2').entries.slice(0, 7),
-        {
-          ordinal: 7,
-          storageTurnIndex: 7,
-          turnId: provisional?.id,
-          preview: 'Session Usage Report',
-          previewTruncated: false,
-        },
-      ],
-    };
-    expect(flowChatStore.commitLocalUsageReportTurn({
-      sessionId: 'history-1',
-      dialogTurnId: provisional!.id,
-      turnId: provisional!.id,
-      storageTurnIndex: 7,
-      totalTurnCount: 8,
-      turnCatalog: authoritativeCatalog,
-    })).toBe(true);
-
-    const session = flowChatStore.getState().sessions.get('history-1');
-    expect(session).toMatchObject({
+    expect(flowChatStore.getState().sessions.get('history-1')).toMatchObject({
       isPartial: true,
       loadedTurnCount: 4,
-      totalTurnCount: 8,
+      totalTurnCount: 24,
     });
-    expect(session?.dialogTurns.find(turn => turn.id === 'turn-4')?.backendTurnIndex).toBe(4);
-    const committedReport = session?.dialogTurns.find(turn => turn.id === provisional?.id);
-    expect(committedReport?.backendTurnIndex).toBe(7);
-    expect(committedReport?.userMessage.metadata).not.toHaveProperty('usageReportProvisional');
-    expect(flowChatStore.getSessionHistoryViewState('history-1')?.loadedRanges).toMatchObject([{
-      startOrdinal: 4,
-      endOrdinalExclusive: 8,
+    const loadedRanges = flowChatStore.getSessionHistoryViewState('history-1')?.loadedRanges ?? [];
+    expect(loadedRanges).toMatchObject([{
+      startOrdinal: 20,
+      endOrdinalExclusive: 24,
     }]);
-
-    apiMocks.loadSessionTurnWindow.mockResolvedValueOnce({
-      status: 'ready',
-      catalogRevision: authoritativeCatalog.revision,
-      totalTurnCount: 8,
-      startOrdinal: 0,
-      endOrdinalExclusive: 4,
-      targetTurnId: 'turn-3',
-      turns: [0, 1, 2, 3].map(index => createPersistedTurn(index)),
-    });
-    await expect(flowChatStore.loadSessionTurnWindow('history-1', 3)).resolves.toMatchObject({
-      status: 'ready',
-      isCurrent: true,
-    });
-    expect(flowChatStore.activateSessionHistoryWindowFromTail('history-1', 3)?.range).toMatchObject({
-      startOrdinal: 0,
-      endOrdinalExclusive: 8,
-      mode: 'history-window',
-    });
+    expect(loadedRanges[0]?.turns.map(turn => turn.id)).toEqual([
+      'turn-20',
+      'turn-21',
+      'turn-22',
+      'turn-23',
+    ]);
+    expect(loadedRanges.some(range =>
+      range.startOrdinal <= 3
+      && range.endOrdinalExclusive > 3
+      && range.turns.some(turn => turn.id === 'turn-23')
+    )).toBe(false);
   });
+
+  it('adopts an optimistic partial-tail turn in place without incrementing projected history twice', async () => {
+    const catalog = createTurnCatalog(23);
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'history-1',
+        sessionName: 'History 1',
+        agentType: 'agentic',
+        state: 'Idle',
+        turnCount: 23,
+        createdAt: 1,
+      },
+      turns: [20, 21, 22].map(index => createPersistedTurn(index)),
+      turnCatalog: catalog,
+      contextRestoreState: 'pending',
+      isPartial: true,
+      loadedTurnCount: 3,
+      totalTurnCount: 23,
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([['history-1', createSession({
+        sessionId: 'history-1',
+        isHistorical: true,
+        historyState: 'metadata-only',
+      })]]),
+      activeSessionId: 'history-1',
+    }));
+    await flowChatStore.loadSessionHistory('history-1', 'D:/workspace/BitFun');
+    const optimistic = {
+      id: 'optimistic-23',
+      sessionId: 'history-1',
+      userMessage: { id: 'user-23', content: 'new prompt', timestamp: 24 },
+      modelRounds: [],
+      status: 'pending' as const,
+      startTime: 24,
+    };
+    flowChatStore.addDialogTurn('history-1', optimistic);
+
+    expect(flowChatStore.replaceOptimisticDialogTurn('history-1', optimistic.id, {
+      ...optimistic,
+      id: 'turn-23',
+      storageTurnIndex: 140,
+      backendTurnIndex: 140,
+    })).toBe(true);
+
+    expect(flowChatStore.getState().sessions.get('history-1')).toMatchObject({
+      loadedTurnCount: 4,
+      totalTurnCount: 24,
+      dialogTurns: [
+        { id: 'turn-20' },
+        { id: 'turn-21' },
+        { id: 'turn-22' },
+        { id: 'turn-23', storageTurnIndex: 140 },
+      ],
+    });
+    expect(flowChatStore.getSessionHistoryViewState('history-1')?.loadedRanges)
+      .toMatchObject([{ startOrdinal: 20, endOrdinalExclusive: 24 }]);
+  });
+
+  it('shifts cached ordinals after removing a counted optimistic turn', async () => {
+    const catalog = createTurnCatalog(23);
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'history-1',
+        sessionName: 'History 1',
+        agentType: 'agentic',
+        state: 'Idle',
+        turnCount: 23,
+        createdAt: 1,
+      },
+      turns: [20, 21, 22].map(index => createPersistedTurn(index)),
+      turnCatalog: catalog,
+      contextRestoreState: 'pending',
+      isPartial: true,
+      loadedTurnCount: 3,
+      totalTurnCount: 23,
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([['history-1', createSession({
+        sessionId: 'history-1',
+        isHistorical: true,
+        historyState: 'metadata-only',
+      })]]),
+      activeSessionId: 'history-1',
+    }));
+    await flowChatStore.loadSessionHistory('history-1', 'D:/workspace/BitFun');
+
+    const createOptimisticTurn = (id: string, timestamp: number) => ({
+      id,
+      sessionId: 'history-1',
+      userMessage: { id: `user-${id}`, content: id, timestamp },
+      modelRounds: [],
+      status: 'pending' as const,
+      startTime: timestamp,
+    });
+    flowChatStore.addDialogTurn('history-1', createOptimisticTurn('optimistic-23', 24));
+    flowChatStore.addDialogTurn('history-1', createOptimisticTurn('optimistic-24', 25));
+
+    flowChatStore.deleteDialogTurn('history-1', 'optimistic-23');
+
+    expect(flowChatStore.getState().sessions.get('history-1')).toMatchObject({
+      loadedTurnCount: 4,
+      totalTurnCount: 24,
+      dialogTurns: [
+        { id: 'turn-20' },
+        { id: 'turn-21' },
+        { id: 'turn-22' },
+        { id: 'optimistic-24' },
+      ],
+    });
+    expect(flowChatStore.getSessionHistoryViewState('history-1')?.loadedRanges)
+      .toMatchObject([{ startOrdinal: 20, endOrdinalExclusive: 24 }]);
+  });
+
 
   it('invalidates cached history and catalog entries after truncating a complete session', async () => {
     const catalog = createTurnCatalog(10);
@@ -4904,5 +5333,521 @@ describe('FlowChatStore historical session hydration state', () => {
       status: 'unsupported',
     });
     expect(apiMocks.loadSessionTurnWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it('backfills currentTokenUsage from the last completed turn after hydration', async () => {
+    peerModeFlagMock.active = true;
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'history-1',
+        sessionName: 'History 1',
+        agentType: 'agentic',
+        state: 'Idle',
+        turnCount: 2,
+        createdAt: 1,
+      },
+      turns: [
+        {
+          ...createPersistedTurn(0),
+          modelRounds: [{
+            id: 'round-0',
+            turnId: 'turn-0',
+            roundIndex: 0,
+            timestamp: 1,
+            textItems: [],
+            toolItems: [],
+            thinkingItems: [],
+            startTime: 1,
+            status: 'completed',
+          }],
+          endTime: 2,
+          tokenUsage: {
+            inputTokens: 1000,
+            outputTokens: 100,
+            totalTokens: 1100,
+            timestamp: 2,
+          },
+        },
+        {
+          ...createPersistedTurn(1),
+          modelRounds: [{
+            id: 'round-1',
+            turnId: 'turn-1',
+            roundIndex: 0,
+            timestamp: 3,
+            textItems: [],
+            toolItems: [],
+            thinkingItems: [],
+            startTime: 3,
+            status: 'completed',
+          }],
+          endTime: 4,
+          tokenUsage: {
+            inputTokens: 2400,
+            outputTokens: 300,
+            totalTokens: 2700,
+            timestamp: 4,
+          },
+        },
+      ],
+      contextRestoreState: 'ready',
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([
+        ['history-1', createSession({
+          sessionId: 'history-1',
+          isHistorical: true,
+          historyState: 'metadata-only',
+        })],
+      ]),
+      activeSessionId: 'history-1',
+    }));
+
+    await flowChatStore.loadSessionHistory('history-1', 'D:/workspace/BitFun');
+
+    expect(flowChatStore.getState().sessions.get('history-1')?.currentTokenUsage).toMatchObject({
+      inputTokens: 2400,
+      outputTokens: 300,
+      totalTokens: 2700,
+    });
+  });
+
+  it('does not backfill through the latest terminal turn when its usage spans multiple rounds', async () => {
+    peerModeFlagMock.active = true;
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'history-1',
+        sessionName: 'History 1',
+        agentType: 'agentic',
+        state: 'Idle',
+        turnCount: 2,
+        createdAt: 1,
+      },
+      turns: [
+        {
+          ...createPersistedTurn(0),
+          modelRounds: [{
+            id: 'round-0',
+            turnId: 'turn-0',
+            roundIndex: 0,
+            timestamp: 1,
+            textItems: [],
+            toolItems: [],
+            thinkingItems: [],
+            startTime: 1,
+            status: 'completed',
+          }],
+          endTime: 2,
+          tokenUsage: {
+            inputTokens: 1000,
+            outputTokens: 100,
+            totalTokens: 1100,
+            timestamp: 2,
+          },
+        },
+        {
+          ...createPersistedTurn(1),
+          modelRounds: [
+            {
+              id: 'round-1',
+              turnId: 'turn-1',
+              roundIndex: 0,
+              timestamp: 3,
+              textItems: [],
+              toolItems: [],
+              thinkingItems: [],
+              startTime: 3,
+              status: 'completed',
+            },
+            {
+              id: 'round-2',
+              turnId: 'turn-1',
+              roundIndex: 1,
+              timestamp: 4,
+              textItems: [],
+              toolItems: [],
+              thinkingItems: [],
+              startTime: 4,
+              status: 'completed',
+            },
+          ],
+          endTime: 5,
+          tokenUsage: {
+            inputTokens: 8_900_000,
+            outputTokens: 300,
+            totalTokens: 8_900_300,
+            timestamp: 5,
+          },
+        },
+      ],
+      contextRestoreState: 'ready',
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([
+        ['history-1', createSession({
+          sessionId: 'history-1',
+          isHistorical: true,
+          historyState: 'metadata-only',
+        })],
+      ]),
+      activeSessionId: 'history-1',
+    }));
+
+    await flowChatStore.loadSessionHistory('history-1', 'D:/workspace/BitFun');
+
+    expect(flowChatStore.getState().sessions.get('history-1')?.currentTokenUsage).toBeUndefined();
+  });
+
+  it('uses the restored agent type to suppress native usage for ACP hydration', async () => {
+    peerModeFlagMock.active = true;
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'history-1',
+        sessionName: 'History 1',
+        agentType: 'acp:test',
+        state: 'Idle',
+        turnCount: 1,
+        createdAt: 1,
+      },
+      turns: [{
+        ...createPersistedTurn(0),
+        modelRounds: [{
+          id: 'round-0',
+          turnId: 'turn-0',
+          roundIndex: 0,
+          timestamp: 1,
+          textItems: [],
+          toolItems: [],
+          thinkingItems: [],
+          startTime: 1,
+          status: 'completed',
+        }],
+        endTime: 2,
+        tokenUsage: {
+          inputTokens: 2400,
+          outputTokens: 300,
+          totalTokens: 2700,
+          timestamp: 2,
+        },
+      }],
+      contextRestoreState: 'ready',
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([
+        ['history-1', createSession({
+          sessionId: 'history-1',
+          isHistorical: true,
+          historyState: 'metadata-only',
+          mode: 'agentic',
+          config: { agentType: 'agentic' },
+        })],
+      ]),
+      activeSessionId: 'history-1',
+    }));
+
+    await flowChatStore.loadSessionHistory('history-1', 'D:/workspace/BitFun');
+
+    expect(flowChatStore.getState().sessions.get('history-1')).toMatchObject({
+      mode: 'acp:test',
+      currentTokenUsage: undefined,
+    });
+  });
+
+  it('keeps an existing currentTokenUsage when hydrating historical turns', async () => {
+    peerModeFlagMock.active = true;
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'history-1',
+        sessionName: 'History 1',
+        agentType: 'agentic',
+        state: 'Idle',
+        turnCount: 1,
+        createdAt: 1,
+      },
+      turns: [
+        {
+          ...createPersistedTurn(0),
+          modelRounds: [{
+            id: 'round-0',
+            turnId: 'turn-0',
+            roundIndex: 0,
+            timestamp: 1,
+            textItems: [],
+            toolItems: [],
+            thinkingItems: [],
+            startTime: 1,
+            status: 'completed',
+          }],
+          endTime: 2,
+          tokenUsage: {
+            inputTokens: 2400,
+            outputTokens: 300,
+            totalTokens: 2700,
+            timestamp: 2,
+          },
+        },
+      ],
+      contextRestoreState: 'ready',
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([
+        ['history-1', createSession({
+          sessionId: 'history-1',
+          isHistorical: true,
+          historyState: 'metadata-only',
+          currentTokenUsage: {
+            inputTokens: 999,
+            outputTokens: 1,
+            totalTokens: 1000,
+            timestamp: 5,
+            turnId: 'turn-0',
+            source: 'model_request',
+          },
+        })],
+      ]),
+      activeSessionId: 'history-1',
+    }));
+
+    await flowChatStore.loadSessionHistory('history-1', 'D:/workspace/BitFun');
+
+    expect(flowChatStore.getState().sessions.get('history-1')?.currentTokenUsage).toMatchObject({
+      inputTokens: 999,
+      outputTokens: 1,
+      totalTokens: 1000,
+      turnId: 'turn-0',
+      source: 'model_request',
+    });
+  });
+
+  it('discards stale exact usage but keeps a safe fallback when restore reports no exact usage', async () => {
+    peerModeFlagMock.active = true;
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'history-1',
+        sessionName: 'History 1',
+        agentType: 'agentic',
+        state: 'Idle',
+        turnCount: 1,
+        createdAt: 1,
+      },
+      turns: [{
+        ...createPersistedTurn(0),
+        modelRounds: [{
+          id: 'round-0',
+          turnId: 'turn-0',
+          roundIndex: 0,
+          timestamp: 1,
+          textItems: [],
+          toolItems: [],
+          thinkingItems: [],
+          startTime: 1,
+          status: 'completed',
+        }],
+        endTime: 2,
+        tokenUsage: {
+          inputTokens: 2400,
+          outputTokens: 300,
+          totalTokens: 2700,
+          timestamp: 2,
+        },
+      }],
+      currentContextUsage: null,
+      contextRestoreState: 'ready',
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([
+        ['history-1', createSession({
+          sessionId: 'history-1',
+          isHistorical: true,
+          historyState: 'metadata-only',
+          currentTokenUsage: {
+            inputTokens: 999,
+            outputTokens: 1,
+            totalTokens: 1000,
+            timestamp: 5,
+            turnId: 'turn-0',
+            source: 'model_request',
+          },
+        })],
+      ]),
+      activeSessionId: 'history-1',
+    }));
+
+    await flowChatStore.loadSessionHistory('history-1', 'D:/workspace/BitFun');
+
+    expect(flowChatStore.getState().sessions.get('history-1')?.currentTokenUsage).toMatchObject({
+      inputTokens: 2400,
+      outputTokens: 300,
+      totalTokens: 2700,
+      turnId: 'turn-0',
+    });
+  });
+
+  it('invalidates restored context usage when its source turn is not visible after hydration', async () => {
+    peerModeFlagMock.active = true;
+    apiMocks.restoreSessionView.mockResolvedValueOnce({
+      session: {
+        sessionId: 'history-1',
+        sessionName: 'History 1',
+        agentType: 'agentic',
+        state: 'Idle',
+        turnCount: 1,
+        createdAt: 1,
+      },
+      turns: [{
+        ...createPersistedTurn(0),
+        modelRounds: [{
+          id: 'round-0',
+          turnId: 'turn-0',
+          roundIndex: 0,
+          timestamp: 1,
+          textItems: [],
+          toolItems: [],
+          thinkingItems: [],
+          startTime: 1,
+          status: 'completed',
+        }],
+        endTime: 2,
+        tokenUsage: {
+          inputTokens: 2400,
+          outputTokens: 300,
+          totalTokens: 2700,
+          timestamp: 2,
+        },
+      }],
+      contextRestoreState: 'ready',
+    });
+    flowChatStore.setState(() => ({
+      sessions: new Map([
+        ['history-1', createSession({
+          sessionId: 'history-1',
+          isHistorical: true,
+          historyState: 'metadata-only',
+          currentTokenUsage: {
+            inputTokens: 42000,
+            outputTokens: 1500,
+            totalTokens: 43500,
+            timestamp: 5,
+            turnId: 'deleted-turn',
+            source: 'model_request',
+          },
+        })],
+      ]),
+      activeSessionId: 'history-1',
+    }));
+
+    await flowChatStore.loadSessionHistory('history-1', 'D:/workspace/BitFun');
+
+    expect(flowChatStore.getState().sessions.get('history-1')?.currentTokenUsage).toMatchObject({
+      inputTokens: 2400,
+      outputTokens: 300,
+      totalTokens: 2700,
+    });
+  });
+
+  it('restores current token usage from top-level persisted context metadata', async () => {
+    apiMocks.listSessions.mockResolvedValueOnce([
+      {
+        sessionId: 'history-1',
+        title: 'Saved session',
+        agentType: 'agentic',
+        modelName: 'auto',
+        createdAt: 10,
+        lastActiveAt: 20,
+        currentContextUsage: {
+          inputTokens: 42000,
+          outputTokens: 1500,
+          totalTokens: 43500,
+          timestamp: 21,
+          turnId: 'turn-7',
+          source: 'model_request',
+        },
+      },
+    ]);
+
+    await flowChatStore.initializeFromDisk('D:/workspace/BitFun');
+
+    expect(flowChatStore.getState().sessions.get('history-1')?.currentTokenUsage).toMatchObject({
+      inputTokens: 42000,
+      outputTokens: 1500,
+      totalTokens: 43500,
+      turnId: 'turn-7',
+      source: 'model_request',
+    });
+  });
+
+  it('does not restore native context metadata for ACP sessions', async () => {
+    apiMocks.listSessions.mockResolvedValueOnce([
+      {
+        sessionId: 'history-1',
+        title: 'Saved ACP session',
+        agentType: 'acp:test',
+        modelName: 'auto',
+        createdAt: 10,
+        lastActiveAt: 20,
+        currentContextUsage: {
+          inputTokens: 42000,
+          outputTokens: 1500,
+          totalTokens: 43500,
+          timestamp: 21,
+          turnId: 'turn-7',
+          source: 'model_request',
+        },
+      },
+    ]);
+
+    await flowChatStore.initializeFromDisk('D:/workspace/BitFun');
+
+    expect(flowChatStore.getState().sessions.get('history-1')?.currentTokenUsage).toBeUndefined();
+  });
+
+  it('ignores invalid persisted current context usage', async () => {
+    apiMocks.listSessions.mockResolvedValueOnce([
+      {
+        sessionId: 'history-1',
+        title: 'Saved session',
+        agentType: 'agentic',
+        modelName: 'auto',
+        createdAt: 10,
+        lastActiveAt: 20,
+        currentContextUsage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          timestamp: 21,
+          turnId: 'turn-7',
+          source: 'model_request',
+        },
+      },
+    ]);
+
+    await flowChatStore.initializeFromDisk('D:/workspace/BitFun');
+
+    expect(flowChatStore.getState().sessions.get('history-1')?.currentTokenUsage).toBeUndefined();
+  });
+
+  it('ignores persisted context usage without valid provenance', async () => {
+    apiMocks.listSessions.mockResolvedValueOnce([
+      {
+        sessionId: 'history-1',
+        title: 'Saved session',
+        agentType: 'agentic',
+        modelName: 'auto',
+        createdAt: 10,
+        lastActiveAt: 20,
+        currentContextUsage: {
+          inputTokens: 42000,
+          outputTokens: 1500,
+          totalTokens: 43500,
+          timestamp: 21,
+          turnId: '   ',
+          source: 'unknown_source',
+        },
+      },
+    ]);
+
+    await flowChatStore.initializeFromDisk('D:/workspace/BitFun');
+
+    expect(flowChatStore.getState().sessions.get('history-1')?.currentTokenUsage).toBeUndefined();
   });
 });

@@ -6,9 +6,9 @@ import type { Session } from '../types/flow-chat';
 import { flowChatStore } from '../store/FlowChatStore';
 import {
   dismissResumePrompt,
-  isResumePromptDismissed,
+  resumePromptKey,
+  shouldOpenResumePrompt,
   threadGoalActionsForStatus,
-  threadGoalStatusNeedsResumePrompt,
   type ThreadGoalUiAction,
 } from '../services/threadGoalActions';
 import { parseGoalCommand } from '../services/goalCommandParser';
@@ -105,11 +105,13 @@ function useStableThreadGoalSnapshot(sessionId: string | undefined): ThreadGoalS
 
 export function useThreadGoalController(
   session: Session | undefined,
-  options?: { isBtwSession?: boolean }
+  options?: { isBtwSession?: boolean; disabled?: boolean; sceneActive?: boolean }
 ): ThreadGoalController {
   const { t } = useTranslation('flow-chat');
   const sessionId = session?.sessionId;
   const isBtwSession = Boolean(options?.isBtwSession);
+  const disabled = isBtwSession || Boolean(options?.disabled);
+  const sceneActive = options?.sceneActive ?? true;
 
   const storeGoal = useStableThreadGoalSnapshot(sessionId);
 
@@ -139,7 +141,7 @@ export function useThreadGoalController(
   );
 
   const refreshGoal = useCallback(async () => {
-    if (!sessionId || isBtwSession) return;
+    if (!sessionId || disabled) return;
     const current = flowChatStore.getState().sessions.get(sessionId);
     if (!current?.workspacePath) return;
     try {
@@ -147,10 +149,10 @@ export function useThreadGoalController(
     } catch {
       // best-effort; UI still works from events
     }
-  }, [isBtwSession, sessionId]);
+  }, [disabled, sessionId]);
 
   useEffect(() => {
-    if (!sessionId || isBtwSession) return;
+    if (!sessionId || disabled) return;
     if (session?.isHistorical) {
       const timeoutId = globalThis.setTimeout(() => {
         void refreshGoal();
@@ -158,26 +160,38 @@ export function useThreadGoalController(
       return () => globalThis.clearTimeout(timeoutId);
     }
     void refreshGoal();
-  }, [session?.isHistorical, sessionId, isBtwSession, refreshGoal]);
+  }, [session?.isHistorical, sessionId, disabled, refreshGoal]);
 
-  const goalId = goal?.goalId;
-  const goalStatus = goal?.status;
-  const goalUpdatedAt = goal?.updatedAt;
+  /** Which session the user is actually looking at through this controller. */
+  const visitKey = sceneActive && sessionId ? sessionId : null;
+
+  /**
+   * Every scene stays mounted, so a paused goal must not raise its modal over
+   * whatever scene is in front. Leaving this session — or opening another one —
+   * retracts the prompt and re-arms the gate, which brings the prompt back when
+   * the user opens the paused session again. Declared before the effect below
+   * so a new visit re-arms first and can then re-open in the same commit.
+   */
+  useEffect(() => {
+    lastResumePromptKey.current = null;
+    setResumeOpen(false);
+  }, [visitKey]);
 
   useEffect(() => {
-    if (!sessionId || !goalId || !goalStatus || !threadGoalStatusNeedsResumePrompt(goalStatus)) {
+    if (
+      !shouldOpenResumePrompt({
+        sessionId,
+        goal,
+        sceneActive,
+        disabled,
+        lastPromptedKey: lastResumePromptKey.current,
+      })
+    ) {
       return;
     }
-    if (!goal || isResumePromptDismissed(sessionId, goal)) {
-      return;
-    }
-    const key = `${goalId}:${goalUpdatedAt ?? 0}:${goalStatus}`;
-    if (lastResumePromptKey.current === key) {
-      return;
-    }
-    lastResumePromptKey.current = key;
+    lastResumePromptKey.current = resumePromptKey(goal);
     setResumeOpen(true);
-  }, [goal, goalId, goalStatus, goalUpdatedAt, sessionId]);
+  }, [disabled, goal, sceneActive, sessionId]);
 
   const openMenu = useCallback(() => {
     setMenuOpen(true);
@@ -206,18 +220,18 @@ export function useThreadGoalController(
   );
 
   const openGoalEntry = useCallback(async () => {
-    if (!session?.workspacePath || isBtwSession) return;
+    if (!session?.workspacePath || disabled) return;
     const latest = await fetchSessionThreadGoal(session);
     if (latest) {
       setMenuOpen(true);
     } else {
       openEdit('create');
     }
-  }, [isBtwSession, openEdit, session]);
+  }, [disabled, openEdit, session]);
 
   const runSlashAction = useCallback(
     async (message: string) => {
-      if (!session) return null;
+      if (!session || disabled) return null;
       const parsed = parseGoalCommand(message);
       if (!parsed) return null;
 
@@ -240,12 +254,12 @@ export function useThreadGoalController(
         },
       });
     },
-    [confirmReplaceGoal, openEdit, session, titles]
+    [confirmReplaceGoal, disabled, openEdit, session, titles]
   );
 
   const runUiAction = useCallback(
     async (action: 'clear' | 'pause' | 'resume') => {
-      if (!session) return;
+      if (!session || disabled) return;
       try {
         await runThreadGoalUiAction(session, action, titles);
         if (action === 'clear') {
@@ -259,12 +273,12 @@ export function useThreadGoalController(
         notificationService.error(message, { title: titles.failedTitle, duration: 5000 });
       }
     },
-    [session, titles]
+    [disabled, session, titles]
   );
 
   const saveEdit = useCallback(
     async (objective: string) => {
-      if (!session) return;
+      if (!session || disabled) return;
       try {
         const saved = await saveThreadGoalObjective(session, objective, editMode, titles, {
           confirmReplaceGoal: editMode === 'create' ? confirmReplaceGoal : undefined,
@@ -282,7 +296,7 @@ export function useThreadGoalController(
         notificationService.error(message, { title: titles.failedTitle, duration: 5000 });
       }
     },
-    [confirmReplaceGoal, editMode, session, titles]
+    [confirmReplaceGoal, disabled, editMode, session, titles]
   );
 
   const confirmResume = useCallback(async () => {

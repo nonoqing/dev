@@ -1,7 +1,7 @@
 impl ChatView {
     pub(crate) fn show_prompt_command_shell_review(
         &mut self,
-        plan: bitfun_core::external_sources::PromptCommandShellReviewPlan,
+        plan: bitfun_product_domains::external_sources::PromptCommandShellReviewPlan,
     ) {
         self.prompt_command_shell_review =
             Some(crate::ui::prompt_command_shell_review::PromptCommandShellReviewPrompt::new(plan));
@@ -200,8 +200,20 @@ impl ChatView {
         self.model_selector.move_down();
     }
 
+    pub(crate) fn model_selector_page_up(&mut self) {
+        self.model_selector.move_page_up();
+    }
+
+    pub(crate) fn model_selector_page_down(&mut self) {
+        self.model_selector.move_page_down();
+    }
+
     pub(crate) fn model_selector_confirm(&self) -> Option<ModelItem> {
         self.model_selector.confirm_selection()
+    }
+
+    pub(crate) fn model_selector_toggle_favorite(&mut self) {
+        self.model_selector.toggle_favorite();
     }
 
     pub(crate) fn model_selector_allows_edit(&self) -> bool {
@@ -237,6 +249,14 @@ impl ChatView {
 
     pub(crate) fn theme_selector_down(&mut self) {
         self.theme_selector.move_down();
+    }
+
+    pub(crate) fn theme_selector_page_up(&mut self) {
+        self.theme_selector.move_page_up();
+    }
+
+    pub(crate) fn theme_selector_page_down(&mut self) {
+        self.theme_selector.move_page_down();
     }
 
     pub(crate) fn theme_selector_confirm(&self) -> Option<ThemeItem> {
@@ -296,6 +316,14 @@ impl ChatView {
         self.agent_selector.move_down();
     }
 
+    pub(crate) fn agent_selector_page_up(&mut self) {
+        self.agent_selector.move_page_up();
+    }
+
+    pub(crate) fn agent_selector_page_down(&mut self) {
+        self.agent_selector.move_page_down();
+    }
+
     pub(crate) fn agent_selector_confirm(&self) -> Option<AgentSelectorAction> {
         self.agent_selector.confirm_selection()
     }
@@ -341,6 +369,14 @@ impl ChatView {
         self.skill_selector.move_down();
     }
 
+    pub(crate) fn skill_selector_page_up(&mut self) {
+        self.skill_selector.move_page_up();
+    }
+
+    pub(crate) fn skill_selector_page_down(&mut self) {
+        self.skill_selector.move_page_down();
+    }
+
     pub(crate) fn skill_selector_confirm(&self) -> Option<SkillSelectorAction> {
         self.skill_selector.confirm_selection()
     }
@@ -383,6 +419,14 @@ impl ChatView {
         self.subagent_selector.move_down();
     }
 
+    pub(crate) fn subagent_selector_page_up(&mut self) {
+        self.subagent_selector.move_page_up();
+    }
+
+    pub(crate) fn subagent_selector_page_down(&mut self) {
+        self.subagent_selector.move_page_down();
+    }
+
     pub(crate) fn subagent_selector_confirm(&self) -> Option<SubagentSelectorAction> {
         self.subagent_selector.confirm_selection()
     }
@@ -412,6 +456,14 @@ impl ChatView {
 
     pub(crate) fn mcp_selector_down(&mut self) {
         self.mcp_selector.move_down();
+    }
+
+    pub(crate) fn mcp_selector_page_up(&mut self) {
+        self.mcp_selector.move_page_up();
+    }
+
+    pub(crate) fn mcp_selector_page_down(&mut self) {
+        self.mcp_selector.move_page_down();
     }
 
     pub(crate) fn mcp_selector_confirm(&self) -> Option<McpItem> {
@@ -519,6 +571,22 @@ impl ChatView {
 
     pub(crate) fn session_selector_remove_item(&mut self, session_id: &str) {
         self.session_selector.remove_item(session_id);
+    }
+
+    pub(crate) fn session_selector_update_item_name(&mut self, session_id: &str, new_name: &str) {
+        self.session_selector.update_item_name(session_id, new_name);
+    }
+
+    pub(crate) fn session_selector_toggle_pin(&mut self, session_id: &str) {
+        self.session_selector.toggle_pin(session_id);
+    }
+
+    pub(crate) fn session_selector_is_renaming(&self) -> bool {
+        self.session_selector.is_renaming()
+    }
+
+    pub(crate) fn session_selector_insert_rename_text(&mut self, text: &str) {
+        self.session_selector.insert_rename_text(text);
     }
 
     // ============ Subagent Session lineage selector methods ============
@@ -642,8 +710,11 @@ impl ChatView {
 
     // ============ Provider selector methods (add model step 1) ============
 
-    pub(crate) fn show_provider_selector(&mut self) {
-        self.provider_selector.show();
+    pub(crate) fn show_provider_selector(
+        &mut self,
+        provider_catalog: bitfun_core_types::ProviderCatalog,
+    ) {
+        self.provider_selector.show(provider_catalog);
         self.popup_stack.push(PopupType::ProviderSelector);
     }
 
@@ -656,7 +727,7 @@ impl ChatView {
     }
 
     pub(crate) fn reshow_provider_selector(&mut self) {
-        self.provider_selector.show();
+        self.provider_selector.reshow();
     }
 
     pub(crate) fn provider_selector_handle_key(
@@ -763,9 +834,9 @@ impl ChatView {
 
     pub(crate) fn show_account_panel(
         &mut self,
-        info: crate::account::AccountInfo,
-        devices: Vec<crate::account::AccountDevice>,
-        sync_progress: crate::account_sync::SyncProgress,
+        info: bitfun_app_server_protocol::account::AccountInfo,
+        devices: Vec<bitfun_app_server_protocol::account::AccountDevice>,
+        sync_progress: bitfun_app_server_protocol::account::SettingsSyncProgress,
     ) {
         self.login_form.show_account(info, devices, sync_progress);
         self.popup_stack.push(PopupType::LoginForm);
@@ -778,8 +849,8 @@ impl ChatView {
 
     pub(crate) fn update_account_panel_progress(
         &mut self,
-        devices: Option<Vec<crate::account::AccountDevice>>,
-        sync_progress: crate::account_sync::SyncProgress,
+        devices: Option<Vec<bitfun_app_server_protocol::account::AccountDevice>>,
+        sync_progress: bitfun_app_server_protocol::account::SettingsSyncProgress,
     ) {
         self.login_form
             .update_account_progress(devices, sync_progress);

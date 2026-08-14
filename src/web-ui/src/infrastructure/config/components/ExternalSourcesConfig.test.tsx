@@ -5,17 +5,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import ExternalSourcesConfig from './ExternalSourcesConfig';
 
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
 const getSnapshotMock = vi.hoisted(() => vi.fn());
-const getHookCatalogMock = vi.hoisted(() => vi.fn());
+const hookPanelMountedMock = vi.hoisted(() => vi.fn());
 const setSourceEnabledMock = vi.hoisted(() => vi.fn());
 const setSafeModeMock = vi.hoisted(() => vi.fn());
 const setConflictChoiceMock = vi.hoisted(() => vi.fn());
 const setToolTargetDecisionMock = vi.hoisted(() => vi.fn());
+const setToolTargetsEnabledMock = vi.hoisted(() => vi.fn());
 const setToolConflictChoiceMock = vi.hoisted(() => vi.fn());
 const setSubagentActivationMock = vi.hoisted(() => vi.fn());
+const setSubagentsEnabledMock = vi.hoisted(() => vi.fn());
 const setSubagentModelBindingMock = vi.hoisted(() => vi.fn());
 const chooseSubagentConflictMock = vi.hoisted(() => vi.fn());
 const setMcpServerDecisionMock = vi.hoisted(() => vi.fn());
+const setMcpServersEnabledMock = vi.hoisted(() => vi.fn());
 const chooseMcpConflictMock = vi.hoisted(() => vi.fn());
 const updateIntegrationPolicyMock = vi.hoisted(() => vi.fn());
 const revealSourceLocationMock = vi.hoisted(() => vi.fn());
@@ -73,18 +78,24 @@ vi.mock('@/infrastructure/api/service-api/ExternalSourcesAPI', () => ({
     setSafeMode: setSafeModeMock,
     setConflictChoice: setConflictChoiceMock,
     setToolTargetDecision: setToolTargetDecisionMock,
+    setToolTargetsEnabled: setToolTargetsEnabledMock,
     setToolConflictChoice: setToolConflictChoiceMock,
     setSubagentActivation: setSubagentActivationMock,
+    setSubagentsEnabled: setSubagentsEnabledMock,
     setSubagentModelBinding: setSubagentModelBindingMock,
     chooseSubagentConflict: chooseSubagentConflictMock,
     setMcpServerDecision: setMcpServerDecisionMock,
+    setMcpServersEnabled: setMcpServersEnabledMock,
     chooseMcpConflict: chooseMcpConflictMock,
     updateIntegrationPolicy: updateIntegrationPolicyMock,
     revealSourceLocation: revealSourceLocationMock,
   },
 }));
-vi.mock('@/infrastructure/api/service-api/ExternalHooksAPI', () => ({
-  externalHooksAPI: { getCatalog: getHookCatalogMock },
+vi.mock('./HooksConfig', () => ({
+  default: (props: { embedded?: boolean }) => {
+    hookPanelMountedMock(props.embedded);
+    return null;
+  },
 }));
 
 const snapshot = {
@@ -246,16 +257,6 @@ describe('ExternalSourcesConfig', () => {
     workspaceState.path = 'D:/workspace/project';
     workspaceState.kind = 'normal';
     peerState.deviceId = '';
-    getHookCatalogMock.mockResolvedValue({
-      schemaVersion: 1,
-      discoveryPending: false,
-      providers: [],
-      sources: [],
-      entries: [],
-      staleProviderIds: [],
-      failedProviderIds: [],
-      diagnostics: [],
-    });
     getSnapshotMock.mockResolvedValue(snapshot);
     setSourceEnabledMock.mockResolvedValue(snapshot);
     setSafeModeMock.mockResolvedValue(snapshot);
@@ -267,11 +268,14 @@ describe('ExternalSourcesConfig', () => {
       }],
     });
     setToolTargetDecisionMock.mockResolvedValue(snapshot);
+    setToolTargetsEnabledMock.mockResolvedValue(snapshot);
     setToolConflictChoiceMock.mockResolvedValue(snapshot);
     setSubagentActivationMock.mockResolvedValue(snapshot);
+    setSubagentsEnabledMock.mockResolvedValue(snapshot);
     setSubagentModelBindingMock.mockResolvedValue(snapshot);
     chooseSubagentConflictMock.mockResolvedValue(snapshot);
     setMcpServerDecisionMock.mockResolvedValue(snapshot);
+    setMcpServersEnabledMock.mockResolvedValue(snapshot);
     chooseMcpConflictMock.mockResolvedValue(snapshot);
     updateIntegrationPolicyMock.mockResolvedValue(snapshot);
     revealSourceLocationMock.mockResolvedValue(undefined);
@@ -318,6 +322,389 @@ describe('ExternalSourcesConfig', () => {
       resolveSnapshot?.(snapshot);
       await Promise.resolve();
     });
+  });
+
+  it('opens the existing owner controls from the application permission hint', async () => {
+    const scrolledElements: Element[] = [];
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value(this: Element) {
+        scrolledElements.push(this);
+      },
+    });
+    const policySnapshot = {
+      ...snapshot,
+      preferenceRevision: 4,
+      integrationPolicy,
+      control: {
+        schemaVersion: 1 as const,
+        executionDomainId: 'local-user',
+        refreshGeneration: 1,
+        preferenceRevision: 4,
+        safeMode: true,
+        hostCapabilities: snapshot.hostCapabilities,
+        sources: [],
+        capabilities: [],
+        diagnostics: [],
+        recoveryActions: [],
+      },
+      sources: [{
+        ...snapshot.sources[0],
+        record: {
+          ...snapshot.sources[0].record,
+          ecosystemId: 'opencode',
+        },
+      }],
+      commandConflicts: [],
+      toolApprovalRequests: [{
+        approvalKey: 'approval-1',
+        decisionKey: 'decision-1',
+        targetId: {
+          source: { providerId: 'opencode.commands', sourceId: 'project' },
+          localId: 'tool-a',
+        },
+        sourceDisplayName: 'OpenCode',
+        sourceLocation: '<workspace>/.opencode',
+        sourceScope: 'project',
+        toolNames: ['tool-a'],
+        runtimeKind: 'node',
+        workingDirectory: '<workspace>',
+        capabilities: ['file_system'],
+        contentVersion: 'v1',
+      }],
+    };
+    getSnapshotMock.mockResolvedValue(policySnapshot);
+
+    await act(async () => {
+      root.render(<ExternalSourcesConfig />);
+      await Promise.resolve();
+    });
+
+    expect(container.querySelectorAll('[data-bf-part="appAttention"]')).toHaveLength(1);
+    const advanced = container.querySelector<HTMLDetailsElement>(
+      '.bitfun-external-sources-config__advanced',
+    );
+    expect(advanced?.open).toBe(false);
+
+    const openPermissions = container.querySelector<HTMLButtonElement>('[data-bf-part="appAttention"]');
+    await act(async () => {
+      openPermissions?.click();
+      await vi.runAllTimersAsync();
+    });
+    expect(advanced?.open).toBe(true);
+    const matchingApplicationAction = container.querySelector(
+      '[data-bf-part="toolCard"][data-external-attention="true"]'
+        + '[data-external-ecosystem="opencode"]',
+    );
+    expect(matchingApplicationAction).not.toBeNull();
+    expect(scrolledElements).toContain(matchingApplicationAction);
+  });
+
+  it('uses each application switch as the recommended connection control without a dialog', async () => {
+    const policySnapshot = {
+      ...snapshot,
+      preferenceRevision: 4,
+      integrationPolicy: {
+        ...integrationPolicy,
+        userDefaults: {
+          ...integrationPolicy.userDefaults,
+          ecosystems: { opencode: { mode: 'discover_only', capabilityOverrides: {} } },
+        },
+        globalEffective: {
+          ...integrationPolicy.globalEffective,
+          ecosystems: {
+            opencode: {
+              ...integrationPolicy.globalEffective.ecosystems.opencode,
+              mode: 'discover_only',
+            },
+          },
+        },
+        effective: {
+          ...integrationPolicy.effective,
+          ecosystems: {
+            opencode: {
+              ...integrationPolicy.effective.ecosystems.opencode,
+              mode: 'discover_only',
+            },
+          },
+        },
+      },
+      sources: [{
+        ...snapshot.sources[0],
+        record: { ...snapshot.sources[0].record, ecosystemId: 'opencode' },
+      }],
+      commandConflicts: [],
+      diagnostics: [],
+    };
+    getSnapshotMock.mockResolvedValue(policySnapshot);
+
+    await act(async () => {
+      root.render(<ExternalSourcesConfig />);
+      await Promise.resolve();
+    });
+
+    const applicationToggle = container.querySelector<HTMLInputElement>(
+      '[data-bf-part="applicationToggle"] input[type="checkbox"]',
+    );
+    expect(applicationToggle?.checked).toBe(false);
+    await act(async () => applicationToggle?.click());
+
+    expect(container.textContent).not.toContain('applications.connectTitle');
+    expect(updateIntegrationPolicyMock).toHaveBeenCalledWith('D:/workspace/project', {
+      expectedPreferenceRevision: 4,
+      scope: 'workspace',
+      change: {
+        operation: 'set_ecosystem_mode',
+        ecosystemId: 'opencode',
+        mode: 'recommended',
+      },
+    });
+  });
+
+  it('focuses the master setting when an application switch is disabled by it', async () => {
+    const scrolledElements: Element[] = [];
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value(this: Element) {
+        scrolledElements.push(this);
+      },
+    });
+    getSnapshotMock.mockResolvedValue({
+      ...snapshot,
+      integrationPolicy: {
+        ...integrationPolicy,
+        userDefaults: { ...integrationPolicy.userDefaults, enabled: false },
+        globalEffective: { ...integrationPolicy.globalEffective, enabled: false },
+        effective: { ...integrationPolicy.effective, enabled: false },
+      },
+      sources: [{
+        ...snapshot.sources[0],
+        record: { ...snapshot.sources[0].record, ecosystemId: 'opencode' },
+      }],
+      commandConflicts: [],
+      diagnostics: [],
+    });
+
+    await act(async () => {
+      root.render(<ExternalSourcesConfig />);
+      await Promise.resolve();
+    });
+
+    const disabledApplicationToggle = container.querySelector<HTMLElement>(
+      '[data-bf-part="applicationToggle"]',
+    );
+    await act(async () => {
+      disabledApplicationToggle?.click();
+      await vi.runAllTimersAsync();
+    });
+
+    const policyCard = container.querySelector<HTMLElement>('[data-bf-part="policyCard"]');
+    const masterSwitch = policyCard?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    expect(scrolledElements).toContain(policyCard);
+    expect(document.activeElement).toBe(masterSwitch);
+  });
+
+  it('defers Hook owner reads until the Hook disclosure opens', async () => {
+    await import('./HooksConfig');
+    getSnapshotMock.mockResolvedValue({
+      ...snapshot,
+      integrationPolicy,
+      sources: [{
+        ...snapshot.sources[0],
+        record: { ...snapshot.sources[0].record, ecosystemId: 'opencode' },
+      }],
+      commandConflicts: [],
+      diagnostics: [],
+    });
+
+    await act(async () => {
+      root.render(<ExternalSourcesConfig />);
+      await Promise.resolve();
+    });
+
+    expect(hookPanelMountedMock).not.toHaveBeenCalled();
+    const hookSummary = Array.from(container.querySelectorAll('summary')).find(
+      (summary) => summary.textContent?.includes('hooksManagement.title'),
+    );
+    expect(hookSummary).toBeDefined();
+    const hookDisclosure = hookSummary?.closest('details');
+    await act(async () => {
+      if (hookDisclosure) {
+        hookDisclosure.open = true;
+        hookDisclosure.dispatchEvent(new Event('toggle'));
+      }
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(hookPanelMountedMock).toHaveBeenCalledWith(true);
+  });
+
+  it('opens and focuses Hook management after a legacy Hook deep link', async () => {
+    await import('./HooksConfig');
+    Element.prototype.scrollIntoView = vi.fn();
+    getSnapshotMock.mockResolvedValue({
+      ...snapshot,
+      integrationPolicy,
+      sources: [{
+        ...snapshot.sources[0],
+        record: { ...snapshot.sources[0].record, ecosystemId: 'opencode' },
+      }],
+      commandConflicts: [],
+      diagnostics: [],
+    });
+
+    await act(async () => {
+      root.render(<ExternalSourcesConfig initialFocus="hooks" focusRequestId={1} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const hookDisclosure = container.querySelector<HTMLDetailsElement>(
+      '.bitfun-external-sources-config__hooks',
+    );
+    expect(hookDisclosure?.open).toBe(true);
+    expect(hookPanelMountedMock).toHaveBeenCalledWith(true);
+    expect(document.activeElement).toBe(hookDisclosure?.querySelector('summary'));
+
+    await act(async () => {
+      hookDisclosure!.open = false;
+      hookDisclosure!.dispatchEvent(new Event('toggle'));
+      await Promise.resolve();
+    });
+    expect(hookDisclosure?.open).toBe(false);
+
+    await act(async () => {
+      root.render(<ExternalSourcesConfig initialFocus="hooks" focusRequestId={2} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(hookDisclosure?.open).toBe(true);
+    expect(document.activeElement).toBe(hookDisclosure?.querySelector('summary'));
+  });
+
+  it('keeps Hook management reachable when the external-source host is unavailable', async () => {
+    await import('./HooksConfig');
+    Element.prototype.scrollIntoView = vi.fn();
+    getSnapshotMock.mockRejectedValueOnce({
+      code: 'host_unavailable',
+      message: 'external sources unavailable',
+    });
+
+    await act(async () => {
+      root.render(<ExternalSourcesConfig initialFocus="hooks" focusRequestId={1} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('unavailable.hostDescription');
+    const hookDisclosure = container.querySelector<HTMLDetailsElement>(
+      '.bitfun-external-sources-config__hooks',
+    );
+    expect(hookDisclosure?.open).toBe(true);
+    expect(hookPanelMountedMock).toHaveBeenCalledWith(true);
+    expect(document.activeElement).toBe(hookDisclosure?.querySelector('summary'));
+  });
+
+  it('restores custom application mode after an authoritative disabled round trip', async () => {
+    const scopedPolicy = {
+      ...integrationPolicy,
+      workspaceOverride: {
+        ecosystems: {
+          opencode: {
+            mode: 'custom',
+            capabilityOverrides: { command: 'disabled' },
+          },
+        },
+      },
+      effective: {
+        ...integrationPolicy.effective,
+        ecosystems: {
+          opencode: {
+            ...integrationPolicy.effective.ecosystems.opencode,
+            mode: 'custom',
+            capabilities: {
+              ...integrationPolicy.effective.ecosystems.opencode.capabilities,
+              command: 'disabled',
+            },
+          },
+        },
+      },
+    };
+    const customSnapshot = {
+      ...snapshot,
+      preferenceRevision: 4,
+      integrationPolicy: scopedPolicy,
+      sources: [{
+        ...snapshot.sources[0],
+        record: { ...snapshot.sources[0].record, ecosystemId: 'opencode' },
+      }],
+      commandConflicts: [],
+      diagnostics: [],
+    };
+    const disabledSnapshot = {
+      ...customSnapshot,
+      preferenceRevision: 5,
+      integrationPolicy: {
+        ...scopedPolicy,
+        workspaceOverride: {
+          ecosystems: {
+            opencode: {
+              mode: 'disabled',
+              capabilityOverrides: { command: 'disabled' },
+            },
+          },
+        },
+        effective: {
+          ...scopedPolicy.effective,
+          ecosystems: {
+            opencode: {
+              ...scopedPolicy.effective.ecosystems.opencode,
+              mode: 'disabled',
+              capabilities: { command: 'disabled' },
+            },
+          },
+        },
+      },
+    };
+    const restoredSnapshot = {
+      ...customSnapshot,
+      preferenceRevision: 6,
+    };
+    getSnapshotMock.mockResolvedValue(customSnapshot);
+    updateIntegrationPolicyMock
+      .mockResolvedValueOnce(disabledSnapshot)
+      .mockResolvedValueOnce(restoredSnapshot);
+
+    await act(async () => {
+      root.render(<ExternalSourcesConfig />);
+      await Promise.resolve();
+    });
+
+    let applicationToggle = container.querySelector<HTMLInputElement>(
+      '[data-bf-part="applicationToggle"] input[type="checkbox"]',
+    );
+    expect(applicationToggle?.checked).toBe(true);
+    await act(async () => {
+      applicationToggle?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    applicationToggle = container.querySelector<HTMLInputElement>(
+      '[data-bf-part="applicationToggle"] input[type="checkbox"]',
+    );
+    expect(applicationToggle?.checked).toBe(false);
+    await act(async () => {
+      applicationToggle?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(updateIntegrationPolicyMock.mock.calls.map(([, request]) => request.change)).toEqual([
+      { operation: 'set_ecosystem_mode', ecosystemId: 'opencode', mode: 'disabled' },
+      { operation: 'set_ecosystem_mode', ecosystemId: 'opencode', mode: 'custom' },
+    ]);
   });
 
   it('keeps compatibility controls compact and applies the safe OpenCode defaults', async () => {
@@ -395,8 +782,12 @@ describe('ExternalSourcesConfig', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('safeMode.title');
     expect(container.textContent).toContain('sources.commandCount:{"count":1}');
+    await act(async () => {
+      container.querySelector<HTMLDetailsElement>(
+        '.bitfun-external-sources-config__advanced',
+      )?.querySelector<HTMLElement>('summary')?.click();
+    });
     const toggle = container.querySelector(
       'input[aria-label="safeMode.toggleLabel"]',
     ) as HTMLInputElement;
@@ -439,6 +830,11 @@ describe('ExternalSourcesConfig', () => {
       await Promise.resolve();
     });
 
+    await act(async () => {
+      container.querySelector<HTMLDetailsElement>(
+        '.bitfun-external-sources-config__advanced',
+      )?.querySelector<HTMLElement>('summary')?.click();
+    });
     const toggle = container.querySelector(
       'input[aria-label="safeMode.toggleLabel"]',
     ) as HTMLInputElement;
@@ -479,6 +875,11 @@ describe('ExternalSourcesConfig', () => {
 
     expect(container.textContent).toContain('legacyHostNotice');
     expect(container.textContent).toContain('recoveryActions.reconnect_host');
+    await act(async () => {
+      container.querySelector<HTMLDetailsElement>(
+        '.bitfun-external-sources-config__advanced',
+      )?.querySelector<HTMLElement>('summary')?.click();
+    });
     const toggle = container.querySelector(
       'input[aria-label="safeMode.toggleLabel"]',
     ) as HTMLInputElement;
@@ -842,6 +1243,7 @@ describe('ExternalSourcesConfig', () => {
         selectedCandidateId: 'native-mcp-github',
       }],
     });
+    setMcpServersEnabledMock.mockResolvedValue(mcpSnapshot);
 
     await act(async () => {
       root.render(<ExternalSourcesConfig />);
@@ -859,6 +1261,19 @@ describe('ExternalSourcesConfig', () => {
     expect(container.textContent).toContain('mcp.timeoutStartup');
     expect(container.textContent).toContain('mcp.timeoutCatalog');
     expect(container.textContent).toContain('mcp.timeoutExecution');
+
+    const mcpBulkEnable = container.querySelector<HTMLButtonElement>(
+      '[data-bf-bulk-capability="mcp"] button',
+    );
+    await act(async () => mcpBulkEnable?.click());
+    expect(setMcpServersEnabledMock).toHaveBeenCalledWith(
+      'D:/workspace/project',
+      [{ candidateId: 'external-mcp-github', decisionKey: 'mcp-decision-v1' },
+        { candidateId: 'external-mcp-docs', decisionKey: 'mcp-decision-v2' }],
+      true,
+      5,
+      9,
+    );
 
     const approvalCard = Array.from(container.querySelectorAll(
       '.bitfun-external-sources-config__tool-card',
@@ -938,6 +1353,74 @@ describe('ExternalSourcesConfig', () => {
       5,
       9,
     );
+  });
+
+  it('keeps polling through a transient read failure and beyond the old startup limit', async () => {
+    const server = {
+      candidateId: 'external-mcp-docs',
+      decisionKey: 'mcp-decision-v1',
+      definition: {
+        id: {
+          source: { providerId: 'opencode.mcp', sourceId: 'project' },
+          localId: 'docs',
+        },
+        provenance: [{ providerId: 'opencode.mcp', sourceId: 'project' }],
+        name: 'docs',
+        transport: 'local_stdio',
+        commandPreview: 'missing-docs-command',
+        argumentCount: 0,
+        environmentKeys: [],
+        environmentReferenceNames: [],
+        headerNames: [],
+        sourceEnabled: true,
+        behaviorVersion: 'behavior-v1',
+        staticStatus: { state: 'ready' },
+      },
+      activationState: { state: 'starting' },
+    };
+    const startingSnapshot = {
+      ...snapshot,
+      commandConflicts: [],
+      preferenceRevision: 3,
+      mcpGeneration: 4,
+      mcpServers: [server],
+      mcpApprovalRequests: [],
+      mcpConflicts: [],
+    };
+    let acceptedPolls = 0;
+    getSnapshotMock
+      .mockResolvedValueOnce(startingSnapshot)
+      .mockRejectedValueOnce(new Error('temporary snapshot read failure'))
+      .mockImplementation(async () => {
+        acceptedPolls += 1;
+        if (acceptedPolls <= 11) return startingSnapshot;
+        return {
+        ...startingSnapshot,
+        mcpServers: [{
+          ...server,
+          activationState: {
+            state: 'runtime_unavailable',
+            reason: 'provider.internal D:/private/config.json',
+          },
+        }],
+        };
+      });
+
+    await act(async () => {
+      root.render(<ExternalSourcesConfig />);
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('mcpState.starting');
+
+    await act(async () => vi.advanceTimersByTimeAsync(55_250));
+
+    expect(getSnapshotMock).toHaveBeenCalledTimes(14);
+    expect(container.textContent).toContain('mcp.failureReasons.other');
+    expect(container.textContent).not.toContain('D:/private/config.json');
+    const details = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('common.details'));
+    await act(async () => details?.click());
+    expect(container.textContent).toContain('mcp.runtimeUnavailableGuidance');
   });
 
   it('keeps remembered command, tool, and agent choices visible and changeable', async () => {
@@ -1278,6 +1761,19 @@ describe('ExternalSourcesConfig', () => {
     expect(container.textContent).toContain('errors.loadFailed');
     expect(container.textContent).not.toContain('initial load failed');
     expect(container.textContent).not.toContain('sources.empty');
+    const initialNotice = container.querySelector('[data-bf-part="notice"]');
+    expect(initialNotice?.getAttribute('role')).toBe('alert');
+    expect(container.textContent).not.toContain('applications.advanced.title');
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'recoveryActions.retry',
+    );
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry?.click();
+      await Promise.resolve();
+    });
+    expect(getSnapshotMock).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('OpenCode project commands');
 
     await act(async () => root.unmount());
     container.remove();
@@ -1446,7 +1942,9 @@ describe('ExternalSourcesConfig', () => {
     };
     getSnapshotMock
       .mockResolvedValueOnce(agentSnapshot)
+      .mockResolvedValueOnce(agentSnapshot)
       .mockResolvedValue(activatedAgentSnapshot);
+    setSubagentsEnabledMock.mockResolvedValue(agentSnapshot);
     setSubagentActivationMock.mockResolvedValue(activatedAgentSnapshot);
     chooseSubagentConflictMock.mockResolvedValue({
       ...agentSnapshot,
@@ -1461,10 +1959,22 @@ describe('ExternalSourcesConfig', () => {
       await Promise.resolve();
     });
 
+    const agentBulkEnable = container.querySelector<HTMLButtonElement>(
+      '[data-bf-bulk-capability="subagent"] button',
+    );
+    await act(async () => agentBulkEnable?.click());
+    expect(setSubagentsEnabledMock).toHaveBeenCalledWith(
+      'D:/workspace/project',
+      [{ candidateId: 'external-agent-review-v1', decisionKey: 'agent-decision-v1' }],
+      true,
+      4,
+      7,
+    );
+
     const details = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('common.details'));
     await act(async () => details?.click());
-    expect(container.textContent).toContain('agents.singleRun');
+    expect(container.textContent).toContain('agents.role.subagent');
     expect(container.textContent).toContain('fast');
     expect(container.textContent).toContain('Read, Grep');
     expect(container.textContent).toContain('agents.executionDomain');
@@ -1852,6 +2362,7 @@ describe('ExternalSourcesConfig', () => {
       ...approvalSnapshot,
       toolApprovalRequests: [],
     });
+    setToolTargetsEnabledMock.mockResolvedValue(approvalSnapshot);
 
     await act(async () => {
       root.render(<ExternalSourcesConfig />);
@@ -1866,6 +2377,17 @@ describe('ExternalSourcesConfig', () => {
     expect(container.textContent).toContain('toolApprovals.workingDirectory');
     expect(container.textContent).toContain('capability.file_system');
     expect(container.textContent).toContain('capability.environment');
+    const toolBulkEnable = container.querySelector<HTMLButtonElement>(
+      '[data-bf-bulk-capability="tool"] button',
+    );
+    await act(async () => toolBulkEnable?.click());
+    expect(setToolTargetsEnabledMock).toHaveBeenCalledWith(
+      'D:/workspace/project',
+      [{ approvalKey: 'approval-1', decisionKey: 'decision-1' }],
+      true,
+      1,
+      0,
+    );
     const enable = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('toolApprovals.enable'));
     enable?.focus();
@@ -2076,7 +2598,8 @@ describe('ExternalSourcesConfig', () => {
     });
 
     expect(container.textContent).toContain('policy.attentionSummary:{"count":1}');
-    expect(container.textContent?.match(/opencode\.configuration\.invalid/g)).toHaveLength(1);
+    expect(container.textContent?.match(/diagnostics\.category\.invalidSettings/g)).toHaveLength(1);
+    expect(container.textContent).not.toContain('opencode.configuration.invalid');
   });
 
   it('keeps grouped OpenCode diagnostics and lifecycle states visible', async () => {
@@ -2109,11 +2632,12 @@ describe('ExternalSourcesConfig', () => {
     });
 
     expect(container.textContent).toContain('lifecycle.degraded');
-    expect(container.textContent).toContain('opencode.configuration.invalid');
+    expect(container.textContent).toContain('diagnostics.category.invalidSettings');
+    expect(container.textContent).not.toContain('opencode.configuration.invalid');
     expect(container.querySelector(
       '.bitfun-external-sources-config__opencode-card [data-external-attention="true"]',
     )).not.toBeNull();
-    expect(container.textContent?.match(/opencode\.configuration\.invalid/g)).toHaveLength(1);
+    expect(container.textContent?.match(/diagnostics\.category\.invalidSettings/g)).toHaveLength(1);
     const sourceToggle = container.querySelector(
       '.bitfun-external-sources-config__opencode-card input[aria-label^="sources.toggleLabel"]',
     ) as HTMLInputElement;
@@ -2346,6 +2870,9 @@ describe('ExternalSourcesConfig', () => {
 
     expect(container.textContent).toContain('unavailable.remoteDescription');
     expect(container.textContent).not.toContain('unavailable.hostDescription');
+    expect(Array.from(container.querySelectorAll('button')).some(
+      (button) => button.textContent === 'recoveryActions.retry',
+    )).toBe(false);
   });
 
   it('gives a failed remote connection a useful next step', async () => {
@@ -2363,6 +2890,10 @@ describe('ExternalSourcesConfig', () => {
     expect(container.textContent).toContain('unavailable.remoteConnectionDescription');
     expect(container.textContent).not.toContain('unavailable.hostDescription');
     expect(container.textContent).not.toContain('unavailable.remoteDescription');
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(Array.from(container.querySelectorAll('button')).some(
+      (button) => button.textContent === 'recoveryActions.retry',
+    )).toBe(true);
   });
 
   it('fails closed for a legacy read-only host and never sends a mutation', async () => {
@@ -2439,8 +2970,9 @@ describe('ExternalSourcesConfig', () => {
     expect(updateIntegrationPolicyMock).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain('policy.resetConfirmTitle');
 
-    const confirm = Array.from(document.body.querySelectorAll('button')).filter((button) =>
-      button.textContent === 'policy.backupAndReset').at(-1);
+    const dialog = document.body.querySelector('[role="dialog"]');
+    const confirm = Array.from(dialog?.querySelectorAll('button') ?? []).find((button) =>
+      button.textContent === 'policy.backupAndReset');
     await act(async () => confirm?.click());
     expect(updateIntegrationPolicyMock).toHaveBeenCalledWith('D:/workspace/project', {
       expectedPreferenceRevision: 9,
@@ -2486,7 +3018,9 @@ describe('ExternalSourcesConfig', () => {
     expect(firstDiagnostic.open).toBe(true);
     expect(document.activeElement).toBe(firstDiagnostic.querySelector('summary'));
     expect(scrollIntoView).toHaveBeenCalled();
-    expect(container.textContent).toContain('opencode.command.source_warning');
+    expect(container.textContent).toContain('diagnostics.category.sourceIssue');
+    expect(container.textContent).not.toContain('opencode.command.source_warning');
+    expect(container.textContent).not.toContain('common.technicalDetails');
   });
 
   it('shows a stable reference without exposing an internal mutation message', async () => {
@@ -2514,8 +3048,10 @@ describe('ExternalSourcesConfig', () => {
 
     expect(container.textContent).toContain('operationErrors.internal');
     expect(container.textContent).toContain('external-source-ref-7');
-    expect(container.textContent).toContain('operationErrors.stage:{"stage":"activate_runtime"}');
-    expect(container.textContent).toContain('operationErrors.causationId:{"id":"refresh-generation-6"}');
+    expect(container.textContent).not.toContain('common.technicalDetails');
+    expect(container.textContent).not.toContain('operationErrors.errorCode');
+    expect(container.textContent).not.toContain('activate_runtime');
+    expect(container.textContent).not.toContain('refresh-generation-6');
     expect(container.textContent).toContain('recoveryActions.retry');
     expect(container.textContent).toContain('recoveryActions.reconnect_host');
     expect(container.textContent).not.toContain('database connection string');

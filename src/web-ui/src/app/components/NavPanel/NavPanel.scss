@@ -62,40 +62,40 @@ $_section-header-height: 24px;
       flex: 1 1 auto;
       min-width: 0;
       max-width: 100%;
-      transition: opacity 0.2s $easing-standard;
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+      transition: none;
 
-      // Non-split scenes: hide MainNav instantly when scene nav opens
+      // Non-split scenes move as a coordinated pair when pointer motion is on.
       .is-scene:not(.is-split-open) & {
         opacity: 0;
+        transform: translate3d(-4px, 0, 0);
         pointer-events: none;
       }
     }
 
     // ── SceneNav overlay ──
     &--scene {
-      clip-path: inset(var(--clip-origin-top) 0 var(--clip-origin-bottom) 0);
-      transition: clip-path $motion-base $easing-decelerate,
-                  opacity $motion-fast $easing-decelerate;
+      clip-path: inset(0 0 0 0);
       position: absolute;
       inset: 0;
       z-index: 1;
       pointer-events: none;
-        clip-path: inset(0 0 0 0);
       opacity: 0;
+      transform: translate3d(6px, 0, 0);
       background: var(--bf-appearance-token-color-bg-primary);
-
-      // Default transition for non-split scenes: simple fade
-      transition: opacity 0.25s $easing-decelerate;
+      transition: none;
 
       &.is-active {
         pointer-events: auto;
         opacity: 1;
+        transform: translate3d(0, 0, 0);
       }
 
       // Split-open scenes (file-viewer): clip-path reveal from anchor.
       // The opaque background ensures revealed portions fully cover MainNav
       // so departing items never bleed through.
-      .is-split-open & {
+      .is-split-open.has-pointer-motion & {
         clip-path: inset(var(--clip-origin-top) 0 var(--clip-origin-bottom) 0);
         transition: clip-path 0.26s cubic-bezier(0.22, 1, 0.36, 1),
                     opacity 0.06s linear;
@@ -104,6 +104,39 @@ $_section-header-height: 24px;
           clip-path: inset(0 0 0 0);
         }
       }
+    }
+  }
+
+  &__content.has-pointer-motion &__layer--main {
+    transition:
+      opacity 140ms cubic-bezier(0.23, 1, 0.32, 1),
+      transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+
+  &__content.has-pointer-motion:not(.is-split-open) &__layer--scene {
+    transition:
+      opacity 160ms cubic-bezier(0.23, 1, 0.32, 1),
+      transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
+
+    &.is-active {
+      @starting-style {
+        opacity: 0;
+        transform: translate3d(6px, 0, 0);
+      }
+    }
+  }
+
+  &__scene-transition {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+
+    > .bitfun-view-transition-boundary__view {
+      display: flex;
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 0;
     }
   }
 
@@ -907,6 +940,131 @@ $_section-header-height: 24px;
     opacity: 1;
   }
 
+  &__assistant-session-actions {
+    position: relative;
+    display: inline-flex;
+  }
+
+  &__assistant-session-split-button {
+    display: inline-flex;
+    align-items: stretch;
+    height: 20px;
+    overflow: hidden;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    transition: background $motion-fast $easing-standard;
+
+    &:hover,
+    &.is-active {
+      background: var(--bf-appearance-token-element-bg-soft);
+    }
+  }
+
+  &__assistant-session-split-main,
+  &__assistant-session-split-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--bf-appearance-token-color-text-secondary);
+    cursor: pointer;
+    transition: color $motion-fast $easing-standard,
+                background $motion-fast $easing-standard;
+
+    &:hover {
+      color: var(--bf-appearance-token-color-text-primary);
+      background: var(--bf-appearance-token-element-bg-medium);
+    }
+
+    &:focus-visible {
+      position: relative;
+      z-index: 1;
+      outline: 1px solid var(--bf-appearance-token-color-accent-500);
+      outline-offset: -1px;
+    }
+
+    &:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+  }
+
+  &__assistant-session-split-main {
+    width: 20px;
+  }
+
+  &__assistant-session-split-toggle {
+    width: 16px;
+    border-left: 1px solid color-mix(in srgb, var(--bf-appearance-token-border-subtle) 72%, transparent);
+  }
+
+  &__assistant-session-menu {
+    @include nav-font.nav-panel-font-token-scope;
+
+    position: fixed;
+    min-width: 200px;
+    max-width: min(280px, calc(100vw - 24px));
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    padding: 6px;
+    border: 1px solid var(--bf-appearance-token-border-subtle);
+    border-radius: 10px;
+    background: var(--bf-appearance-token-color-bg-primary);
+    box-shadow: 0 10px 28px rgba(var(--bf-appearance-token-color-static-black-rgb), 0.24);
+    z-index: $z-popover;
+    color: var(--bf-appearance-token-color-text-primary);
+  }
+
+  &__assistant-session-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    height: 30px;
+    padding: 0 8px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--bf-appearance-token-color-text-secondary);
+    cursor: pointer;
+    text-align: left;
+    font-size: var(--bf-appearance-token-font-size-xs);
+    transition: color $motion-fast $easing-standard,
+                background $motion-fast $easing-standard;
+
+    > svg {
+      flex-shrink: 0;
+    }
+
+    &:hover {
+      color: var(--bf-appearance-token-color-text-primary);
+      background: var(--bf-appearance-token-element-bg-soft);
+    }
+
+    &:focus-visible {
+      outline: 1px solid var(--bf-appearance-token-color-accent-500);
+      outline-offset: -1px;
+    }
+  }
+
+  &__assistant-session-menu-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__assistant-session-menu-badge {
+    flex-shrink: 0;
+    color: var(--bf-appearance-token-color-text-muted);
+    font-size: var(--bf-appearance-token-font-size-2xs);
+  }
+
   &__section-indicator {
     display: inline-flex;
     align-items: center;
@@ -1607,6 +1765,67 @@ $_section-header-height: 24px;
 }
 
 // ──────────────────────────────────────────────
+// GitHub star invite — retires itself after one click
+// ──────────────────────────────────────────────
+
+.bitfun-nav-panel__footer-star {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  border: 1px solid var(--bf-appearance-token-border-subtle);
+  border-radius: $size-radius-sm;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  transition: border-color $motion-fast $easing-standard,
+              background $motion-fast $easing-standard;
+
+  &:hover,
+  &:focus-within {
+    border-color: var(--bf-appearance-token-color-warning-border);
+    background: var(--bf-appearance-token-color-warning-bg);
+  }
+}
+
+.bitfun-nav-panel__footer-star-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  min-width: 0;
+  padding: 0 4px 0 $size-gap-1;
+  border: none;
+  background: transparent;
+  color: var(--bf-appearance-token-color-text-muted);
+  font-size: var(--bf-appearance-token-font-size-xs);
+  line-height: 1;
+  cursor: pointer;
+  transition: color $motion-fast $easing-standard;
+
+  .bitfun-nav-panel__footer-btn-icon-swap {
+    width: 14px;
+    height: 14px;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--bf-appearance-token-color-accent-500);
+    outline-offset: -2px;
+  }
+}
+
+.bitfun-nav-panel__footer-star:hover .bitfun-nav-panel__footer-star-btn,
+.bitfun-nav-panel__footer-star-btn:focus-visible {
+  color: var(--bf-appearance-token-color-warning);
+}
+
+.bitfun-nav-panel__footer-star-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// ──────────────────────────────────────────────
 // More-options popup menu
 // ──────────────────────────────────────────────
 
@@ -1730,16 +1949,20 @@ $_section-header-height: 24px;
 }
 
 .bitfun-nav-panel__footer-menu {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
+  position: fixed;
   min-width: 148px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   padding: $size-gap-1;
   background: var(--bf-appearance-token-color-bg-elevated);
   border: 1px solid var(--bf-appearance-token-border-subtle);
   border-radius: $size-radius-base;
   box-shadow: 0 4px 12px var(--bf-appearance-token-color-overlay-black-30);
   z-index: 9999;
+  color: var(--bf-appearance-token-color-text-primary);
+  font-family: var(--bf-appearance-token-font-family-sans);
+  font-size: var(--bf-appearance-token-font-size-sm);
   transform-origin: bottom left;
   animation: bitfun-footer-menu-in $motion-fast $easing-decelerate forwards;
 
@@ -1876,7 +2099,12 @@ $_section-header-height: 24px;
   padding: 7px 16px;
   font-size: var(--bf-appearance-token-font-size-xs);
   cursor: pointer;
-  transition: all $motion-fast $easing-standard;
+  transition:
+    background-color $motion-fast $easing-standard,
+    border-color $motion-fast $easing-standard,
+    color $motion-fast $easing-standard,
+    opacity $motion-fast $easing-standard,
+    transform $motion-fast $easing-standard;
 }
 
 .bitfun-nav-panel__remote-disclaimer-btn--secondary {
@@ -1911,7 +2139,6 @@ $_section-header-height: 24px;
     &__item-icon,
     &__section,
     &__section-label,
-    &__layer--scene,
     &__collapsible,
     &__mode-pill,
     &__mode-pill-liquid,
@@ -1922,6 +2149,24 @@ $_section-header-height: 24px;
       animation: none;
       clip-path: none;
       filter: none;
+    }
+
+    &__layer--main,
+    &__layer--scene {
+      transform: none;
+    }
+
+    &__content.has-pointer-motion &__layer--main,
+    &__content.has-pointer-motion:not(.is-split-open) &__layer--scene {
+      transform: none;
+      transition: opacity 100ms cubic-bezier(0.23, 1, 0.32, 1);
+    }
+
+    &__content.has-pointer-motion:not(.is-split-open) &__layer--scene.is-active {
+      @starting-style {
+        opacity: 0;
+        transform: none;
+      }
     }
   }
 
@@ -2279,7 +2524,10 @@ $_section-header-height: 24px;
     }
   }
 
-  &__collapsible,
+  &__collapsible {
+    transition: grid-template-rows 150ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+
   &__item-slot {
     transition: none;
 
@@ -2434,6 +2682,14 @@ $_section-header-height: 24px;
 .bitfun-nav-panel__footer-btn--icon:active,
 .bitfun-nav-panel__footer .bitfun-notification-btn:active {
   transform: scale(0.94);
+}
+
+.bitfun-nav-panel__footer-star:active {
+  transform: scale(0.96);
+  transition:
+    transform 120ms cubic-bezier(0.23, 1, 0.32, 1),
+    border-color 120ms ease,
+    background 120ms ease;
 }
 
 .bitfun-nav-panel__workspace-menu,

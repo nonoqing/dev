@@ -6,6 +6,7 @@ pub mod agentic;
 /// - Various event type definitions
 /// - Event abstraction independent of platforms
 pub mod backend;
+pub mod catalog;
 pub mod emitter;
 pub mod frontend_projection;
 pub mod speech;
@@ -14,13 +15,17 @@ pub mod types;
 pub use agentic::{
     AgenticEvent, AgenticEventEnvelope, AgenticEventPriority, DeepReviewQueueReason,
     DeepReviewQueueState, DeepReviewQueueStatus, ModelRoundAttemptDiagnostic,
-    ModelRoundAttemptToolDiagnostic, SubagentParentInfo, ToolEventData, ToolEventIdentity,
+    ModelRoundAttemptToolDiagnostic, SafeCountBucket, SafeOperationErrorType, SafeOperationOutcome,
+    SafePermissionDecision, SafePermissionSource, SafeSessionClass, SafeSessionOperation,
+    SubagentParentInfo, ToolEventData, ToolEventIdentity, ToolTelemetryIdentity, ToolTelemetryKind,
+    ToolTelemetrySourceClass,
 };
 pub use backend::{
     BackgroundCommandLifecycleInfo, ToolExecutionCompletedInfo, ToolExecutionErrorInfo,
     ToolExecutionProgressInfo, ToolExecutionStartedInfo, ToolTerminalReadyInfo,
 };
 pub use bitfun_core_types::ToolImageAttachment;
+pub use catalog::{AIModelCatalogUpdatedEvent, AI_MODEL_CATALOG_UPDATED_EVENT};
 pub use emitter::EventEmitter;
 pub use frontend_projection::{project_agentic_frontend_event, AgenticFrontendEvent};
 pub use speech::{SPEECH_MODEL_PROGRESS_EVENT, SPEECH_MODEL_STATUS_CHANGED_EVENT};

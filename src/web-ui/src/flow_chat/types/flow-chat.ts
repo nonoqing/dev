@@ -6,6 +6,7 @@
 import type {
   DialogTurnKind,
   SessionKind,
+  SessionContextUsageSource,
   SessionTitleSource,
   SessionTurnCatalog,
 } from '@/shared/types/session-history';
@@ -125,10 +126,21 @@ export interface FlowImageAnalysisItem extends FlowItem {
  * `steer_dialog_turn` Tauri command. Rendered inline inside the running
  * model round so the user can see the message they steered the agent with.
  */
+/** One image attached to a steering message, in display shape. */
+export interface SteeringImage {
+  id: string;
+  name?: string;
+  dataUrl?: string;
+  imagePath?: string;
+  mimeType?: string;
+}
+
 export interface FlowUserSteeringItem extends FlowItem {
   type: 'user-steering';
   steeringId: string;
   content: string;
+  /** Images sent with the steering message, rendered under its text. */
+  images?: SteeringImage[];
   /** Round index reported by the backend at injection time. */
   roundIndex: number;
 }
@@ -199,6 +211,10 @@ export interface TokenUsage {
   outputTokens?: number;
   totalTokens: number;
   timestamp: number;
+  /** Persisted source turn used to invalidate usage after history rewrites. */
+  turnId?: string;
+  /** Runtime provenance for restored session-level context usage. */
+  source?: SessionContextUsageSource;
 }
 
 export interface AcpContextUsage {
@@ -254,6 +270,9 @@ export interface DialogTurn {
   errorDetail?: AiErrorDetail;
   tokenUsage?: TokenUsage;
   todos?: TodoItem[];
+  /** Backend persistence slot. It may be sparse and must not be used as ordinal. */
+  storageTurnIndex?: number;
+  /** @deprecated Compatibility for older restored projections. Use `storageTurnIndex`. */
   backendTurnIndex?: number;
   /** Whether the turn completed successfully. */
   success?: boolean;
@@ -261,6 +280,23 @@ export interface DialogTurn {
   finishReason?: string;
   /** Whether the turn produced a final assistant response visible to the user. */
   hasFinalResponse?: boolean;
+}
+
+declare const localTurnIndexBrand: unique symbol;
+declare const turnOrdinalBrand: unique symbol;
+declare const storageTurnIndexBrand: unique symbol;
+
+/** Position inside the currently loaded `dialogTurns` array. */
+export type LocalTurnIndex = number & { readonly [localTurnIndexBrand]: 'LocalTurnIndex' };
+/** Zero-based visible Turn position inside the complete Session history. */
+export type TurnOrdinal = number & { readonly [turnOrdinalBrand]: 'TurnOrdinal' };
+/** Opaque backend persistence slot. It may be sparse and differ from ordinal. */
+export type StorageTurnIndex = number & { readonly [storageTurnIndexBrand]: 'StorageTurnIndex' };
+
+export interface DialogTurnIdentity {
+  ordinal: TurnOrdinal;
+  storageTurnIndex?: StorageTurnIndex;
+  state: 'optimistic' | 'persisted';
 }
 
 export interface FlowChatState {
@@ -337,7 +373,7 @@ export interface Session {
    *
    * This array may temporarily contain provisional frontend Turns that have
    * not been persisted. Never derive a backend storage index from its length
-   * or local array position; use `DialogTurn.backendTurnIndex` and
+   * or local array position; use `DialogTurn.storageTurnIndex` and
    * `turnCatalog` for persisted identity and ordinals.
    */
   dialogTurns: DialogTurn[];
@@ -531,6 +567,8 @@ export interface Session {
 
 export interface SessionConfig {
   modelName?: string;
+  /** Explicit reasoning preset for the next turn; omitted means model default. */
+  reasoningPreset?: string;
   agentType?: string;
   context?: Record<string, string>;
   workspacePath?: string;
@@ -554,6 +592,10 @@ export interface SessionConfig {
   dispatchBaseRef?: string;
   /** Target model explicitly selected during preflight; omitted to use the target default. */
   dispatchModel?: string;
+  /** Target-owned canonical reasoning projection reported during preflight. */
+  dispatchModelCatalog?: import('@/infrastructure/api/service-api/AIApi').AIModelCatalog;
+  /** Target reasoning preset. `auto` explicitly clears a prior override. */
+  dispatchReasoningPreset?: string;
   /** Model ids reported by the selected target during dispatch preflight. */
   dispatchAvailableModels?: string[];
   /** Target-owned default model reported during dispatch preflight. */

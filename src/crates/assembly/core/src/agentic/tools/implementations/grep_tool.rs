@@ -748,7 +748,8 @@ Usage:
                         .map(|path| path.to_string_lossy().into_owned())
                         .collect(),
                 )
-                .reject_linked_files(true);
+                .reject_linked_files(true)
+                .hard_link_checker(bitfun_services_core::filesystem::path_has_multiple_hard_links);
         }
         let pattern = grep_options.pattern.clone();
         let path = resolved.logical_path.clone();

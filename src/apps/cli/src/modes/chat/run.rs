@@ -151,6 +151,10 @@ impl ChatMode {
         let Some(effect) = self.pending_local_effect.take() else {
             return Ok(false);
         };
+        debug_assert_eq!(
+            crate::tui_backend::TuiEffect::route(&effect),
+            crate::tui_backend::TuiEffectRoute::Local
+        );
         match effect {
             PendingLocalEffect::EditComposer { command, mut draft } => {
                 let cwd = self.local_cwd.clone();
@@ -352,7 +356,9 @@ impl ChatMode {
             (false, EffectiveColorScheme::Truecolor) => Theme::dark(),
         };
         let theme = self.resolve_configured_theme(base, appearance, scheme);
-        let shortcut_hints = self.keymap.compact_hints(self.action_state(false, false));
+        let shortcut_hints = self
+            .keymap
+            .compact_hints(self.action_state(false, false, false));
         let mut chat_view = ChatView::new(theme, shortcut_hints);
         chat_view.apply_presentation_config(&self.config.ui);
 
@@ -367,7 +373,14 @@ impl ChatMode {
                 service
                     .get_config::<bitfun_core::service::config::types::GlobalConfig>(None)
                     .await
-                    .map(|config| config.tool_permissions.interaction.auto_approve_ask)
+                    .map(|config| {
+                        matches!(
+                            bitfun_runtime_ports::PermissionMode::from_config(
+                                &config.tool_permissions
+                            ),
+                            bitfun_runtime_ports::PermissionMode::AutoApprove
+                        )
+                    })
                     .unwrap_or(false)
             })
         });
@@ -409,25 +422,36 @@ impl ChatMode {
                 // Create new session
                 let agent = self.agent.clone();
                 let agent_type = self.agent_type.clone();
-                let (session_id, workspace_binding) = tokio::task::block_in_place(|| {
-                    rt_handle.block_on(async {
-                        let session_id = agent.ensure_session(&agent_type).await?;
-                        let binding = agent.session_workspace_binding(&session_id).await?;
-                        Ok::<_, anyhow::Error>((session_id, binding))
-                    })
-                })?;
+                let (session_id, workspace_binding, session_summary) =
+                    tokio::task::block_in_place(|| {
+                        rt_handle.block_on(async {
+                            let session_id = agent.ensure_session(&agent_type).await?;
+                            let binding = agent.session_workspace_binding(&session_id).await?;
+                            let summary = agent
+                                .list_sessions()
+                                .await?
+                                .into_iter()
+                                .find(|summary| summary.session_id == session_id)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "Created Session is missing from the Runtime catalog"
+                                    )
+                                })?;
+                            Ok::<_, anyhow::Error>((session_id, binding, summary))
+                        })
+                    })?;
                 tracing::info!("Core session ready: {}", session_id);
 
                 let mut state = ChatState::new(
                     session_id.clone(),
-                    "CLI Session".to_string(),
+                    session_summary.session_name,
                     self.agent_type.clone(),
                     Some(workspace_binding.workspace_path.clone()),
                 );
+                state.current_model_id = session_summary.model_id;
                 state.apply_workspace_binding(workspace_binding);
                 (session_id, state, Vec::new())
             };
-        chat_state.set_worktree_control_available(!self.agent.is_shared());
         self.auto_approve_ask_override = None;
         self.agent
             .set_approval_policy(crate::runtime::approval::CliApprovalPolicy::Ask);
@@ -438,64 +462,71 @@ impl ChatMode {
         self.workspace = chat_state.workspace.clone();
         self.refresh_workspace_git_status(&mut chat_state, &rt_handle);
 
-        let mut external_source_rx = None;
+        // Apply model override (--model flag): update the session model.
+        // The backend validates the ID; an invalid ID logs a warning and
+        // falls back to the default model.
+        if let Some(ref model_override) = self.model_id {
+            let trimmed = model_override.trim();
+            let sid = chat_state.core_session_id.clone();
+            let mid = trimmed.to_string();
+            let agent = self.agent.clone();
+            if let Err(e) = tokio::task::block_in_place(|| {
+                rt_handle.block_on(async { agent.update_session_model(&sid, &mid).await })
+            }) {
+                tracing::warn!("Failed to apply model override '{mid}': {e}");
+                eprintln!("Warning: Model '{mid}' not found. Using default model.");
+            }
+        }
+
         if self.agent.is_shared() {
             chat_view.set_status(Some(format!(
                 "{SHARED_TUI_CHAT_STATUS} {SHARED_TUI_EMBEDDED_HANDOFF}"
             )));
-        } else {
-            let external_workspace = self.agent.workspace_path_buf();
-            let (initial_external_sources, updates, conflict_preferences) =
-                tokio::task::block_in_place(|| {
-                    rt_handle.block_on(async {
-                        let updates =
-                            subscribe_external_source_updates(Some(&external_workspace)).await;
-                        let snapshot =
-                            external_source_snapshot(Some(&external_workspace), false).await;
-                        let preferences = external_source_conflict_choices().await.map(Into::into);
-                        (snapshot, updates.ok(), preferences)
-                    })
-                });
-            external_source_rx = updates;
-            match conflict_preferences {
-                Ok(preferences) => self.replace_external_conflict_preferences(preferences),
-                Err(error) => {
-                    tracing::warn!("External source preferences are unavailable: {}", error)
-                }
-            }
-            match initial_external_sources {
-                Ok(snapshot) => {
-                    let (available, restricted) = external_command_counts(&snapshot);
-                    let pending_conflicts = snapshot
-                        .command_conflicts
-                        .iter()
-                        .filter(|conflict| conflict.selected_candidate_id.is_none())
-                        .count();
-                    let tool_notice = self.take_external_tool_notice(&snapshot);
-                    let agent_notice = self.take_external_agent_notice(&snapshot);
-                    self.update_external_source_view(&mut chat_view, &snapshot);
-                    self.external_source_snapshot = Some(snapshot.clone());
-                    if snapshot.discovery_pending {
-                        chat_view.set_status(Some(
-                            "Checking compatible content from external AI applications".to_string(),
-                        ));
-                    } else if tool_notice.is_some() || agent_notice.is_some() {
-                        chat_view.set_status(Some(
-                            [tool_notice, agent_notice]
-                                .into_iter()
-                                .flatten()
-                                .collect::<Vec<_>>()
-                                .join("; "),
-                        ));
-                    } else if available + restricted > 0 || pending_conflicts > 0 {
-                        chat_view.set_status(Some(format!(
+        }
+        let agent = self.agent.clone();
+        let (initial_external_sources, updates) = tokio::task::block_in_place(|| {
+            let updates = agent.subscribe_external_source_updates().ok();
+            let snapshot = rt_handle.block_on(agent.external_source_snapshot(false));
+            (snapshot, updates)
+        });
+        let mut external_source_rx = updates;
+        match initial_external_sources {
+            Ok(response) => {
+                self.replace_external_conflict_preferences(response.preferences.into());
+                let snapshot = response.snapshot;
+                let (available, restricted) = external_command_counts(&snapshot);
+                let pending_conflicts = snapshot
+                    .command_conflicts
+                    .iter()
+                    .filter(|conflict| conflict.selected_candidate_id.is_none())
+                    .count();
+                let tool_notice = self.take_external_tool_notice(&snapshot);
+                let agent_notice = self.take_external_agent_notice(&snapshot);
+                self.update_external_source_view(&mut chat_view, &snapshot);
+                self.external_source_snapshot = Some(snapshot.clone());
+                if snapshot.discovery_pending {
+                    chat_view.set_status(Some(
+                        "Checking compatible content from external AI applications".to_string(),
+                    ));
+                } else if tool_notice.is_some() || agent_notice.is_some() {
+                    chat_view.set_status(Some(
+                        [tool_notice, agent_notice]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    ));
+                } else if available + restricted > 0 || pending_conflicts > 0 {
+                    chat_view.set_status(Some(format!(
                             "External sources: {available} commands available, {restricted} restricted, {pending_conflicts} need a choice"
                         )));
-                    }
                 }
-                Err(error) => {
-                    tracing::warn!("External source discovery is unavailable: {}", error);
-                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_code = error.code.as_str(),
+                    "External source discovery is unavailable"
+                );
             }
         }
 
@@ -519,7 +550,7 @@ impl ChatMode {
         let mut event_rx = self
             .agent
             .subscribe_events()
-            .map_err(|error| anyhow::anyhow!(error.into_message()))?;
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let mut permission_rx = self.agent.subscribe_permission_requests().ok();
         if let Ok(pending) = self.agent.pending_permission_requests() {
             for request in pending.into_iter().filter(|request| {
@@ -576,7 +607,11 @@ impl ChatMode {
                 needs_redraw = true;
             }
             chat_view.set_action_state(
-                self.action_state(self.displayed_chat_state(&chat_state).is_processing, false),
+                self.action_state(
+                    self.displayed_chat_state(&chat_state).is_processing,
+                    false,
+                    !chat_view.input_text().trim().is_empty(),
+                ),
                 &self.keymap,
             );
             chat_view.set_agent_mode_switch_allowed(session_update_allowed(
@@ -634,7 +669,7 @@ impl ChatMode {
             if let Some(receiver) = permission_rx.as_mut() {
                 for _ in 0..4 {
                     match receiver.try_recv() {
-                        Ok(bitfun_agent_runtime::sdk::PermissionRequestEvent::Asked {
+                        Ok(bitfun_product_domains::tool_permissions::PermissionRequestEvent::Asked {
                             request,
                         }) if crate::runtime::approval::permission_request_targets_session(
                             &request,
@@ -649,11 +684,11 @@ impl ChatMode {
                                 needs_redraw = true;
                             }
                         }
-                        Ok(bitfun_agent_runtime::sdk::PermissionRequestEvent::Replied {
+                        Ok(bitfun_product_domains::tool_permissions::PermissionRequestEvent::Replied {
                             request_id,
                             ..
                         })
-                        | Ok(bitfun_agent_runtime::sdk::PermissionRequestEvent::Cancelled {
+                        | Ok(bitfun_product_domains::tool_permissions::PermissionRequestEvent::Cancelled {
                             request_id,
                             ..
                         }) => {
@@ -689,7 +724,7 @@ impl ChatMode {
                                 Err(error) => {
                                     let mut failure = format!(
                                         "Shared Runtime permission state could not be resynchronized: {}",
-                                        error.into_message()
+                                        error
                                     );
                                     let agent = self.agent.clone();
                                     if let Err(error) = tokio::task::block_in_place(|| {
@@ -731,7 +766,12 @@ impl ChatMode {
                 let mut latest = None;
                 for _ in 0..4 {
                     match receiver.try_recv() {
-                        Ok(snapshot) => latest = Some(snapshot),
+                        Ok((workspace_path, snapshot))
+                            if workspace_path == self.agent.workspace_path_string() =>
+                        {
+                            latest = Some(snapshot)
+                        }
+                        Ok(_) => continue,
                         Err(TryRecvError::Lagged(_)) => continue,
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Closed) => {
@@ -746,14 +786,22 @@ impl ChatMode {
                         .as_ref()
                         .is_some_and(|previous| previous.discovery_pending)
                         && !snapshot.discovery_pending;
-                    let preferences = tokio::task::block_in_place(|| {
-                        rt_handle
-                            .block_on(external_source_conflict_choices())
-                            .map(Into::into)
+                    let response = tokio::task::block_in_place(|| {
+                        rt_handle.block_on(self.agent.external_source_snapshot(false))
                     });
-                    if let Ok(preferences) = preferences {
-                        self.replace_external_conflict_preferences(preferences);
-                    }
+                    let snapshot = match response {
+                        Ok(response) => {
+                            self.replace_external_conflict_preferences(response.preferences.into());
+                            response.snapshot
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error_code = error.code.as_str(),
+                                "External source event snapshot recovery failed"
+                            );
+                            snapshot
+                        }
+                    };
                     let tool_notice = self.take_external_tool_notice(&snapshot);
                     let agent_notice = self.take_external_agent_notice(&snapshot);
                     self.update_external_source_view(&mut chat_view, &snapshot);
@@ -793,8 +841,7 @@ impl ChatMode {
             }
 
             if chat_view.login_form_visible() {
-                self.refresh_account_panel_live(&mut chat_view);
-                if crate::account_sync::sync_in_flight() {
+                if self.refresh_account_panel_live(&mut chat_view) {
                     needs_redraw = true;
                 }
             }
@@ -949,6 +996,23 @@ impl ChatMode {
                             needs_redraw = true;
                         }
                     }
+                    AgenticEvent::SessionReasoningPresetAutoCleared {
+                        session_id,
+                        previous_preset_id,
+                        reason,
+                    } => {
+                        if session_id == &chat_state.core_session_id
+                            && chat_state.current_reasoning_preset.as_deref()
+                                == Some(previous_preset_id.as_str())
+                        {
+                            chat_state.current_reasoning_preset = None;
+                            chat_state.add_system_message(format!(
+                                "The current session reasoning preset changed from {previous_preset_id} to Auto because {reason}."
+                            ));
+                            chat_view.invalidate_lines_cache();
+                            needs_redraw = true;
+                        }
+                    }
                     _ => {
                         let projection = project_transcript_event(&mut chat_state, event, true);
                         if projection.changed {
@@ -1011,6 +1075,25 @@ impl ChatMode {
                     }
                     match event {
                         Event::Key(key) => {
+                            // Ctrl+Z on Unix: suspend terminal before
+                            // dispatching to handle_key_event (which
+                            // only handles undo on Windows).
+                            #[cfg(unix)]
+                            if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
+                                if matches!(
+                                    (key.code, key.modifiers),
+                                    (KeyCode::Char('z'), KeyModifiers::CONTROL)
+                                ) {
+                                    tracing::debug!("Suspend terminal triggered");
+                                    if let Err(error) =
+                                        crate::ui::suspend_and_resume_terminal(&mut terminal)
+                                    {
+                                        tracing::error!("Failed to suspend terminal: {error}");
+                                    }
+                                    needs_redraw = true;
+                                    continue;
+                                }
+                            }
                             if let Some(reason) = self.handle_key_event(
                                 key,
                                 &mut chat_view,

@@ -83,6 +83,7 @@ export interface CreateSessionOptions {
   agentType: string;
   title: string;
   instruction: string;
+  modelId?: string;
 }
 
 export type RemotePermissionMode = 'ask' | 'auto' | 'full_access';
@@ -127,6 +128,12 @@ export interface RemoteCommand {
   answers?: Object;
   image_contexts?: RemoteImageContext[];
   images?: ImageAttachment[];
+  // provision_peer_device. `request_id` is minted by the device being
+  // provisioned, unlike `_request_id`, which the phone stamps on every command
+  // for its own correlation logging.
+  device_id?: string;
+  device_name?: string;
+  request_id?: string;
 }
 
 export interface PairChallengeResponse {
@@ -249,6 +256,18 @@ export interface DelegatedIdentityResponse extends CommandStatusResponse {
   device_id?: string;
 }
 
+/**
+ * Answer to `provision_peer_device`. Shaped like a delegated identity but
+ * carrying a 30-day *full* device credential, and `device_id` names the device
+ * that was just registered rather than the desktop that registered it.
+ */
+export interface PeerDeviceProvisionedResponse extends CommandStatusResponse {
+  token?: string;
+  user_id?: string;
+  master_key?: string;
+  device_id?: string;
+}
+
 export interface SessionListResult {
   sessions: RemoteSession[];
   hasMore: boolean;
@@ -273,9 +292,28 @@ export interface RemoteModelConfig {
   context_window?: number;
   enabled: boolean;
   capabilities: string[];
-  enable_thinking_process?: boolean;
-  reasoning_mode?: string;
-  reasoning_effort?: string;
+  reasoning?: RemoteReasoningCatalogProjection;
+}
+
+export interface RemoteReasoningPresetDescriptor {
+  id: string;
+  label: string;
+  order: number;
+  actions: RemoteReasoningPresetAction[];
+  source: string;
+}
+
+export interface RemoteReasoningPresetAction {
+  type: string;
+  value?: string | number;
+  enabled?: boolean;
+  body?: Record<string, Object>;
+}
+
+export interface RemoteReasoningCatalogProjection {
+  status: string;
+  default_preset?: string;
+  presets?: RemoteReasoningPresetDescriptor[];
 }
 
 export interface RemoteDefaultModels {
@@ -318,8 +356,11 @@ export interface RemoteToolStatusResponse {
 }
 
 export interface RemoteQuestionAnswerPayload {
-  answer: string;
-  '0': string;
+  answer?: string;
+  '0'?: string | string[];
+  '1'?: string | string[];
+  '2'?: string | string[];
+  '3'?: string | string[];
 }
 
 export interface ChatMessageItemResponse {
@@ -433,4 +474,13 @@ export interface ReadFileResult {
   contentBase64: string;
   mimeType: string;
   size: number;
+}
+
+export interface ReadFileChunkResult {
+  name: string;
+  contentBase64: string;
+  offset: number;
+  chunkSize: number;
+  totalSize: number;
+  mimeType: string;
 }

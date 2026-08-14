@@ -32,6 +32,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+
       - name: Reject CRLF in shell and deploy assets
         run: |
           bad=$(git ls-files -z \
@@ -52,6 +58,9 @@ jobs:
             bash -n "$f" || { echo "::error file=$f::bash syntax error"; rc=1; }
           done < <(git ls-files -z '*.sh' '*.bash')
           exit "$rc"
+
+      - name: Verify release and version-generation contracts
+        run: node --test scripts/tauri-release-manifest.test.mjs scripts/linux-binaries-manifest.test.mjs scripts/version-generation.test.mjs
 
       - name: Verify minisign download fallback
         run: |
@@ -188,15 +197,50 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          shared-key: "ci-check-v3-${{ runner.os }}-no-cargo-bin-v1"
+          shared-key: "ci-check-v5-${{ runner.os }}-no-cargo-bin-v1"
           cache-bin: false
           # PR caches are scoped to merge refs; trusted main pushes own shared
           # refreshes and retain completed dependency builds after late test failures.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           cache-on-failure: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      # rust-cache prunes the workspace target directory before saving it, so
+      # native libraries stored under target need an independent cache lifecycle.
+      - name: Restore Sherpa native libraries
+        id: sherpa-native-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: target/sherpa-onnx-prebuilt
+          key: sherpa-onnx-v1-${{ runner.os }}-${{ runner.arch }}-1.13.4-static
+
+      - name: Repair missing Sherpa native state
+        shell: bash
+        run: |
+          if ! find target/sherpa-onnx-prebuilt -type f \
+            \( -name 'sherpa-onnx-c-api.lib' -o -name 'libsherpa-onnx-c-api.a' \) \
+            -print -quit 2>/dev/null | grep -q .; then
+            rm -rf target/sherpa-onnx-prebuilt
+            cargo clean -p sherpa-onnx-sys
+          fi
+
       - name: Check compilation
         run: cargo check --locked --workspace
+
+      - name: Save Sherpa native libraries
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.sherpa-native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: target/sherpa-onnx-prebuilt
+          key: sherpa-onnx-v1-${{ runner.os }}-${{ runner.arch }}-1.13.4-static
+
+      # The installer is intentionally excluded from the root Cargo workspace,
+      # so the workspace check above cannot catch drift in its shared Rust APIs.
+      - name: Check installer compilation
+        if: runner.os == 'Windows'
+        run: cargo check --manifest-path BitFun-Installer/src-tauri/Cargo.toml
 
       - name: Run core and desktop library tests
         run: cargo test --locked -p bitfun-core -p bitfun-desktop --lib
@@ -290,6 +334,9 @@ jobs:
 
       - name: Validate theme visual governance contract
         run: pnpm run theme:visual-contract
+
+      - name: Validate WebKit compatibility gate
+        run: pnpm run verify:webkit-compatibility:test
 
       - name: Lint web UI
         run: pnpm run lint:web
