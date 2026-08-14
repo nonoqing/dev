@@ -72,7 +72,13 @@ pub async fn init_agentic_system_for_profile_with_telemetry(
         path_manager.as_ref(),
         "embedded-host",
     ));
-    init_agentic_system_inner(delivery_profile, runtime_ownership, telemetry).await
+    init_agentic_system_inner(
+        delivery_profile,
+        runtime_ownership,
+        telemetry,
+        execution::ExecutionEngineConfig::default(),
+    )
+    .await
 }
 
 /// Initializes one product runtime with an explicitly selected ownership
@@ -82,7 +88,13 @@ pub async fn init_agentic_system_for_profile_with_runtime_ownership(
     delivery_profile: DeliveryProfile,
     runtime_ownership: Arc<CoreRuntimeOwnership>,
 ) -> Result<AgenticSystem> {
-    init_agentic_system_inner(delivery_profile, runtime_ownership, Telemetry::noop()).await
+    init_agentic_system_inner(
+        delivery_profile,
+        runtime_ownership,
+        Telemetry::noop(),
+        execution::ExecutionEngineConfig::default(),
+    )
+    .await
 }
 
 /// Initialize a product runtime with explicit ownership and telemetry. Product
@@ -92,13 +104,40 @@ pub async fn init_agentic_system_for_profile_with_runtime_ownership_and_telemetr
     runtime_ownership: Arc<CoreRuntimeOwnership>,
     telemetry: Telemetry,
 ) -> Result<AgenticSystem> {
-    init_agentic_system_inner(delivery_profile, runtime_ownership, telemetry).await
+    init_agentic_system_inner(
+        delivery_profile,
+        runtime_ownership,
+        telemetry,
+        execution::ExecutionEngineConfig::default(),
+    )
+    .await
+}
+
+/// Initialize a product runtime with host-selected execution limits.
+///
+/// Product entrypoints use this only when their lifecycle owner intentionally
+/// differs from the shared defaults, such as an external evaluation harness
+/// that owns the run budget.
+pub async fn init_agentic_system_for_profile_with_execution_config(
+    delivery_profile: DeliveryProfile,
+    runtime_ownership: Arc<CoreRuntimeOwnership>,
+    telemetry: Telemetry,
+    execution_config: execution::ExecutionEngineConfig,
+) -> Result<AgenticSystem> {
+    init_agentic_system_inner(
+        delivery_profile,
+        runtime_ownership,
+        telemetry,
+        execution_config,
+    )
+    .await
 }
 
 async fn init_agentic_system_inner(
     delivery_profile: DeliveryProfile,
     runtime_ownership: Arc<CoreRuntimeOwnership>,
     telemetry: Telemetry,
+    execution_config: execution::ExecutionEngineConfig,
 ) -> Result<AgenticSystem> {
     info!("Initializing agentic system for profile {delivery_profile}");
 
@@ -158,7 +197,7 @@ async fn init_agentic_system_inner(
             event_queue.clone(),
             session_manager.clone(),
             context_compressor,
-            execution::ExecutionEngineConfig::default(),
+            execution_config,
         )
         .with_telemetry(telemetry.clone()),
     );
