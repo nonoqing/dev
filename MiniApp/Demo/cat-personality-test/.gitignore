@@ -1,0 +1,10 @@
+.DS_Store
+artifacts/
+dist/
+market-screenshots/
+design-qa.md
+scripts/capture-*
+scripts/compare-*
+scripts/compose-xhs-cards.mjs
+scripts/qa-*
+source/assets/*.png

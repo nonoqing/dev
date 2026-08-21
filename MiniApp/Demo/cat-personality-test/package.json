@@ -1,0 +1,10 @@
+{
+  "name": "bitfun-miniapp-cat-personality-test",
+  "private": true,
+  "version": "7.0.0",
+  "description": "BitFun MiniApp for a four-axis cat personality test with collectible portraits and local photo stylization.",
+  "scripts": {
+    "assets:embed": "node scripts/embed-cat-assets.mjs",
+    "build:market": "node scripts/build-market-package.mjs"
+  }
+}

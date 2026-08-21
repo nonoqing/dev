@@ -1,0 +1,53 @@
+{
+  "id": "cat-personality-test",
+  "name": "猫猫猫格大测试",
+  "description": "根据猫咪近 30 天的日常动作完成 32 道观察题，从四个维度生成猫格收藏卡和相处建议；可从猫咪形象库选择头像，或在本地把自家猫照片转成复古头像。仅供娱乐与日常观察。",
+  "icon": "Sparkles",
+  "category": "entertainment",
+  "tags": [
+    "猫咪",
+    "性格测试",
+    "宠物",
+    "日常观察",
+    "娱乐"
+  ],
+  "version": 7,
+  "created_at": 0,
+  "updated_at": 0,
+  "permissions": {
+    "shell": {
+      "allow": []
+    },
+    "net": {
+      "allow": []
+    },
+    "node": {
+      "enabled": false
+    },
+    "host": {
+      "dialog": false,
+      "clipboard_read": false,
+      "clipboard_write": false,
+      "open_external": false,
+      "reveal_in_folder": false,
+      "deck_render": false,
+      "chat_composer": false,
+      "system_info": false
+    }
+  },
+  "ai_context": null,
+  "i18n": {
+    "locales": {
+      "zh-CN": {
+        "name": "猫猫猫格大测试",
+        "description": "根据猫咪近 30 天的日常动作完成 32 道观察题，生成猫格收藏卡和相处建议；可选择内置猫咪头像，或在本地把自家猫照片转成复古头像。仅供娱乐与日常观察。",
+        "tags": ["猫咪", "性格测试", "宠物", "日常观察", "娱乐"]
+      },
+      "en-US": {
+        "name": "Cat Character Test",
+        "description": "Answer 32 questions about your cat's everyday behavior to create a collectible personality card and care notes. Choose a built-in portrait or style your own cat photo locally. For reflection and fun only.",
+        "tags": ["cats", "personality", "pets", "observation", "fun"]
+      }
+    }
+  }
+}

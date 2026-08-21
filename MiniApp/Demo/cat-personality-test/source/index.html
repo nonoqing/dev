@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-bf-appearance-mode="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title data-i18n="appTitle">猫猫猫格大测试</title>
+</head>
+<body>
+  <div id="app" class="cat-app">
+    <header class="topbar">
+      <div class="brand" aria-label="Cat Character Test">
+        <span class="brand__mark" aria-hidden="true" data-i18n="brandMark">猫格</span>
+        <span class="brand__copy">
+          <strong data-i18n="appTitle">猫猫猫格大测试</strong>
+          <small data-i18n="brandNote">CAT CHARACTER FIELD NOTES</small>
+        </span>
+      </div>
+      <div class="privacy-note">
+        <span class="privacy-note__dot" aria-hidden="true"></span>
+        <span data-i18n="privacyNote">32 项日常观察</span>
+      </div>
+    </header>
+
+    <main class="stage">
+      <section id="screen-welcome" class="screen screen--welcome" aria-labelledby="welcome-title">
+        <article class="intro-panel paper-panel">
+          <p class="eyebrow" data-i18n="welcomeEyebrow">给最熟悉她/他的你</p>
+          <h1 id="welcome-title" data-i18n="welcomeTitle">读懂猫咪藏在小&#8288;动作里的性格</h1>
+          <p class="intro-panel__lead" data-i18n="welcomeLead">回想最近 30 天最常见的情况。没有好坏答案，也不需要把猫猫塞进某一种标签。</p>
+
+          <div class="axis-preview" aria-label="Four dimensions">
+            <div class="axis-preview__item"><span>01</span><strong data-i18n="axisSocial">亲近节奏</strong><small data-i18n="axisSocialPoles">社牛 ↔ 慢热</small></div>
+            <div class="axis-preview__item"><span>02</span><strong data-i18n="axisNovelty">领地偏好</strong><small data-i18n="axisNoveltyPoles">探险 ↔ 安稳</small></div>
+            <div class="axis-preview__item"><span>03</span><strong data-i18n="axisBond">关系距离</strong><small data-i18n="axisBondPoles">贴贴 ↔ 独处</small></div>
+            <div class="axis-preview__item"><span>04</span><strong data-i18n="axisSensitivity">刺激反应</strong><small data-i18n="axisSensitivityPoles">细腻 ↔ 松弛</small></div>
+          </div>
+        </article>
+
+        <aside class="start-card paper-panel">
+          <div class="field">
+            <label for="cat-name" data-i18n="catNameLabel">这次观察的是哪只猫？</label>
+            <input id="cat-name" type="text" maxlength="24" autocomplete="off" data-i18n="catNamePlaceholder" data-i18n-attr="placeholder" placeholder="猫咪名字（可不填）" />
+          </div>
+
+          <fieldset class="avatar-field">
+            <legend data-i18n="portraitLegend">给她/他选一张猫格头像</legend>
+            <p data-i18n="portraitHint">从形象库选择，或上传照片在本地生成复古头像。</p>
+            <div id="avatar-grid" class="avatar-grid" role="radiogroup" aria-label="Cat portraits"></div>
+            <div class="photo-upload">
+              <div class="photo-upload__actions">
+                <label id="upload-photo-label" class="button button--secondary" for="cat-photo" data-i18n="uploadPhoto">上传自家猫照片</label>
+              </div>
+              <input id="cat-photo" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
+              <span id="photo-status" class="photo-status" role="status" data-i18n="photoLocalOnly">照片只在本机处理，不会上传</span>
+            </div>
+          </fieldset>
+
+          <div class="duration-row">
+            <span><strong>32</strong><small data-i18n="observations">道观察题</small></span>
+            <span><strong>6–8</strong><small data-i18n="minutes">分钟</small></span>
+            <span><strong>16</strong><small data-i18n="profiles">种猫格</small></span>
+          </div>
+          <button id="start-button" class="button button--primary" type="button" data-i18n="start">开始观察</button>
+          <button id="resume-button" class="button button--secondary" type="button" hidden></button>
+          <p class="fine-print" data-i18n="welcomeDisclaimer">这是娱乐型日常观察，不是兽医或行为学诊断。若行为突然改变，请优先咨询专业人士。</p>
+
+          <div id="history-block" class="history-block" hidden>
+            <div class="section-heading">
+              <h2 data-i18n="recentResults">最近结果</h2>
+              <button id="clear-history" type="button" data-i18n="clear">清除</button>
+            </div>
+            <div id="history-list" class="history-list"></div>
+          </div>
+        </aside>
+      </section>
+
+      <section id="screen-quiz" class="screen screen--quiz" aria-labelledby="question-title" hidden>
+        <div class="quiz-progress">
+          <div class="quiz-progress__meta">
+            <span id="question-count">01 / 32</span>
+            <span id="progress-label">3%</span>
+          </div>
+          <div class="progress-track" aria-hidden="true"><span id="progress-fill"></span></div>
+        </div>
+
+        <article class="question-card paper-panel">
+          <img id="quiz-avatar" class="quiz-avatar" alt="" />
+          <div class="question-card__stamp" aria-hidden="true"><span id="question-stamp">01</span></div>
+          <p class="question-card__hint" data-i18n="answerFrame">按最近 30 天最常见的表现作答</p>
+          <h1 id="question-title" tabindex="-1"></h1>
+          <div id="answer-options" class="answer-options" role="radiogroup" aria-labelledby="question-title"></div>
+        </article>
+
+        <div class="quiz-actions">
+          <button id="back-button" class="button button--secondary" type="button" data-i18n="back">上一题</button>
+          <button id="next-button" class="button button--primary" type="button" disabled data-i18n="next">下一题</button>
+        </div>
+      </section>
+
+      <section id="screen-result" class="screen screen--result" aria-labelledby="result-name" hidden>
+        <div class="result-layout">
+          <article class="collectible-card paper-panel">
+            <header class="collectible-card__header">
+              <span class="collectible-card__edition" data-i18n="brandMark">猫格</span>
+              <div>
+                <strong data-i18n="catCharacter">猫格收藏卡</strong>
+                <small data-i18n="brandNote">CAT CHARACTER FIELD NOTES</small>
+              </div>
+              <span class="collectible-card__serial" id="result-serial">NO. 00000</span>
+            </header>
+
+            <div class="result-profile">
+              <div class="result-profile__copy">
+                <p id="result-owner" class="eyebrow"></p>
+                <p class="result-profile__label" data-i18n="profileTitleLabel">猫格称号</p>
+                <h1 id="result-name"></h1>
+                <div id="result-code" class="trait-strip" aria-label="Personality traits"></div>
+                <p id="result-summary"></p>
+              </div>
+              <figure class="result-portrait">
+                <img id="result-avatar" alt="" />
+                <div id="result-avatar-picker" class="result-avatar-picker" hidden>
+                  <div class="result-avatar-picker__heading">
+                    <strong data-i18n="chooseResultPortrait">选择猫猫形象</strong>
+                    <button id="result-avatar-picker-close" type="button" data-i18n="collapse">收起</button>
+                  </div>
+                  <div id="result-avatar-grid" class="result-avatar-grid" role="radiogroup" aria-label="Cat portraits"></div>
+                </div>
+                <div class="result-portrait__actions">
+                  <button id="result-avatar-picker-toggle" class="button button--secondary" type="button" aria-expanded="false" aria-controls="result-avatar-picker" data-i18n="chooseResultPortrait">选择猫猫形象</button>
+                  <label id="result-photo-label" class="button button--secondary" for="result-photo" data-i18n="uploadResultPhoto">上传新照片</label>
+                  <input id="result-photo" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+                  <span id="result-photo-status" class="result-photo-status" role="status" data-i18n="changeResultPhotoHint">只换卡片照片，不会重新测试</span>
+                </div>
+              </figure>
+            </div>
+
+            <section class="axis-section" aria-labelledby="axis-title">
+              <div class="axis-section__title">
+                <h2 id="axis-title" data-i18n="fourDimensions">四维观察</h2>
+                <span data-i18n="notScore">不是分数，是偏好</span>
+              </div>
+              <div id="axis-results" class="axis-results"></div>
+            </section>
+          </article>
+
+          <aside class="care-sheet paper-panel" aria-labelledby="care-title">
+            <header class="care-sheet__header">
+              <h2 id="care-title" data-i18n="careNotes">相处备忘</h2>
+              <span data-i18n="careSubtitle">从日常环境开始</span>
+            </header>
+            <ul id="care-list" class="care-list"></ul>
+            <p class="result-disclaimer" data-i18n="resultDisclaimer">猫咪会随年龄、健康、环境和关系变化。结果适合帮助观察，不应替代兽医或合格行为咨询。</p>
+            <div class="result-actions">
+              <p class="screenshot-note" data-i18n="screenshotHint">喜欢这张卡？使用系统截图保存吧</p>
+              <button id="restart-button" class="button button--primary" type="button" data-i18n="testAgain">再测一只猫</button>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span data-i18n="footerMethod">原创四维模型 · 题目基于可观察的日常行为</span>
+    </footer>
+  </div>
+</body>
+</html>
