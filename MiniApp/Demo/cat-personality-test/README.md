@@ -6,9 +6,9 @@
 
 一款纯前端猫咪性格测试。主人根据猫咪最近 30 天的日常动作完成 32 道观察题，应用从四个原创维度生成 16 种猫格收藏卡：
 
-- 亲近节奏：社牛 ↔ 慢热
-- 领地偏好：探险 ↔ 安稳
-- 关系距离：贴贴 ↔ 独处
+- 亲近节奏：主动 ↔ 观察
+- 探索偏好：尝鲜 ↔ 守成
+- 行动风格：专注 ↔ 灵活
 - 刺激反应：细腻 ↔ 松弛
 
 首版形象能力：
@@ -20,6 +20,8 @@
 - 重新打开应用时仅恢复内置头像选择；上传的照片不会跨会话保留。
 
 每个维度包含 4 道正向题和 4 道反向题。单轴恰好打平时，维度条会显示“均衡”；16 型归类使用该轴最后一道非中性回答作平局判定，若整轴均为中性则归入低刺激一侧。
+
+v3 将原先与「亲近节奏」语义重叠的「关系距离」替换为「行动风格」，改为观察猫猫在玩耍、捕猎、解谜和受阻后的选择。升级后会保留猫猫名字与内置头像，但旧题库的未完成进度和历史结果不会套用到新维度，需重新作答。
 
 ### 隐私与权限
 
@@ -65,6 +67,8 @@ node scripts/preview-server.mjs
 
 ## English
 
-A pure-frontend BitFun MiniApp. The owner answers 32 questions about observable behavior during the past 30 days. The app produces one of 16 original profiles across four dimensions and renders it as a collectible card. It includes twelve illustrated portraits and can style an uploaded cat photo locally with Canvas.
+A pure-frontend BitFun MiniApp. The owner answers 32 questions about observable behavior during the past 30 days. The app produces one of 16 original profiles across four cat-native dimensions: approach rhythm, exploration preference, action style, and stimulus response. It renders the result as a collectible card, includes twelve illustrated portraits, and can style an uploaded cat photo locally with Canvas.
+
+Version 9 replaces the overlapping relationship-distance axis with action style, focusing on play, pursuit, problem solving, and responses to obstacles. Cat name and built-in portrait selection survive the upgrade, while incomplete answers and history from the previous question model are reset rather than reinterpreted.
 
 The app requests no network, filesystem, shell, Node, AI, or Agent access. It uses `app.storage` only for local progress and the five most recent results. Uploaded photos are processed entirely in browser Canvas, and the result portrait can be changed without recalculating the profile. The first release asks users to save the visible result with a system screenshot. Results are for reflection and fun, not medical or behavioral diagnosis.
