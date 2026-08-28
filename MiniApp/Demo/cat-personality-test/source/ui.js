@@ -61,9 +61,12 @@ const I18N = {
     collapse: '收起',
     changeResultPhotoHint: '只换卡片照片，不会重新测试',
     resultPhotoProcessing: '正在生成新的复古头像…',
-    resultPhotoReady: '照片已换好，截图即可保存新形象',
-    resultPortraitReady: '形象已换好，截图即可保存新形象',
-    screenshotHint: '喜欢这张卡？使用系统截图保存吧',
+    resultPhotoReady: '照片已换好，可以下载新的猫格卡片',
+    resultPortraitReady: '形象已换好，可以下载新的猫格卡片',
+    downloadCard: '下载猫格卡片',
+    savingCard: '正在生成 1600 × 900 PNG…',
+    downloaded: '猫格卡已下载到系统默认下载目录',
+    downloadFailed: '猫格卡生成失败，请稍后重试',
     testAgain: '再测一只猫',
     footerMethod: '原创四维模型 · 题目基于可观察的日常行为',
     scale1: '几乎从不',
@@ -139,9 +142,12 @@ const I18N = {
     collapse: 'Close',
     changeResultPhotoHint: 'Changes the card portrait only — your result stays the same',
     resultPhotoProcessing: 'Creating a new vintage portrait…',
-    resultPhotoReady: 'Photo changed. Take a screenshot to keep the new portrait.',
-    resultPortraitReady: 'Portrait changed. Take a screenshot to keep it.',
-    screenshotHint: 'Like this card? Save it with a system screenshot.',
+    resultPhotoReady: 'Photo changed. You can download a new card now.',
+    resultPortraitReady: 'Portrait changed. You can download a new card now.',
+    downloadCard: 'Download cat card',
+    savingCard: 'Creating a 1600 × 900 PNG…',
+    downloaded: 'Cat card downloaded to your default downloads folder',
+    downloadFailed: 'Could not create the cat card. Please try again.',
     testAgain: 'Test another cat',
     footerMethod: 'Original four-axis model · observable everyday behavior',
     scale1: 'Almost never',
@@ -342,6 +348,8 @@ const dom = {
   resultSerial: document.getElementById('result-serial'),
   axisResults: document.getElementById('axis-results'),
   careList: document.getElementById('care-list'),
+  download: document.getElementById('download-button'),
+  downloadStatus: document.getElementById('download-status'),
   restart: document.getElementById('restart-button'),
 };
 
@@ -954,6 +962,7 @@ function renderResult() {
   dom.resultAvatar.src = selectedAvatarUrl();
   dom.resultAvatar.alt = catName;
   dom.resultSerial.textContent = `NO. ${String(Math.abs(hashText(`${state.result.profileKey}:${catName}`)) % 100000).padStart(5, '0')}`;
+  dom.downloadStatus.textContent = '';
   setResultPhotoStatus('changeResultPhotoHint');
   setResultAvatarPicker(false, false);
   renderAxes();
@@ -1037,6 +1046,201 @@ function hashText(value) {
   return hash | 0;
 }
 
+function canvasRoundRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
+
+function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines = 3) {
+  const parts = isEnglish() ? String(text).split(/\s+/) : Array.from(String(text));
+  const separator = isEnglish() ? ' ' : '';
+  let line = '';
+  let lines = 0;
+  for (const part of parts) {
+    const candidate = line ? `${line}${separator}${part}` : part;
+    if (ctx.measureText(candidate).width > maxWidth && line) {
+      ctx.fillText(line, x, y + lines * lineHeight);
+      lines += 1;
+      if (lines >= maxLines) return;
+      line = part;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line && lines < maxLines) ctx.fillText(line, x, y + lines * lineHeight);
+}
+
+function safeFilename(value) {
+  return String(value || 'cat')
+    .replace(/[\\/:*?"<>|\s]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'cat';
+}
+
+function drawImageCover(ctx, image, x, y, width, height) {
+  const imageWidth = image.naturalWidth || image.width;
+  const imageHeight = image.naturalHeight || image.height;
+  const sourceRatio = imageWidth / imageHeight;
+  const targetRatio = width / height;
+  let sourceX = 0;
+  let sourceY = 0;
+  let sourceWidth = imageWidth;
+  let sourceHeight = imageHeight;
+  if (sourceRatio > targetRatio) {
+    sourceWidth = imageHeight * targetRatio;
+    sourceX = (imageWidth - sourceWidth) / 2;
+  } else {
+    sourceHeight = imageWidth / targetRatio;
+    sourceY = (imageHeight - sourceHeight) / 2;
+  }
+  ctx.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, x, y, width, height);
+}
+
+function canvasToBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('canvas_export_failed'));
+    }, 'image/png');
+  });
+}
+
+function downloadBlobInBrowser(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function downloadResultCard() {
+  if (!state.result || dom.download.disabled) return;
+  dom.download.disabled = true;
+  dom.downloadStatus.textContent = t('savingCard');
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1600;
+    canvas.height = 900;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas_context_unavailable');
+    const profile = PROFILES[state.result.profileKey];
+    const catName = state.catName || t('unnamedCat');
+    const portrait = await loadImage(selectedAvatarUrl());
+
+    ctx.fillStyle = '#3d5940';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ad4e2f';
+    ctx.fillRect(0, 0, 420, 62);
+    ctx.fillStyle = '#c28a26';
+    ctx.fillRect(420, 0, 570, 62);
+
+    ctx.fillStyle = '#f7f0e2';
+    canvasRoundRect(ctx, 36, 72, 1014, 786, 20);
+    ctx.fill();
+    canvasRoundRect(ctx, 1080, 72, 484, 786, 20);
+    ctx.fill();
+    ctx.strokeStyle = '#a98f76';
+    ctx.lineWidth = 2;
+    canvasRoundRect(ctx, 36, 72, 1014, 786, 20);
+    ctx.stroke();
+    canvasRoundRect(ctx, 1080, 72, 484, 786, 20);
+    ctx.stroke();
+
+    ctx.fillStyle = '#ad4e2f';
+    ctx.font = '700 24px ui-monospace, Menlo, monospace';
+    ctx.fillText(t('brandMark'), 76, 122);
+    ctx.fillStyle = '#2d251f';
+    ctx.font = '700 20px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillText(t('cardTitle'), 140, 118);
+    ctx.fillStyle = '#65564b';
+    ctx.font = '600 15px ui-monospace, Menlo, monospace';
+    ctx.fillText(t('cardMethod'), 140, 142);
+
+    ctx.fillStyle = '#65564b';
+    ctx.font = '600 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillText(t('cardOwner', { name: catName }), 76, 228);
+    ctx.fillStyle = '#2d251f';
+    ctx.font = `700 ${isEnglish() ? 48 : 62}px "Songti SC", Georgia, serif`;
+    wrapCanvasText(ctx, isEnglish() ? profile.en : profile.zh, 76, 305, 342, isEnglish() ? 56 : 68, 2);
+    ctx.fillStyle = '#ad4e2f';
+    ctx.font = '700 22px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    wrapCanvasText(ctx, profileCode(state.result.profileKey), 76, 390, 350, 34, 2);
+    ctx.fillStyle = '#5c4b3f';
+    ctx.font = '400 20px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    wrapCanvasText(ctx, isEnglish() ? profile.enSummary : profile.zhSummary, 76, 474, 338, 32, 4);
+
+    drawImageCover(ctx, portrait, 448, 170, 562, 440);
+    ctx.strokeStyle = '#a98f76';
+    ctx.strokeRect(448, 170, 562, 440);
+
+    const axisStartX = 58;
+    const axisWidth = 970 / AXIS_ORDER.length;
+    AXIS_ORDER.forEach((axisId, index) => {
+      const axis = AXES[axisId];
+      const score = state.result.scores[axisId];
+      const percent = Math.max(0, Math.min(100, Math.round(((score + MAX_AXIS_SCORE) / (MAX_AXIS_SCORE * 2)) * 100)));
+      const selectedPole = state.result.poles[axisId] === axis.positive.id ? axis.positive : axis.negative;
+      const strength = score === 0 ? 50 : Math.round(50 + (Math.abs(score) / MAX_AXIS_SCORE) * 50);
+      const x = axisStartX + index * axisWidth;
+      ctx.fillStyle = '#2d251f';
+      ctx.font = '700 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      ctx.fillText(isEnglish() ? axis.label.en : axis.label.zh, x + 12, 680);
+      ctx.fillStyle = '#ad4e2f';
+      ctx.font = '700 19px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      ctx.fillText(score === 0 ? (isEnglish() ? 'Balanced' : '均衡') : `${isEnglish() ? selectedPole.en : selectedPole.zh} ${strength}%`, x + 12, 713);
+      ctx.fillStyle = '#e1d5c2';
+      canvasRoundRect(ctx, x + 12, 733, axisWidth - 28, 9, 5);
+      ctx.fill();
+      ctx.fillStyle = '#ad4e2f';
+      canvasRoundRect(ctx, x + 12, 733, (axisWidth - 28) * (percent / 100), 9, 5);
+      ctx.fill();
+    });
+
+    ctx.fillStyle = '#2d251f';
+    ctx.font = '700 34px "Songti SC", Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(t('careNotes'), 1322, 142);
+    ctx.textAlign = 'left';
+    AXIS_ORDER.forEach((axisId, index) => {
+      const care = CARE[state.result.poles[axisId]];
+      const y = 205 + index * 132;
+      ctx.fillStyle = index === 3 ? '#405b43' : index === 1 || index === 2 ? '#c28a26' : '#ad4e2f';
+      canvasRoundRect(ctx, 1120, y - 24, 34, 34, 6);
+      ctx.fill();
+      ctx.fillStyle = '#fffaf1';
+      ctx.font = '700 15px ui-monospace, Menlo, monospace';
+      ctx.fillText(String(index + 1).padStart(2, '0'), 1127, y);
+      ctx.fillStyle = '#2d251f';
+      ctx.font = '400 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      wrapCanvasText(ctx, isEnglish() ? care.en : care.zh, 1174, y - 16, 340, 27, 4);
+    });
+
+    ctx.fillStyle = '#65564b';
+    ctx.font = '400 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    wrapCanvasText(ctx, t('cardDisclaimer'), 1322, 785, 370, 22, 2);
+    ctx.textAlign = 'left';
+
+    const blob = await canvasToBlob(canvas);
+    downloadBlobInBrowser(blob, `${safeFilename(catName)}-cat-character-card.png`);
+    dom.downloadStatus.textContent = t('downloaded');
+  } catch (error) {
+    console.warn('Cat card download failed', error);
+    dom.downloadStatus.textContent = t('downloadFailed');
+  } finally {
+    dom.download.disabled = false;
+  }
+}
+
 function rerenderForLocale() {
   applyStaticI18n();
   if (!dom.welcome.hidden) renderWelcome();
@@ -1049,6 +1253,7 @@ function bindEvents() {
   dom.resume.addEventListener('click', resumeQuiz);
   dom.back.addEventListener('click', previousQuestion);
   dom.next.addEventListener('click', nextQuestion);
+  dom.download.addEventListener('click', downloadResultCard);
   dom.restart.addEventListener('click', resetForAnotherCat);
   dom.catPhoto.addEventListener('change', handlePhotoUpload);
   dom.resultPhoto.addEventListener('change', handleResultPhotoUpload);
