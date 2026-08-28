@@ -11,10 +11,15 @@
     "日常观察",
     "娱乐"
   ],
-  "version": 11,
+  "version": 12,
   "created_at": 0,
   "updated_at": 0,
   "permissions": {
+    "fs": {
+      "write": [
+        "{user-selected}"
+      ]
+    },
     "shell": {
       "allow": []
     },
@@ -25,7 +30,7 @@
       "enabled": false
     },
     "host": {
-      "dialog": false,
+      "dialog": true,
       "clipboard_read": false,
       "clipboard_write": false,
       "open_external": false,

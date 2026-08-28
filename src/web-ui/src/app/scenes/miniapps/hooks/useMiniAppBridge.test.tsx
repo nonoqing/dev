@@ -19,7 +19,9 @@ const mocks = vi.hoisted(() => ({
   activeTabId: 'miniapp:market-lens',
   agentEnsureSession: vi.fn(),
   agentRun: vi.fn(),
+  apiInvoke: vi.fn(),
   apiListen: vi.fn(),
+  dialogSave: vi.fn(),
   openMainSession: vi.fn(),
   addExternalSession: vi.fn(),
   loadSessionHistory: vi.fn(),
@@ -34,7 +36,7 @@ vi.mock('@/infrastructure/api/service-api/MiniAppAPI', () => ({
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
-  save: vi.fn(),
+  save: (...args: unknown[]) => mocks.dialogSave(...args),
   message: vi.fn(),
 }));
 
@@ -53,7 +55,7 @@ vi.mock('../utils/buildMiniAppThemeVars', () => ({
 vi.mock('@/infrastructure/api/service-api/ApiClient', () => ({
   api: {
     listen: (...args: unknown[]) => mocks.apiListen(...args),
-    invoke: vi.fn(),
+    invoke: (...args: unknown[]) => mocks.apiInvoke(...args),
   },
 }));
 
@@ -98,9 +100,10 @@ const app = {
   id: 'market-lens',
   name: 'Market Lens',
   permissions: {
+    fs: { write: ['{user-selected}'] },
     node: { enabled: false },
     agent: { enabled: true },
-    host: { chat_composer: true },
+    host: { chat_composer: true, dialog: true },
   },
 } as unknown as MiniApp;
 
@@ -142,8 +145,10 @@ describe('useMiniAppBridge floating Agent routing', () => {
       workspacePath: '/repo',
     });
     mocks.agentRun.mockResolvedValue({ sessionId: 'session-1' });
+    mocks.apiInvoke.mockResolvedValue(null);
     mocks.openMainSession.mockResolvedValue(undefined);
     mocks.apiListen.mockImplementation(() => vi.fn());
+    mocks.dialogSave.mockResolvedValue('/Users/test/Downloads/card.png');
     useMiniAppStore.setState({ composerClaims: {} });
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -185,6 +190,27 @@ describe('useMiniAppBridge floating Agent routing', () => {
 
     expect(mocks.agentRun).toHaveBeenCalledTimes(1);
     expect(mocks.openMainSession).not.toHaveBeenCalled();
+  });
+
+  it('grants a strict MiniApp the exact path selected by the save dialog', async () => {
+    await act(async () => {
+      root.render(<BridgeHarness />);
+    });
+    const iframe = container.querySelector('iframe') as HTMLIFrameElement;
+
+    await dispatchRpc(iframe, 1, 'dialog.save', {
+      title: 'Save card',
+      defaultPath: 'card.png',
+    });
+
+    expect(mocks.dialogSave).toHaveBeenCalledWith({
+      title: 'Save card',
+      defaultPath: 'card.png',
+    });
+    expect(mocks.apiInvoke).toHaveBeenCalledWith('grant_miniapp_path', {
+      appId: 'market-lens',
+      path: '/Users/test/Downloads/card.png',
+    });
   });
 
   it('associates a composer draft with the session focused immediately before it', async () => {

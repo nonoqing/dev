@@ -64,8 +64,10 @@ const I18N = {
     resultPhotoReady: '照片已换好，可以下载新的猫格卡片',
     resultPortraitReady: '形象已换好，可以下载新的猫格卡片',
     downloadCard: '下载猫格卡片',
-    savingCard: '正在生成 1600 × 900 PNG…',
+    savingCard: '正在生成 1600 × 900 PNG，稍后请选择保存位置…',
     downloaded: '猫格卡已下载：{filename}',
+    savedTo: '猫格卡已保存到：{path}',
+    saveCancelled: '已取消保存',
     downloadFailed: '猫格卡生成失败，请稍后重试',
     testAgain: '再测一只猫',
     footerMethod: '原创四维模型 · 题目基于可观察的日常行为',
@@ -145,8 +147,10 @@ const I18N = {
     resultPhotoReady: 'Photo changed. You can download a new card now.',
     resultPortraitReady: 'Portrait changed. You can download a new card now.',
     downloadCard: 'Download cat card',
-    savingCard: 'Creating a 1600 × 900 PNG…',
+    savingCard: 'Creating a 1600 × 900 PNG. Choose where to save it next…',
     downloaded: 'Cat card downloaded: {filename}',
+    savedTo: 'Cat card saved to: {path}',
+    saveCancelled: 'Save cancelled',
     downloadFailed: 'Could not create the cat card. Please try again.',
     testAgain: 'Test another cat',
     footerMethod: 'Original four-axis model · observable everyday behavior',
@@ -1167,6 +1171,32 @@ function downloadBlobInBrowser(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+async function blobToBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const chunks = [];
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    chunks.push(String.fromCharCode(...bytes.subarray(index, index + chunkSize)));
+  }
+  return btoa(chunks.join(''));
+}
+
+async function saveCardBlob(blob, filename) {
+  if (typeof window.app?.dialog?.save === 'function' && typeof window.app?.fs?.writeFile === 'function') {
+    const savePath = await window.app.dialog.save({
+      title: t('downloadCard'),
+      defaultPath: filename,
+      filters: [{ name: 'PNG', extensions: ['png'] }],
+    });
+    if (!savePath) return { status: 'cancelled' };
+    await window.app.fs.writeFile(savePath, await blobToBase64(blob), { encoding: 'base64' });
+    return { status: 'saved', path: savePath };
+  }
+
+  downloadBlobInBrowser(blob, filename);
+  return { status: 'download-requested', filename };
+}
+
 function createCardSnapshot(result = state.result, catNameValue = state.catName) {
   if (!result) return null;
   const targetLocale = visibleLocale();
@@ -1305,8 +1335,14 @@ async function downloadResultCard() {
 
     const blob = await canvasToBlob(canvas);
     const filename = `${safeFilename(catName)}-${safeFilename(snapshot.profileTitle)}-${filenameTimestamp()}.png`;
-    downloadBlobInBrowser(blob, filename);
-    dom.downloadStatus.textContent = cardT('downloaded', { filename });
+    const saveResult = await saveCardBlob(blob, filename);
+    if (saveResult.status === 'cancelled') {
+      dom.downloadStatus.textContent = cardT('saveCancelled');
+    } else if (saveResult.status === 'saved') {
+      dom.downloadStatus.textContent = cardT('savedTo', { path: saveResult.path });
+    } else {
+      dom.downloadStatus.textContent = cardT('downloaded', { filename });
+    }
   } catch (error) {
     console.warn('Cat card download failed', error);
     dom.downloadStatus.textContent = cardT('downloadFailed');
