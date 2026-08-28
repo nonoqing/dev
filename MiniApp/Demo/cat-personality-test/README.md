@@ -16,7 +16,8 @@
 - 12 种统一复古印刷风格的内置猫咪头像，其中 02 金白、05 浅金渐层、09 银虎斑来自真实猫猫照片；第 03 位蓝金渐层形象保持不变。
 - 支持上传 PNG、JPEG 或 WebP，自家猫照片只在浏览器 Canvas 中裁剪、色阶化和抖动处理，不会上传或写入持久化存储。
 - 支持一次选择或持续添加多张自家猫照片，并可逐张删除；删除当前头像时会自动选中下一张，全部删除后才回到内置形象库。
-- 完成测试后也可直接更换结果卡形象：既能重新选择 12 个内置猫猫，也能上传新照片；切换不会重新计算猫格，可下载完整的 1600 × 900 PNG，或直接截图保存当前结果。
+- 开始答题时会锁定当时选中的猫猫形象，答完不会自行变化；完成测试后也可重新选择 12 个内置猫猫或上传新照片，切换不会重新计算猫格。
+- 下载严格以结果页当前所见为准：中文页面导出中文、英文页面导出英文，刚换好的头像会进入完整的 1600 × 900 PNG；文件名包含猫格称号与生成时间，避免误开旧卡片。
 - 重新打开应用时仅恢复内置头像选择；上传的照片不会跨会话保留。
 
 每个维度包含 4 道正向题和 4 道反向题。单轴恰好打平时，维度条会显示“均衡”；16 型归类使用该轴最后一道非中性回答作平局判定，若整轴均为中性则归入低刺激一侧。
@@ -71,4 +72,4 @@ A pure-frontend BitFun MiniApp. The owner answers 32 questions about observable 
 
 Version 9 replaces the overlapping relationship-distance axis with action style, focusing on play, pursuit, problem solving, and responses to obstacles. Cat name and built-in portrait selection survive the upgrade, while incomplete answers and history from the previous question model are reset rather than reinterpreted.
 
-The app requests no network, filesystem, shell, Node, AI, or Agent access. It uses `app.storage` only for local progress and the five most recent results. Uploaded photos are processed entirely in browser Canvas, and the result portrait can be changed without recalculating the profile. The full 1600 × 900 PNG card downloads through the browser to the system's default download folder; screenshots remain an optional fallback. Results are for reflection and fun, not medical or behavioral diagnosis.
+The app requests no network, filesystem, shell, Node, AI, or Agent access. It uses `app.storage` only for local progress and the five most recent results. The portrait selected at quiz start is pinned through the result, while the result portrait can still be changed without recalculating the profile. The full 1600 × 900 PNG is rendered from the result page's currently visible language, text, and portrait, then downloaded through the browser with a timestamped filename. Screenshots remain an optional fallback. Results are for reflection and fun, not medical or behavioral diagnosis.

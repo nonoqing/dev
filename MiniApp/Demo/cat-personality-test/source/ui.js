@@ -65,7 +65,7 @@ const I18N = {
     resultPortraitReady: '形象已换好，可以下载新的猫格卡片',
     downloadCard: '下载猫格卡片',
     savingCard: '正在生成 1600 × 900 PNG…',
-    downloaded: '猫格卡已下载到系统默认下载目录',
+    downloaded: '猫格卡已下载：{filename}',
     downloadFailed: '猫格卡生成失败，请稍后重试',
     testAgain: '再测一只猫',
     footerMethod: '原创四维模型 · 题目基于可观察的日常行为',
@@ -146,7 +146,7 @@ const I18N = {
     resultPortraitReady: 'Portrait changed. You can download a new card now.',
     downloadCard: 'Download cat card',
     savingCard: 'Creating a 1600 × 900 PNG…',
-    downloaded: 'Cat card downloaded to your default downloads folder',
+    downloaded: 'Cat card downloaded: {filename}',
     downloadFailed: 'Could not create the cat card. Please try again.',
     testAgain: 'Test another cat',
     footerMethod: 'Original four-axis model · observable everyday behavior',
@@ -305,6 +305,7 @@ const state = {
   avatarId: CAT_AVATARS[0].id,
   customAvatars: [],
   customAvatarCounter: 0,
+  quizPortrait: null,
   answers: Array(QUESTIONS.length).fill(null),
   current: 0,
   history: [],
@@ -353,20 +354,32 @@ const dom = {
   restart: document.getElementById('restart-button'),
 };
 
-function locale() {
-  const value = window.app && typeof window.app.locale === 'string' ? window.app.locale : document.documentElement.lang;
+function normalizeLocale(value) {
   return String(value || 'zh-CN').toLowerCase().startsWith('en') ? 'en-US' : 'zh-CN';
 }
 
-function isEnglish() { return locale() === 'en-US'; }
+function locale() {
+  const value = window.app && typeof window.app.locale === 'string' ? window.app.locale : document.documentElement.lang;
+  return normalizeLocale(value);
+}
+
+function visibleLocale() {
+  return normalizeLocale(document.documentElement.lang || locale());
+}
+
+function isEnglish(targetLocale = locale()) { return targetLocale === 'en-US'; }
 
 function format(template, values = {}) {
   return Object.entries(values).reduce((text, [key, value]) => text.replaceAll(`{${key}}`, String(value)), template);
 }
 
-function t(key, values) {
-  const table = I18N[locale()] || I18N['en-US'];
+function tForLocale(targetLocale, key, values) {
+  const table = I18N[targetLocale] || I18N['en-US'];
   return format(table[key] || I18N['en-US'][key] || key, values);
+}
+
+function t(key, values) {
+  return tForLocale(locale(), key, values);
 }
 
 function applyStaticI18n() {
@@ -403,6 +416,9 @@ function serializableState() {
     schemaVersion: STORAGE_SCHEMA_VERSION,
     catName: state.catName,
     avatarId: customAvatarById(state.avatarId) ? CAT_AVATARS[0].id : state.avatarId,
+    quizAvatarId: state.quizPortrait && CAT_AVATARS.some((avatar) => avatar.id === state.quizPortrait.id)
+      ? state.quizPortrait.id
+      : null,
     answers: state.answers,
     current: state.current,
     history: state.history.slice(0, 5),
@@ -416,6 +432,9 @@ function normalizeSaved(saved) {
   state.catName = typeof saved.catName === 'string' ? saved.catName.slice(0, 24) : '';
   if (CAT_AVATARS.some((avatar) => avatar.id === saved.avatarId)) state.avatarId = saved.avatarId;
   const isCurrentSchema = saved.schemaVersion === STORAGE_SCHEMA_VERSION;
+  if (isCurrentSchema && CAT_AVATARS.some((avatar) => avatar.id === saved.quizAvatarId)) {
+    state.quizPortrait = portraitSnapshot(saved.quizAvatarId);
+  }
   if (isCurrentSchema && Array.isArray(saved.answers) && saved.answers.length === QUESTIONS.length) {
     state.answers = saved.answers.map((value) => Number.isInteger(value) && value >= 1 && value <= 5 ? value : null);
   }
@@ -450,6 +469,14 @@ function selectedAvatarUrl() {
   const customAvatar = customAvatarById(state.avatarId);
   if (customAvatar) return customAvatar.dataUrl;
   return CAT_AVATAR_DATA[state.avatarId] || CAT_AVATAR_DATA[CAT_AVATARS[0].id] || '';
+}
+
+function portraitSnapshot(avatarId = state.avatarId) {
+  const customAvatar = customAvatarById(avatarId);
+  return {
+    id: avatarId,
+    url: customAvatar?.dataUrl || CAT_AVATAR_DATA[avatarId] || CAT_AVATAR_DATA[CAT_AVATARS[0].id] || '',
+  };
 }
 
 function avatarLabel(avatar) {
@@ -531,8 +558,11 @@ function selectResultAvatar(avatarId, closePicker = true) {
   const isBuiltIn = CAT_AVATARS.some((avatar) => avatar.id === avatarId);
   if (!isBuiltIn && !customAvatarById(avatarId)) return;
   state.avatarId = avatarId;
+  const portrait = portraitSnapshot(avatarId);
+  if (state.result) state.result.portrait = portrait;
   persist();
-  dom.resultAvatar.src = selectedAvatarUrl();
+  dom.resultAvatar.src = portrait.url;
+  dom.downloadStatus.textContent = '';
   setResultPhotoStatus('resultPortraitReady', 'success');
   renderResultAvatarGrid();
   if (closePicker) setResultAvatarPicker(false);
@@ -713,9 +743,11 @@ async function handleResultPhotoUpload(event) {
     const avatar = await createCustomAvatar(file);
     state.customAvatars.push(avatar);
     state.avatarId = avatar.id;
+    if (state.result) state.result.portrait = { id: avatar.id, url: avatar.dataUrl };
     persist();
     dom.resultAvatar.src = avatar.dataUrl;
     dom.resultAvatar.alt = state.catName || t('unnamedCat');
+    dom.downloadStatus.textContent = '';
     setResultPhotoStatus('resultPhotoReady', 'success');
     renderResultAvatarGrid();
   } catch (_error) {
@@ -779,6 +811,7 @@ function renderHistory() {
 
 function startNewQuiz() {
   state.catName = dom.catName.value.trim().slice(0, 24);
+  state.quizPortrait = portraitSnapshot();
   state.answers = Array(QUESTIONS.length).fill(null);
   state.current = 0;
   state.result = null;
@@ -788,6 +821,7 @@ function startNewQuiz() {
 
 function resumeQuiz() {
   state.catName = dom.catName.value.trim().slice(0, 24) || state.catName;
+  if (!state.quizPortrait) state.quizPortrait = portraitSnapshot();
   const firstMissing = state.answers.findIndex((value) => value === null);
   state.current = firstMissing >= 0 ? firstMissing : state.current;
   renderQuestion('question');
@@ -804,7 +838,7 @@ function renderQuestion(focusTarget = null) {
   dom.progressLabel.textContent = `${percent}%`;
   dom.progressFill.style.width = `${percent}%`;
   dom.questionTitle.textContent = isEnglish() ? question.en : question.zh;
-  dom.quizAvatar.src = selectedAvatarUrl();
+  dom.quizAvatar.src = state.quizPortrait?.url || selectedAvatarUrl();
   dom.quizAvatar.alt = state.catName || t('unnamedCat');
   dom.answerOptions.innerHTML = '';
 
@@ -914,7 +948,11 @@ function calculateResult(answers = state.answers) {
 
 function completeQuiz() {
   const result = calculateResult();
-  state.result = result;
+  state.result = {
+    ...result,
+    locale: visibleLocale(),
+    portrait: state.quizPortrait || portraitSnapshot(),
+  };
   const completedAt = new Date().toISOString();
   state.history.unshift({
     catName: state.catName,
@@ -959,7 +997,8 @@ function renderResult() {
   dom.resultOwner.textContent = t('ownerLine', { name: catName });
   dom.resultName.textContent = isEnglish() ? profile.en : profile.zh;
   dom.resultSummary.textContent = isEnglish() ? profile.enSummary : profile.zhSummary;
-  dom.resultAvatar.src = selectedAvatarUrl();
+  if (!state.result.portrait?.url) state.result.portrait = portraitSnapshot();
+  dom.resultAvatar.src = state.result.portrait.url;
   dom.resultAvatar.alt = catName;
   dom.resultSerial.textContent = `NO. ${String(Math.abs(hashText(`${state.result.profileKey}:${catName}`)) % 100000).padStart(5, '0')}`;
   dom.downloadStatus.textContent = '';
@@ -1029,6 +1068,7 @@ function resetForAnotherCat() {
   state.avatarId = CAT_AVATARS[0].id;
   state.customAvatars = [];
   state.customAvatarCounter = 0;
+  state.quizPortrait = null;
   state.answers = Array(QUESTIONS.length).fill(null);
   state.current = 0;
   state.result = null;
@@ -1057,9 +1097,9 @@ function canvasRoundRect(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
-function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines = 3) {
-  const parts = isEnglish() ? String(text).split(/\s+/) : Array.from(String(text));
-  const separator = isEnglish() ? ' ' : '';
+function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines = 3, targetIsEnglish = isEnglish()) {
+  const parts = targetIsEnglish ? String(text).split(/\s+/) : Array.from(String(text));
+  const separator = targetIsEnglish ? ' ' : '';
   let line = '';
   let lines = 0;
   for (const part of parts) {
@@ -1081,6 +1121,11 @@ function safeFilename(value) {
     .replace(/[\\/:*?"<>|\s]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 40) || 'cat';
+}
+
+function filenameTimestamp(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
 function drawImageCover(ctx, image, x, y, width, height) {
@@ -1122,19 +1167,47 @@ function downloadBlobInBrowser(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function createCardSnapshot(result = state.result, catNameValue = state.catName) {
+  if (!result) return null;
+  const targetLocale = visibleLocale();
+  const targetIsEnglish = isEnglish(targetLocale);
+  const profile = PROFILES[result.profileKey];
+  const visibleTraits = Array.from(dom.resultCode.children)
+    .map((node) => String(node.textContent || '').trim())
+    .filter(Boolean);
+  return {
+    locale: targetLocale,
+    isEnglish: targetIsEnglish,
+    result,
+    catName: catNameValue || tForLocale(targetLocale, 'unnamedCat'),
+    profileTitle: String(dom.resultName.textContent || '').trim() || (targetIsEnglish ? profile.en : profile.zh),
+    profileSummary: String(dom.resultSummary.textContent || '').trim() || (targetIsEnglish ? profile.enSummary : profile.zhSummary),
+    traits: visibleTraits.length === AXIS_ORDER.length
+      ? visibleTraits
+      : result.profileKey.split('-').map((id, index) => {
+        const axis = AXES[AXIS_ORDER[index]];
+        const pole = axis.positive.id === id ? axis.positive : axis.negative;
+        return targetIsEnglish ? pole.en : pole.zh;
+      }),
+    portraitUrl: dom.resultAvatar.getAttribute('src') || dom.resultAvatar.src || result.portrait?.url || '',
+  };
+}
+
 async function downloadResultCard() {
   if (!state.result || dom.download.disabled) return;
+  const snapshot = createCardSnapshot();
+  if (!snapshot?.portraitUrl) return;
+  const cardT = (key, values) => tForLocale(snapshot.locale, key, values);
   dom.download.disabled = true;
-  dom.downloadStatus.textContent = t('savingCard');
+  dom.downloadStatus.textContent = cardT('savingCard');
   try {
     const canvas = document.createElement('canvas');
     canvas.width = 1600;
     canvas.height = 900;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('canvas_context_unavailable');
-    const profile = PROFILES[state.result.profileKey];
-    const catName = state.catName || t('unnamedCat');
-    const portrait = await loadImage(selectedAvatarUrl());
+    const catName = snapshot.catName;
+    const portrait = await loadImage(snapshot.portraitUrl);
 
     ctx.fillStyle = '#3d5940';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1157,26 +1230,26 @@ async function downloadResultCard() {
 
     ctx.fillStyle = '#ad4e2f';
     ctx.font = '700 24px ui-monospace, Menlo, monospace';
-    ctx.fillText(t('brandMark'), 76, 122);
+    ctx.fillText(cardT('brandMark'), 76, 122);
     ctx.fillStyle = '#2d251f';
     ctx.font = '700 20px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    ctx.fillText(t('cardTitle'), 140, 118);
+    ctx.fillText(cardT('cardTitle'), 140, 118);
     ctx.fillStyle = '#65564b';
     ctx.font = '600 15px ui-monospace, Menlo, monospace';
-    ctx.fillText(t('cardMethod'), 140, 142);
+    ctx.fillText(cardT('cardMethod'), 140, 142);
 
     ctx.fillStyle = '#65564b';
     ctx.font = '600 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    ctx.fillText(t('cardOwner', { name: catName }), 76, 228);
+    ctx.fillText(cardT('cardOwner', { name: catName }), 76, 228);
     ctx.fillStyle = '#2d251f';
-    ctx.font = `700 ${isEnglish() ? 48 : 62}px "Songti SC", Georgia, serif`;
-    wrapCanvasText(ctx, isEnglish() ? profile.en : profile.zh, 76, 305, 342, isEnglish() ? 56 : 68, 2);
+    ctx.font = `700 ${snapshot.isEnglish ? 48 : 62}px "Songti SC", Georgia, serif`;
+    wrapCanvasText(ctx, snapshot.profileTitle, 76, 305, 342, snapshot.isEnglish ? 56 : 68, 2, snapshot.isEnglish);
     ctx.fillStyle = '#ad4e2f';
     ctx.font = '700 22px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    wrapCanvasText(ctx, profileCode(state.result.profileKey), 76, 390, 350, 34, 2);
+    wrapCanvasText(ctx, snapshot.traits.join(' · '), 76, 390, 350, 34, 2, snapshot.isEnglish);
     ctx.fillStyle = '#5c4b3f';
     ctx.font = '400 20px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    wrapCanvasText(ctx, isEnglish() ? profile.enSummary : profile.zhSummary, 76, 474, 338, 32, 4);
+    wrapCanvasText(ctx, snapshot.profileSummary, 76, 474, 338, 32, 4, snapshot.isEnglish);
 
     drawImageCover(ctx, portrait, 448, 170, 562, 440);
     ctx.strokeStyle = '#a98f76';
@@ -1186,17 +1259,17 @@ async function downloadResultCard() {
     const axisWidth = 970 / AXIS_ORDER.length;
     AXIS_ORDER.forEach((axisId, index) => {
       const axis = AXES[axisId];
-      const score = state.result.scores[axisId];
+      const score = snapshot.result.scores[axisId];
       const percent = Math.max(0, Math.min(100, Math.round(((score + MAX_AXIS_SCORE) / (MAX_AXIS_SCORE * 2)) * 100)));
-      const selectedPole = state.result.poles[axisId] === axis.positive.id ? axis.positive : axis.negative;
+      const selectedPole = snapshot.result.poles[axisId] === axis.positive.id ? axis.positive : axis.negative;
       const strength = score === 0 ? 50 : Math.round(50 + (Math.abs(score) / MAX_AXIS_SCORE) * 50);
       const x = axisStartX + index * axisWidth;
       ctx.fillStyle = '#2d251f';
       ctx.font = '700 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      ctx.fillText(isEnglish() ? axis.label.en : axis.label.zh, x + 12, 680);
+      ctx.fillText(snapshot.isEnglish ? axis.label.en : axis.label.zh, x + 12, 680);
       ctx.fillStyle = '#ad4e2f';
       ctx.font = '700 19px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      ctx.fillText(score === 0 ? (isEnglish() ? 'Balanced' : '均衡') : `${isEnglish() ? selectedPole.en : selectedPole.zh} ${strength}%`, x + 12, 713);
+      ctx.fillText(score === 0 ? (snapshot.isEnglish ? 'Balanced' : '均衡') : `${snapshot.isEnglish ? selectedPole.en : selectedPole.zh} ${strength}%`, x + 12, 713);
       ctx.fillStyle = '#e1d5c2';
       canvasRoundRect(ctx, x + 12, 733, axisWidth - 28, 9, 5);
       ctx.fill();
@@ -1208,10 +1281,10 @@ async function downloadResultCard() {
     ctx.fillStyle = '#2d251f';
     ctx.font = '700 34px "Songti SC", Georgia, serif';
     ctx.textAlign = 'center';
-    ctx.fillText(t('careNotes'), 1322, 142);
+    ctx.fillText(cardT('careNotes'), 1322, 142);
     ctx.textAlign = 'left';
     AXIS_ORDER.forEach((axisId, index) => {
-      const care = CARE[state.result.poles[axisId]];
+      const care = CARE[snapshot.result.poles[axisId]];
       const y = 205 + index * 132;
       ctx.fillStyle = index === 3 ? '#405b43' : index === 1 || index === 2 ? '#c28a26' : '#ad4e2f';
       canvasRoundRect(ctx, 1120, y - 24, 34, 34, 6);
@@ -1221,21 +1294,22 @@ async function downloadResultCard() {
       ctx.fillText(String(index + 1).padStart(2, '0'), 1127, y);
       ctx.fillStyle = '#2d251f';
       ctx.font = '400 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      wrapCanvasText(ctx, isEnglish() ? care.en : care.zh, 1174, y - 16, 340, 27, 4);
+      wrapCanvasText(ctx, snapshot.isEnglish ? care.en : care.zh, 1174, y - 16, 340, 27, 4, snapshot.isEnglish);
     });
 
     ctx.fillStyle = '#65564b';
     ctx.font = '400 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
-    wrapCanvasText(ctx, t('cardDisclaimer'), 1322, 785, 370, 22, 2);
+    wrapCanvasText(ctx, cardT('cardDisclaimer'), 1322, 785, 370, 22, 2, snapshot.isEnglish);
     ctx.textAlign = 'left';
 
     const blob = await canvasToBlob(canvas);
-    downloadBlobInBrowser(blob, `${safeFilename(catName)}-cat-character-card.png`);
-    dom.downloadStatus.textContent = t('downloaded');
+    const filename = `${safeFilename(catName)}-${safeFilename(snapshot.profileTitle)}-${filenameTimestamp()}.png`;
+    downloadBlobInBrowser(blob, filename);
+    dom.downloadStatus.textContent = cardT('downloaded', { filename });
   } catch (error) {
     console.warn('Cat card download failed', error);
-    dom.downloadStatus.textContent = t('downloadFailed');
+    dom.downloadStatus.textContent = cardT('downloadFailed');
   } finally {
     dom.download.disabled = false;
   }
@@ -1290,6 +1364,7 @@ void init();
 // MiniApp runtime and exposes no host capability.
 window.__CAT_CHARACTER_TEST__ = {
   calculateResult,
+  createCardSnapshot,
   questions: QUESTIONS,
   profiles: PROFILES,
   axes: AXES,
