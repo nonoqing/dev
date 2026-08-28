@@ -261,15 +261,7 @@ export function useMiniAppBridge(
             replyError(`MiniApp '${appId}' does not have host.dialog permission.`);
             return;
           }
-          const savePath = await dialogSave(params as unknown as Parameters<typeof dialogSave>[0]);
-          if (
-            typeof savePath === 'string' &&
-            savePath.length > 0 &&
-            app.permissions?.fs?.write?.includes('{user-selected}')
-          ) {
-            await api.invoke('grant_miniapp_path', { appId, path: savePath });
-          }
-          reply(savePath);
+          reply(await dialogSave(params as unknown as Parameters<typeof dialogSave>[0]));
           return;
         }
         if (method === 'dialog.message') {
